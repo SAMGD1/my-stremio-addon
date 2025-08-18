@@ -151,7 +151,14 @@ async function loadListsFromGitHub() {
     lists[listName] = { kind, items };
   }
   LISTS = lists;
-  console.log("Loaded lists:", Object.entries(LISTS).map(([k,v]) => `${k} (${v.kind})`).join(", ") || "(none)"));
+
+  // ✅ fixed (removed extra ")")
+  console.log(
+    "Loaded lists:",
+    Object.entries(LISTS)
+      .map(([k,v]) => `${k} (${v.kind})`)
+      .join(", ") || "(none)"
+  );
 }
 
 // initial load (best-effort)
