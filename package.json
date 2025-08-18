@@ -1,0 +1,11 @@
+{
+  "name": "my-stremio-addon",
+  "version": "1.0.0",
+  "description": "Private CSV lists for Stremio",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "csv-parse": "^6.1.0",
+    "stremio-addon-sdk": "^1.6.10"
+  }
+}
