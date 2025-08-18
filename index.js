@@ -1,48 +1,60 @@
 // My Lists add-on with Admin UI (GitHub-backed storage)
-// - One custom "My Lists" section
-// - Items open as real movie/series pages so streams from other add-ons load
-// - CSVs stored in your GitHub repo; uploads from /admin update the repo & auto-reload
+// One "My Lists" section. Items open as real movie/series pages so other
+// stream add-ons load. CSVs live in your GitHub repo and can be uploaded
+// from /admin (which commits and hot-reloads).
 
 const express = require("express");
 const multer = require("multer");
-const { addonBuilder } = require("stremio-addon-sdk");
 const { parse } = require("csv-parse/sync");
 
+// ---- env ----
 const PORT = Number(process.env.PORT) || 7000;
 const HOST = "0.0.0.0";
 
-// ------------ security / config (set these on Render -> Environment) ------------
-const SHARED_SECRET   = process.env.SHARED_SECRET   || "";         // optional
-const ADMIN_PASSWORD  = process.env.ADMIN_PASSWORD  || "";         // required for /admin (you said: Stremio_172)
-const GITHUB_TOKEN    = process.env.GITHUB_TOKEN    || "";         // required
-const GITHUB_OWNER    = process.env.GITHUB_OWNER    || "";         // required (your GitHub username)
-const GITHUB_REPO     = process.env.GITHUB_REPO     || "";         // required (repo that stores CSVs)
-const GITHUB_BRANCH   = process.env.GITHUB_BRANCH   || "main";
-const CSV_DIR         = process.env.CSV_DIR         || "data";
+// Secrets
+const SHARED_SECRET   = process.env.SHARED_SECRET || "";                 // optional
+const ADMIN_PASSWORD  = process.env.ADMIN_PASSWORD || "Stremio_172";     // <-- default per your note
 
-if (!ADMIN_PASSWORD) console.warn("WARNING: ADMIN_PASSWORD is not set. Set it on Render to access /admin.");
+// GitHub repo that stores CSVs
+const GITHUB_TOKEN    = process.env.GITHUB_TOKEN  || "";
+const GITHUB_OWNER    = process.env.GITHUB_OWNER  || "";
+const GITHUB_REPO     = process.env.GITHUB_REPO   || "";
+const GITHUB_BRANCH   = process.env.GITHUB_BRANCH || "main";
+const CSV_DIR         = process.env.CSV_DIR       || "data";
+
+// sanity hints
 if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
-  console.warn("WARNING: GitHub env vars missing. Set GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO.");
+  console.warn("WARNING: Set GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO in Render → Environment.");
+}
+if (!ADMIN_PASSWORD) {
+  console.warn("WARNING: ADMIN_PASSWORD missing; /admin will be unusable.");
 }
 
-// ------------ helpers ------------
+// ---- helpers ----
 const CINEMETA = "https://v3-cinemeta.strem.io";
 const looksSeries = (name) => /series/i.test(name || "");
 const isImdb = (v) => /^tt\d+$/i.test(String(v || ""));
 
-// memory stores
-let LISTS = {};                         // { listName: { kind: 'movie'|'series', items: [...] } }
-const PREFERRED_KIND = new Map();       // imdbId -> 'movie'|'series'
-const metaCache = new Map();            // `${kind}:${id}` -> meta
+// in-memory stores
+let LISTS = {};                   // { listName: { kind: 'movie'|'series', items: [...] } }
+const PREFERRED_KIND = new Map(); // imdbId -> 'movie'|'series'
+const metaCache = new Map();      // `${kind}:${id}` -> meta
 
-// --------- GitHub helpers (Contents API) ----------
+// tiny fetch
+async function fetchRaw(url) {
+  const r = await fetch(url, { headers: { Accept: "text/plain" } });
+  if (!r.ok) throw new Error(`raw fetch failed ${r.status}`);
+  return r.text();
+}
+
+// ---- GitHub Content API ----
 async function ghRequest(method, path, body) {
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${path}`;
   const r = await fetch(url, {
     method,
     headers: {
-      "Authorization": `Bearer ${GITHUB_TOKEN}`,
-      "Accept": "application/vnd.github+json",
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
       "Content-Type": "application/json",
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -62,7 +74,7 @@ async function ghListCSVs() {
       (f) => f.type === "file" && /\.csv$/i.test(f.name)
     );
   } catch (e) {
-    if (String(e.message).includes("404")) return []; // folder missing = empty
+    if (String(e.message).includes("404")) return [];
     throw e;
   }
 }
@@ -81,7 +93,7 @@ async function ghGetFileSha(relpath) {
 
 async function ghPutCSV(filename, base64Content) {
   const rel = `${CSV_DIR}/${filename}`;
-  const sha = await ghGetFileSha(rel); // include sha to update if exists
+  const sha = await ghGetFileSha(rel);
   const body = {
     message: `Upload ${filename}`,
     content: base64Content,
@@ -91,13 +103,7 @@ async function ghPutCSV(filename, base64Content) {
   return ghRequest("PUT", `/contents/${encodeURIComponent(rel)}`, body);
 }
 
-async function fetchRaw(url) {
-  const r = await fetch(url, { headers: { Accept: "text/plain" } });
-  if (!r.ok) throw new Error(`raw fetch failed ${r.status}`);
-  return r.text();
-}
-
-// --------- Cinemeta helpers ----------
+// ---- Cinemeta ----
 async function fetchCinemeta(kind, imdbId) {
   if (!isImdb(imdbId)) return null;
   const key = `${kind}:${imdbId}`;
@@ -116,9 +122,9 @@ async function fetchCinemeta(kind, imdbId) {
   }
 }
 
-// --------- Load CSVs from GitHub ---------
+// ---- Load CSVs into LISTS ----
 async function loadListsFromGitHub() {
-  const files = await ghListCSVs(); // [{name, download_url}, ...]
+  const files = await ghListCSVs();
   const lists = {};
   PREFERRED_KIND.clear();
 
@@ -133,7 +139,7 @@ async function loadListsFromGitHub() {
       if (isImdb(imdbId)) PREFERRED_KIND.set(imdbId, kind);
       return {
         id: imdbId || `local:${r.Title || "Untitled"}:${r.Year || ""}`,
-        type: kind, // REAL type on item (so stream add-ons trigger)
+        type: kind,
         name: (r.Title || "Untitled").trim(),
         year: r.Year ? Number(r.Year) : undefined,
         releaseDate: r["Release Date"] || undefined,
@@ -152,13 +158,24 @@ async function loadListsFromGitHub() {
   );
 }
 
-// best-effort initial load (will show empty catalogs if it fails)
-loadListsFromGitHub().catch((e) => console.warn("Initial GitHub load failed:", e.message));
+// initial best-effort load
+loadListsFromGitHub().catch((e) => console.warn("Initial load failed:", e.message));
 
-// --------- Manifest & builder ----------
-const catalogs = () =>
-  Object.keys(LISTS).map((name) => ({
-    type: "mylists",                         // custom section
+// ---- Stremio manifest, computed on demand (so we never mutate a builder) ----
+const baseManifest = {
+  id: "org.my.csvlists",
+  version: "5.0.0",
+  name: "My Lists",
+  description:
+    "Your CSV lists under one section; opens real movie/series pages so streams load.",
+  resources: ["catalog", "meta"],
+  types: ["mylists", "movie", "series"],
+  idPrefixes: ["tt"],
+};
+
+function catalogs() {
+  return Object.keys(LISTS).map((name) => ({
+    type: "mylists",
     id: `list:${name}`,
     name: `🗂 My Lists • ${name}`,
     extraSupported: ["search", "skip", "limit", "sort"],
@@ -181,100 +198,17 @@ const catalogs = () =>
       },
     ],
   }));
-
-const manifest = {
-  id: "org.my.csvlists",
-  version: "5.0.1",
-  name: "My Lists",
-  description:
-    "Your CSV lists under one section; opens real movie/series pages so streams load.",
-  resources: ["catalog", "meta"],
-  types: ["mylists", "movie", "series"],
-  idPrefixes: ["tt"],
-  catalogs: catalogs(),
-};
-
-const builder = new addonBuilder(manifest);
-
-// enrich minimal meta for catalog cards (poster, rating/runtime for sort)
-async function enrichForCard(prefKind, m) {
-  const imdbId = isImdb(m.id) ? m.id : null;
-  if (!imdbId) return m;
-  const first = await fetchCinemeta(prefKind, imdbId);
-  const cm = first || (await fetchCinemeta(prefKind === "movie" ? "series" : "movie", imdbId));
-  return cm
-    ? {
-        ...m,
-        poster: cm.poster || m.poster,
-        background: cm.background || m.background,
-        logo: cm.logo || m.logo,
-        imdbRating: cm.imdbRating ?? m.imdbRating,
-        runtime: cm.runtime ?? m.runtime,
-        year: m.year ?? cm.year,
-        description: m.description ?? cm.description,
-      }
-    : m;
 }
 
-builder.defineCatalogHandler(async ({ id, extra }) => {
-  if (!id?.startsWith("list:")) return { metas: [] };
-  const listName = id.slice(5);
-  const list = LISTS[listName];
-  if (!list) return { metas: [] };
-
-  const pref = list.kind;
-  const enrichedAll = await Promise.all((list.items || []).map((m) => enrichForCard(pref, m)));
-
-  const q = (extra?.search || "").toLowerCase().trim();
-  let metas = q
-    ? enrichedAll.filter(
-        (m) =>
-          (m.name || "").toLowerCase().includes(q) ||
-          (m.description || "").toLowerCase().includes(q)
-      )
-    : enrichedAll;
-
-  const sort = (extra?.sort || "").toLowerCase();
-  const dir = sort.endsWith("_asc") ? 1 : -1;
-  const byDate = (a, b) =>
-    ((new Date(a.releaseDate || `${a.year || 0}-01-01`)).getTime() -
-      (new Date(b.releaseDate || `${b.year || 0}-01-01`)).getTime()) * dir;
-  const byRating = (a, b) => ((a.imdbRating || 0) - (b.imdbRating || 0)) * dir;
-  const byRuntime = (a, b) => ((a.runtime || 0) - (b.runtime || 0)) * dir;
-  const byName = (a, b) => (a.name || "").localeCompare(b.name || "") * dir;
-
-  if (sort.startsWith("date_")) metas = [...metas].sort(byDate);
-  if (sort.startsWith("rating_")) metas = [...metas].sort(byRating);
-  if (sort.startsWith("runtime_")) metas = [...metas].sort(byRuntime);
-  if (sort.startsWith("name_")) metas = [...metas].sort(byName);
-
-  const skip = Number(extra?.skip || 0);
-  const limit = Math.min(Number(extra?.limit || 100), 200);
-  metas = metas.slice(skip, skip + limit);
-
-  return { metas };
-});
-
-builder.defineMetaHandler(async ({ id }) => {
-  const imdbId = isImdb(id) ? id : null;
-  if (!imdbId) return { meta: { id, type: "movie", name: "Unknown item" } };
-
-  const pref = PREFERRED_KIND.get(imdbId) || "movie";
-  let meta = await fetchCinemeta(pref, imdbId);
-  let kind = pref;
-
-  if (!meta) {
-    const other = pref === "movie" ? "series" : "movie";
-    meta = await fetchCinemeta(other, imdbId);
-    if (meta) kind = other;
-  }
-  if (!meta) return { meta: { id, type: kind } };
-  return { meta: { ...meta, id, type: kind } };
-});
-
-// --------- Express server: addon + admin UI ----------
+// ---- Express app (serves both Stremio routes + Admin) ----
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
+
+// CORS for Stremio
+app.use((_, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  next();
+});
 
 function addonAllowed(req) {
   if (!SHARED_SECRET) return true;
@@ -286,38 +220,144 @@ function adminAllowed(req) {
   return (url.searchParams.get("admin") || req.headers["x-admin-key"]) === ADMIN_PASSWORD;
 }
 
-// health
-app.get("/health", (_req, res) => res.status(200).send("ok"));
+// ---- HEALTH ----
+app.get("/health", (_, res) => res.status(200).send("ok"));
 
-// ✅ Serve manifest ourselves to avoid SDK serialization issues
+// ---- STREMIO: MANIFEST ----
 app.get("/manifest.json", (req, res) => {
-  if (!addonAllowed(req)) return res.status(403).send("Forbidden");
   try {
-    // update catalogs snapshot on every manifest hit (so new CSVs show up immediately)
-    builder.manifest.catalogs = catalogs();
-    res.json(builder.manifest);
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const manifest = { ...baseManifest, catalogs: catalogs() };
+    res.json(manifest);
   } catch (e) {
     console.error("Manifest error:", e);
-    res.status(500).send("Manifest error");
+    res.status(500).send("Internal Server Error");
   }
 });
 
-// admin page
+// helper: parse Stremio /catalog extra
+function parseExtra(extraStr, queryObj) {
+  const params = new URLSearchParams(extraStr || "");
+  const fromPath = Object.fromEntries(params.entries());
+  return { ...fromPath, ...(queryObj || {}) };
+}
+
+// ---- STREMIO: CATALOG ----
+app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+
+    const { id } = req.params;
+    if (!id?.startsWith("list:")) return res.json({ metas: [] });
+
+    const listName = id.slice(5);
+    const list = LISTS[listName];
+    if (!list) return res.json({ metas: [] });
+
+    const extra = parseExtra(req.params.extra, req.query);
+
+    // Enrich minimal card info (poster/rating/runtime) via Cinemeta
+    async function enrichForCard(prefKind, m) {
+      const imdbId = isImdb(m.id) ? m.id : null;
+      if (!imdbId) return m;
+      const first = await fetchCinemeta(prefKind, imdbId);
+      const cm =
+        first || (await fetchCinemeta(prefKind === "movie" ? "series" : "movie", imdbId));
+      return cm
+        ? {
+            ...m,
+            poster: cm.poster || m.poster,
+            background: cm.background || m.background,
+            logo: cm.logo || m.logo,
+            imdbRating: cm.imdbRating ?? m.imdbRating,
+            runtime: cm.runtime ?? m.runtime,
+            year: m.year ?? cm.year,
+            description: m.description ?? cm.description,
+          }
+        : m;
+    }
+
+    const pref = list.kind;
+    const enrichedAll = await Promise.all((list.items || []).map((m) => enrichForCard(pref, m)));
+
+    // search
+    const q = String(extra.search || "").toLowerCase().trim();
+    let metas = q
+      ? enrichedAll.filter(
+          (m) =>
+            (m.name || "").toLowerCase().includes(q) ||
+            (m.description || "").toLowerCase().includes(q)
+        )
+      : enrichedAll;
+
+    // sort
+    const sort = String(extra.sort || "").toLowerCase();
+    const dir = sort.endsWith("_asc") ? 1 : -1;
+    const byDate = (a, b) =>
+      ((new Date(a.releaseDate || `${a.year || 0}-01-01`)).getTime() -
+        (new Date(b.releaseDate || `${b.year || 0}-01-01`)).getTime()) * dir;
+    const byRating = (a, b) => ((a.imdbRating || 0) - (b.imdbRating || 0)) * dir;
+    const byRuntime = (a, b) => ((a.runtime || 0) - (b.runtime || 0)) * dir;
+    const byName = (a, b) => (a.name || "").localeCompare(b.name || "") * dir;
+
+    if (sort.startsWith("date_")) metas = [...metas].sort(byDate);
+    if (sort.startsWith("rating_")) metas = [...metas].sort(byRating);
+    if (sort.startsWith("runtime_")) metas = [...metas].sort(byRuntime);
+    if (sort.startsWith("name_")) metas = [...metas].sort(byName);
+
+    const skip = Number(extra.skip || 0);
+    const limit = Math.min(Number(extra.limit || 100), 200);
+    metas = metas.slice(skip, skip + limit);
+
+    res.json({ metas });
+  } catch (e) {
+    console.error("Catalog error:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+// ---- STREMIO: META ----
+app.get("/meta/:type/:id.json", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const imdbId = req.params.id;
+    if (!isImdb(imdbId))
+      return res.json({ meta: { id: imdbId, type: "movie", name: "Unknown item" } });
+
+    const pref = PREFERRED_KIND.get(imdbId) || "movie";
+    let meta = await fetchCinemeta(pref, imdbId);
+    let kind = pref;
+
+    if (!meta) {
+      const other = pref === "movie" ? "series" : "movie";
+      meta = await fetchCinemeta(other, imdbId);
+      if (meta) kind = other;
+    }
+    if (!meta) return res.json({ meta: { id: imdbId, type: kind } });
+    res.json({ meta: { ...meta, id: imdbId, type: kind } });
+  } catch (e) {
+    console.error("Meta error:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+// ---- ADMIN UI ----
+function absoluteBase(req) {
+  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const host = req.headers["x-forwarded-host"] || req.get("host");
+  return `${proto}://${host}`;
+}
+
 app.get("/admin", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   let files = [];
   try {
     files = await ghListCSVs();
-  } catch {}
+  } catch (_) {}
   const list = files.map((f) => `<li>${f.name}</li>`).join("") || "<li>(none yet)</li>";
-
-  // build a correct external URL whether RENDER_EXTERNAL_URL has protocol or not
-  const external = process.env.RENDER_EXTERNAL_URL || "";
-  const baseUrl = external
-    ? (external.startsWith("http") ? external : `https://${external}`).replace(/\/$/, "")
-    : "<your-app>.onrender.com";
-
-  res.type("html").send(`<!doctype html>
+  const manifestUrl = `${absoluteBase(req)}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`;
+  res.type("html").send(`
+<!doctype html>
 <html>
 <head>
 <title>My Lists Admin</title>
@@ -344,7 +384,7 @@ small{color:#666}
       <input type="text" name="name" placeholder="Marvel_Movies" required />
       <label>CSV file</label>
       <input type="file" name="file" accept=".csv" required />
-      <p><small>If filename contains “series”, it will be treated as a Series list.</small></p>
+      <p><small>If filename contains “series”, it is treated as a Series list.</small></p>
       <button type="submit">Upload & Save</button>
     </form>
   </div>
@@ -360,13 +400,13 @@ small{color:#666}
   <div class="card">
     <h3>Manifest URL</h3>
     <p>Install in Stremio via:</p>
-    <p class="code">${baseUrl}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}</p>
+    <p class="code">${manifestUrl}</p>
   </div>
 </body>
 </html>`);
 });
 
-// upload API -> commits CSV into GitHub repo under CSV_DIR; then reloads
+// Upload & reload
 app.post("/api/upload", upload.single("file"), async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -377,41 +417,34 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     const base64 = Buffer.from(req.file.buffer).toString("base64");
     await ghPutCSV(filename, base64);
     await loadListsFromGitHub();
-    // refresh catalogs snapshot so /manifest shows the new shelf immediately
-    builder.manifest.catalogs = catalogs();
     res
       .status(200)
-      .send(`Uploaded ${filename} and reloaded. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
+      .send(
+        `Uploaded ${filename} and reloaded. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`
+      );
   } catch (e) {
-    console.error("Upload error:", e);
+    console.error(e);
     res.status(500).send(String(e));
   }
 });
 
-// manual reload endpoint
 app.post("/api/reload", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
     await loadListsFromGitHub();
-    builder.manifest.catalogs = catalogs();
-    res.status(200).send(`Reloaded. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
+    res
+      .status(200)
+      .send(`Reloaded. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   } catch (e) {
+    console.error(e);
     res.status(500).send(String(e));
   }
 });
 
-// mount the SDK interface for /catalog and /meta (manifest is served above)
-const addonInterface = builder.getInterface();
-app.use((req, res, next) => {
-  if (/\/(catalog|meta)/.test(req.url)) {
-    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
-  }
-  return addonInterface(req, res);
-});
-
-// start
+// ---- start ----
 app.listen(PORT, HOST, () => {
-  const base = `http://localhost:${PORT}`;
-  console.log(`Admin: ${base}/admin${ADMIN_PASSWORD ? `?admin=${ADMIN_PASSWORD}` : ""}`);
-  console.log(`Manifest: ${base}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
+  console.log(`Admin: http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
+  console.log(
+    `Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`
+  );
 });
