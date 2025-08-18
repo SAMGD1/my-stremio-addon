@@ -411,7 +411,7 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
     if (!req.file) return res.status(400).send("Missing file");
-    const nameInput = String(req.body.name || "").trim().replace(/[^A-Za-z0-9_\-]/g, "_");
+    const nameInput = String(req.body.name || "").trim().replace(/[^A-Za-z0-9_\-]/g, " ");
     if (!nameInput) return res.status(400).send("Bad name");
     const filename = `${nameInput}.csv`;
     const base64 = Buffer.from(req.file.buffer).toString("base64");
