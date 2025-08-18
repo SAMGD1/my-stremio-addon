@@ -169,15 +169,15 @@ const baseManifest = {
   description:
     "Your CSV lists under one section; opens real movie/series pages so streams load.",
   resources: ["catalog", "meta"],
-  types: ["mylists", "movie", "series"],
+  types: ["my lists", "movie", "series"],
   idPrefixes: ["tt"],
 };
 
 function catalogs() {
   return Object.keys(LISTS).map((name) => ({
-    type: "mylists",
+    type: "My lists",
     id: `list:${name}`,
-    name: `🗂 My Lists • ${name}`,
+    name: `🗂 ${name}`,
     extraSupported: ["search", "skip", "limit", "sort"],
     extra: [
       { name: "search" },
