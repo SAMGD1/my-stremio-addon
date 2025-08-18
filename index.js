@@ -6,7 +6,7 @@
 // ENV required on Render:
 //   PORT                (Render sets this)
 //   SHARED_SECRET       (optional) addon access key; install with ?key=... if set
-//   ADMIN_PASSWORD      (required) password for /admin UI
+//   ADMIN_PASSWORD      (required) password for /admin UI (defaults to "Stremio_172" here)
 //   GITHUB_TOKEN        (required) PAT with "repo" scope (classic) or Contents write access
 //   GITHUB_OWNER        (required) your GitHub username
 //   GITHUB_REPO         (required) your repo name, e.g. "my-stremio-addon-data"
@@ -25,7 +25,9 @@ const { parse } = require("csv-parse/sync");
 const PORT = Number(process.env.PORT) || 7000;
 const HOST = "0.0.0.0";
 const SHARED_SECRET = process.env.SHARED_SECRET || "";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ""; // set this on Render
+
+// NOTE: you asked for this specific password. You can still override via env var.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 
 const GITHUB_TOKEN  = process.env.GITHUB_TOKEN  || "";
 const GITHUB_OWNER  = process.env.GITHUB_OWNER  || "";
@@ -152,11 +154,10 @@ async function loadListsFromGitHub() {
   }
   LISTS = lists;
 
-  // ✅ fixed (removed extra ")")
   console.log(
     "Loaded lists:",
     Object.entries(LISTS)
-      .map(([k,v]) => `${k} (${v.kind})`)
+      .map(([k, v]) => `${k} (${v.kind})`)
       .join(", ") || "(none)"
   );
 }
@@ -165,27 +166,32 @@ async function loadListsFromGitHub() {
 loadListsFromGitHub().catch(e => console.warn("Initial GitHub load failed:", e.message));
 
 // --------- Stremio manifest & handlers ---------
-const catalogs = () => Object.keys(LISTS).map(name => ({
-  type: "mylists",
-  id: `list:${name}`,
-  name: `🗂 My Lists • ${name}`,
-  extraSupported: ["search", "skip", "limit", "sort"],
-  extra: [
-    { name: "search" }, { name: "skip" }, { name: "limit" },
-    { name: "sort", options: [
-      "date_asc","date_desc",
-      "rating_asc","rating_desc",
-      "runtime_asc","runtime_desc",
-      "name_asc","name_desc"
-    ]}
-  ]
-}));
+const catalogs = () =>
+  Object.keys(LISTS).map(name => ({
+    type: "mylists",
+    id: `list:${name}`,
+    name: `🗂 My Lists • ${name}`,
+    extraSupported: ["search", "skip", "limit", "sort"],
+    extra: [
+      { name: "search" }, { name: "skip" }, { name: "limit" },
+      {
+        name: "sort",
+        options: [
+          "date_asc", "date_desc",
+          "rating_asc", "rating_desc",
+          "runtime_asc", "runtime_desc",
+          "name_asc", "name_desc"
+        ]
+      }
+    ]
+  }));
 
 const manifest = {
   id: "org.my.csvlists",
   version: "5.0.0",
   name: "My Lists",
-  description: "Your CSV lists under one section; opens real movie/series pages so streams load.",
+  description:
+    "Your CSV lists under one section; opens real movie/series pages so streams load.",
   resources: ["catalog", "meta"],
   types: ["mylists", "movie", "series"],
   idPrefixes: ["tt"],
@@ -199,17 +205,21 @@ async function enrichForCard(prefKind, m) {
   const imdbId = isImdb(m.id) ? m.id : null;
   if (!imdbId) return m;
   const first = await fetchCinemeta(prefKind, imdbId);
-  const cm = first || await fetchCinemeta(prefKind === "movie" ? "series" : "movie", imdbId);
-  return cm ? {
-    ...m,
-    poster: cm.poster || m.poster,
-    background: cm.background || m.background,
-    logo: cm.logo || m.logo,
-    imdbRating: cm.imdbRating ?? m.imdbRating,
-    runtime: cm.runtime ?? m.runtime,
-    year: m.year ?? cm.year,
-    description: m.description ?? cm.description
-  } : m;
+  const cm =
+    first ||
+    (await fetchCinemeta(prefKind === "movie" ? "series" : "movie", imdbId));
+  return cm
+    ? {
+        ...m,
+        poster: cm.poster || m.poster,
+        background: cm.background || m.background,
+        logo: cm.logo || m.logo,
+        imdbRating: cm.imdbRating ?? m.imdbRating,
+        runtime: cm.runtime ?? m.runtime,
+        year: m.year ?? cm.year,
+        description: m.description ?? cm.description
+      }
+    : m;
 }
 
 builder.defineCatalogHandler(async ({ id, extra }) => {
@@ -219,29 +229,35 @@ builder.defineCatalogHandler(async ({ id, extra }) => {
   if (!list) return { metas: [] };
 
   const pref = list.kind;
-  const enrichedAll = await Promise.all((list.items || []).map(m => enrichForCard(pref, m)));
+  const enrichedAll = await Promise.all(
+    (list.items || []).map(m => enrichForCard(pref, m))
+  );
 
   // search
   const q = (extra?.search || "").toLowerCase().trim();
   let metas = q
-    ? enrichedAll.filter(m =>
-        (m.name || "").toLowerCase().includes(q) ||
-        (m.description || "").toLowerCase().includes(q)
+    ? enrichedAll.filter(
+        m =>
+          (m.name || "").toLowerCase().includes(q) ||
+          (m.description || "").toLowerCase().includes(q)
       )
     : enrichedAll;
 
   // sort
   const sort = (extra?.sort || "").toLowerCase();
   const dir = sort.endsWith("_asc") ? 1 : -1;
-  const byDate    = (a,b) => ((new Date(a.releaseDate || `${a.year || 0}-01-01`)).getTime() - (new Date(b.releaseDate || `${b.year || 0}-01-01`)).getTime()) * dir;
-  const byRating  = (a,b) => ((a.imdbRating || 0) - (b.imdbRating || 0)) * dir;
-  const byRuntime = (a,b) => ((a.runtime || 0) - (b.runtime || 0)) * dir;
-  const byName    = (a,b) => (a.name || "").localeCompare(b.name || "") * dir;
+  const byDate = (a, b) =>
+    ((new Date(a.releaseDate || `${a.year || 0}-01-01`)).getTime() -
+      (new Date(b.releaseDate || `${b.year || 0}-01-01`)).getTime()) * dir;
+  const byRating = (a, b) => ((a.imdbRating || 0) - (b.imdbRating || 0)) * dir;
+  const byRuntime = (a, b) => ((a.runtime || 0) - (b.runtime || 0)) * dir;
+  const byName = (a, b) =>
+    (a.name || "").localeCompare(b.name || "") * dir;
 
-  if (sort.startsWith("date_"))    metas = [...metas].sort(byDate);
-  if (sort.startsWith("rating_"))  metas = [...metas].sort(byRating);
+  if (sort.startsWith("date_")) metas = [...metas].sort(byDate);
+  if (sort.startsWith("rating_")) metas = [...metas].sort(byRating);
   if (sort.startsWith("runtime_")) metas = [...metas].sort(byRuntime);
-  if (sort.startsWith("name_"))    metas = [...metas].sort(byName);
+  if (sort.startsWith("name_")) metas = [...metas].sort(byName);
 
   // page
   const skip = Number(extra?.skip || 0);
@@ -280,18 +296,40 @@ function addonAllowed(req) {
 }
 function adminAllowed(req) {
   const url = new URL(req.originalUrl, `http://${req.headers.host}`);
-  return (url.searchParams.get("admin") || req.headers["x-admin-key"]) === ADMIN_PASSWORD;
+  return (
+    (url.searchParams.get("admin") || req.headers["x-admin-key"]) ===
+    ADMIN_PASSWORD
+  );
 }
 
 // health
-app.get("/health", (req,res)=> res.status(200).send("ok"));
+app.get("/health", (req, res) => res.status(200).send("ok"));
 
 // admin page (very simple UI)
 app.get("/admin", async (req, res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
+  if (!adminAllowed(req))
+    return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
+
   let files = [];
-  try { files = await ghListCSVs(); } catch (e) {}
-  const list = files.map(f => `<li>${f.name}</li>`).join("") || "<li>(none yet)</li>";
+  try {
+    files = await ghListCSVs();
+  } catch (_) {}
+
+  const list =
+    files.map(f => `<li>${f.name}</li>`).join("") || "<li>(none yet)</li>";
+
+  // Build a correct public origin (works behind Render proxy)
+  const xfProto = (req.headers["x-forwarded-proto"] || "https")
+    .toString()
+    .split(",")[0]
+    .trim();
+  const host =
+    req.headers.host ||
+    (process.env.RENDER_EXTERNAL_URL || "").replace(/^https?:\/\//, "");
+  const origin = `${xfProto}://${host}`;
+  const manifestUrl =
+    `${origin}/manifest.json` + (SHARED_SECRET ? `?key=${SHARED_SECRET}` : "");
+
   res.type("html").send(`
 <!doctype html>
 <html>
@@ -336,7 +374,7 @@ small{color:#666}
   <div class="card">
     <h3>Manifest URL</h3>
     <p>Install in Stremio via:</p>
-    <p class="code">https://${process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL.replace(/\/$/,'') : '<your-app>.onrender.com'}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}</p>
+    <p class="code">${manifestUrl}</p>
   </div>
 </body>
 </html>`);
@@ -347,15 +385,23 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
     if (!req.file) return res.status(400).send("Missing file");
-    const nameInput = String(req.body.name || "").trim().replace(/[^A-Za-z0-9_\-]/g, "_");
+    const nameInput = String(req.body.name || "")
+      .trim()
+      .replace(/[^A-Za-z0-9_\-]/g, "_");
     if (!nameInput) return res.status(400).send("Bad name");
     const filename = `${nameInput}.csv`;
     const base64 = Buffer.from(req.file.buffer).toString("base64");
     await ghPutCSV(filename, base64);
     await loadListsFromGitHub();
-    // update manifest catalogs (in-place)
-    builder.manifest.catalogs = (typeof builder.manifest.catalogs === "function" ? catalogs() : catalogs());
-    res.status(200).send(`Uploaded ${filename} and reloaded. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
+
+    // ✅ update manifest catalogs (correct object)
+    manifest.catalogs = catalogs();
+
+    res
+      .status(200)
+      .send(
+        `Uploaded ${filename} and reloaded. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`
+      );
   } catch (e) {
     res.status(500).send(String(e));
   }
@@ -366,8 +412,15 @@ app.post("/api/reload", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
     await loadListsFromGitHub();
-    builder.manifest.catalogs = catalogs();
-    res.status(200).send(`Reloaded. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
+
+    // ✅ update manifest catalogs (correct object)
+    manifest.catalogs = catalogs();
+
+    res
+      .status(200)
+      .send(
+        `Reloaded. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`
+      );
   } catch (e) {
     res.status(500).send(String(e));
   }
