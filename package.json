@@ -2,8 +2,13 @@
   "name": "my-stremio-addon",
   "version": "10.0.0",
   "main": "index.js",
-  "type": "module",
-  "scripts": { "start": "node index.js" },
-  "dependencies": { "express": "^4.19.2" },
-  "engines": { "node": ">=18" }
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
 }
