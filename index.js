@@ -1,9 +1,9 @@
 // My Lists (IMDb-only) Stremio add-on
-// v8.5.1 – follows IMDb "next" pagination, IMDb fallback titles+posters,
-// cached snapshot, Cinemeta preload, auto/force sync, manifest auto-bump,
-// and NO mixing of && with ?? (Node-safe).
+// v8.6 – use IMDb "export CSV" for exact items; strict HTML fallback (no stray tconst);
+// cached snapshot, Cinemeta preload, auto/force sync, manifest auto-bump.
 
 const express = require("express");
+const { parse } = require("csv-parse/sync");
 
 // ---- env ----
 const PORT = Number(process.env.PORT) || 7000;
@@ -13,7 +13,7 @@ const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 
 const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g., https://www.imdb.com/user/ur136127821/lists/
-const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional JSON whitelist
+const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional whitelist: [{"name":"Marvel Movies","url":"https://www.imdb.com/list/ls.../"}]
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 
 const CINEMETA = "https://v3-cinemeta.strem.io";
@@ -33,11 +33,11 @@ const listsKey = () => JSON.stringify(Object.keys(LISTS).sort());
 
 // ---- helpers ----
 const isImdb = (v) => /^tt\d{7,}$/i.test(String(v || ""));
-async function fetchText(url) {
+async function fetchText(url, accept = "text/html") {
   const r = await fetch(url, {
     headers: {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept": accept,
       "Accept-Language": "en-US,en;q=0.9"
     }
   });
@@ -52,9 +52,7 @@ function parseImdbListsEnv() {
   try {
     const arr = JSON.parse(IMDB_LISTS_JSON);
     return Array.isArray(arr) ? arr.filter(x => x && x.name && x.url) : [];
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 async function discoverListsFromUser(userListsUrl) {
@@ -73,24 +71,47 @@ async function discoverListsFromUser(userListsUrl) {
   return Array.from(found.values());
 }
 
-// Parse a list page → [{ id, name?, poster? }, ...]
-function idsAndTitlesFromHtml(html) {
+// Preferred: IMDb CSV export (exact list, no noise)
+async function fetchImdbListViaExport(listUrl) {
+  const m = listUrl.match(/\/list\/(ls\d{6,})/i);
+  if (!m) return null;
+  const id = m[1];
+  const csvUrl = `https://www.imdb.com/list/${id}/export?_${Date.now()}`;
+  const csv = await fetchText(csvUrl, "text/csv");
+  const rows = parse(csv, { columns: true, skip_empty_lines: true });
+  const items = [];
+  for (const r of rows) {
+    const tt = String(r.const || r.Const || r.tconst || "").trim();
+    if (!isImdb(tt)) continue;
+    const name = (r.Title || r.title || "").trim();
+    if (name && !FALLBACK.has(tt)) FALLBACK.set(tt, { name });
+    items.push({ id: tt });
+  }
+  return items;
+}
+
+// Strict HTML fallback (only from list content blocks; no "catch-all" scan)
+function idsAndTitlesFromHtmlStrict(html) {
+  const blocks = [];
+  // classic list block
+  const b1 = html.match(/<div[^>]+class="[^"]*\blister-list\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+  if (b1) blocks.push(b1[1]);
+  // IPC grid area (new UI)
+  const b2 = html.match(/<section[^>]+data-testid="[^"]*list[^"]*"[^>]*>([\s\S]*?)<\/section>/i);
+  if (b2) blocks.push(b2[1]);
+
+  const scoped = blocks.length ? blocks.join("\n") : html; // best effort if structure changes
   const map = new Map();
   let m;
 
-  // 1) "detail" header: <h3><a href="/title/tt...">Title</a>
+  // titles from detail headers
   const reTitleA = /<h3[^>]*>\s*(?:<span[^>]*>.*?<\/span>\s*)*<a[^>]*href="\/title\/(tt\d{7,})\/[^"]*"[^>]*>(.*?)<\/a>/gis;
-  while ((m = reTitleA.exec(html))) {
+  while ((m = reTitleA.exec(scoped))) {
     const tt = m[1];
     const text = m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-    if (tt && text) {
-      const prev = map.get(tt) || { id: tt };
-      if (!prev.name) prev.name = text;
-      map.set(tt, prev);
-    }
+    if (!map.has(tt)) map.set(tt, { id: tt, name: text });
   }
-
-  // 2) grid cards with image + tconst (capture alt + poster)
+  // images that carry data-tconst (alt=title, src poster)
   const reImg1 = /<img[^>]*\sdata-tconst="(tt\d{7,})"[^>]*\salt="([^"]+)"[^>]*\s(?:src|loadlate)="([^"]+)"[^>]*>/gi;
   const reImg2 = /<img[^>]*\salt="([^"]+)"[^>]*\s(?:src|loadlate)="([^"]+)"[^>]*\sdata-tconst="(tt\d{7,})"[^>]*>/gi;
   const bump = (tt, name, poster) => {
@@ -99,33 +120,13 @@ function idsAndTitlesFromHtml(html) {
     if (poster && !prev.poster) prev.poster = poster;
     map.set(tt, prev);
   };
-  while ((m = reImg1.exec(html))) bump(m[1], m[2], m[3]);
-  while ((m = reImg2.exec(html))) bump(m[3], m[1], m[2]);
-
-  // 3) Any remaining tconsts (even without title)
-  const reAnyTconst = /(?:data-tconst|href="\/title\/)(tt\d{7,})/gi;
-  while ((m = reAnyTconst.exec(html))) {
-    const tt = m[1];
-    if (!map.has(tt)) map.set(tt, { id: tt });
-  }
+  while ((m = reImg1.exec(scoped))) bump(m[1], m[2], m[3]);
+  while ((m = reImg2.exec(scoped))) bump(m[3], m[1], m[2]);
 
   return Array.from(map.values());
 }
 
-// Extract "next page" link from HTML (different IMDb layouts)
-function extractNextLink(html) {
-  let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
-  if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
-  if (!m) return null;
-  try {
-    return new URL(m[1], "https://www.imdb.com").toString();
-  } catch {
-    return null;
-  }
-}
-
-// Walk the entire list by following the page's own "next" link.
-async function fetchImdbListItemsAllPages(listUrl, maxPages = 200) {
+async function fetchImdbListItemsStrictHTML(listUrl, maxPages = 60) {
   const seen = new Set();
   const items = [];
   let url = new URL(listUrl).toString();
@@ -133,36 +134,44 @@ async function fetchImdbListItemsAllPages(listUrl, maxPages = 200) {
 
   while (url && pages < maxPages) {
     const u = new URL(url);
-    u.searchParams.set("_", Date.now() + "" + Math.random().toString().slice(2)); // cache-buster
+    u.searchParams.set("_", Date.now() + "" + Math.random().toString().slice(2));
     let html;
-    try {
-      html = await fetchText(u.toString());
-    } catch {
-      break;
-    }
+    try { html = await fetchText(u.toString()); } catch { break; }
 
-    const found = idsAndTitlesFromHtml(html);
+    const found = idsAndTitlesFromHtmlStrict(html);
     let added = 0;
     for (const it of found) {
       const tt = it.id;
       if (!tt || seen.has(tt)) continue;
       seen.add(tt);
       if ((it.name || it.poster) && !FALLBACK.has(tt)) FALLBACK.set(tt, { name: it.name, poster: it.poster });
-      else if (FALLBACK.has(tt)) {
-        const prev = FALLBACK.get(tt);
-        FALLBACK.set(tt, { name: prev.name || it.name, poster: prev.poster || it.poster });
-      }
       items.push({ id: tt });
       added++;
     }
 
     pages++;
-    const nextUrl = extractNextLink(html);
+    // follow the page's own next link (if present)
+    let nextUrl = null;
+    let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
+    if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
+    if (m) { try { nextUrl = new URL(m[1], "https://www.imdb.com").toString(); } catch {} }
     if (!nextUrl || added === 0) break;
     url = nextUrl;
   }
 
   return items;
+}
+
+async function fetchImdbListItems(listUrl) {
+  // 1) CSV export (preferred)
+  try {
+    const items = await fetchImdbListViaExport(listUrl);
+    if (items && items.length) return items;
+  } catch (e) {
+    console.warn("IMDb export failed:", e.message);
+  }
+  // 2) Strict HTML fallback (still safe)
+  return await fetchImdbListItemsStrictHTML(listUrl);
 }
 
 // ---- Cinemeta (try movie then series) ----
@@ -209,9 +218,8 @@ function snapshotForId(tt) {
     name: (meta && meta.name) || fb.name || tt,
   };
 
-  // Prefer Cinemeta poster but fall back to IMDb image (m.media-amazon.com).
   if (meta) {
-    snap.poster      = meta.poster || fb.poster || undefined;
+    snap.poster      = meta.poster || (fb.poster || undefined);
     snap.background  = meta.background || undefined;
     snap.logo        = meta.logo || undefined;
     snap.imdbRating  = (meta.imdbRating != null ? meta.imdbRating : meta.rating) != null
@@ -283,7 +291,7 @@ async function fullSync({ rediscover = true } = {}) {
     const lists = {};
     const unique = new Set();
     for (const { name, url } of cfg) {
-      const items = await fetchImdbListItemsAllPages(url).catch(() => []);
+      const items = await fetchImdbListItems(url).catch(() => []);
       lists[name] = { url, ids: items.map(it => it.id) };
       items.forEach(it => unique.add(it.id));
     }
@@ -350,7 +358,7 @@ app.get("/health", (_, res) => res.status(200).send("ok"));
 // MANIFEST (auto-version; no-cache)
 const baseManifest = {
   id: "org.my.csvlists",
-  version: "8.5.1",
+  version: "8.6.0",
   name: "My Lists",
   description: "Your IMDb lists under one section; opens real title pages so streams load.",
   resources: ["catalog", "meta"],
