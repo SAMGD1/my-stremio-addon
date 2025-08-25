@@ -1,187 +1,289 @@
-// My Lists (IMDb-only) Stremio add-on
-// v8.6 – use IMDb "export CSV" for exact items; strict HTML fallback (no stray tconst);
-// cached snapshot, Cinemeta preload, auto/force sync, manifest auto-bump.
+/*  My Lists – IMDb → Cinemeta snapshot add-on
+ *  v9.0 – instant catalogs from a preloaded snapshot
+ *  - Auto-sync every IMDB_SYNC_MINUTES (60 default)
+ *  - Force sync from /admin
+ *  - Cinemeta posters/titles first; IMDb fallback (no TT placeholders)
+ *  - Manifest auto-bump when list set changes
+ *  - Optional GitHub snapshot persistence for fast cold starts
+ */
 
 const express = require("express");
-const { parse } = require("csv-parse/sync");
 
-// ---- env ----
+// ----------------- ENV -----------------
 const PORT = Number(process.env.PORT) || 7000;
 const HOST = "0.0.0.0";
 
 const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 
-const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g., https://www.imdb.com/user/ur136127821/lists/
-const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional whitelist: [{"name":"Marvel Movies","url":"https://www.imdb.com/list/ls.../"}]
+const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/ur136127821/lists/
+const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional static whitelist: [{"name":"Marvel Movies","url":"https://www.imdb.com/list/ls.../"}]
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 
-const CINEMETA = "https://v3-cinemeta.strem.io";
+const GITHUB_TOKEN   = process.env.GITHUB_TOKEN || "";
+const GITHUB_OWNER   = process.env.GITHUB_OWNER || "";
+const GITHUB_REPO    = process.env.GITHUB_REPO  || "";
+const SNAPSHOT_BRANCH= process.env.SNAPSHOT_BRANCH || "main";
+const SNAPSHOT_DIR   = process.env.SNAPSHOT_DIR || "snapshot";
 
-// ---- state ----
-let LISTS = {};                         // { [name]: { url, ids: string[] } }
-const BEST = new Map();                 // Map<tt, { kind:'movie'|'series'|null, meta:object|null }>
-const FALLBACK = new Map();             // Map<tt, { name?:string, poster?:string }>
+// ----------------- CONSTANTS -----------------
+const CINEMETA = "https://v3-cinemeta.strem.io";
+const SNAPSHOT_FILE = `${SNAPSHOT_DIR}/snapshot.json`;
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/9.0";
+
+// ----------------- STATE -----------------
+// lists: { [name]: { url, ids: [ 'tt...' ] } }
+let LISTS = Object.create(null);
+
+// fallback for titles/posters if Cinemeta doesn't have them
+// Map<tt, { name?:string, poster?:string }>
+const FALLBACK = new Map();
+
+// Best Cinemeta meta cache
+// Map<tt, {kind:'movie'|'series'|null, meta:object|null}>
+const BEST = new Map();
+
+// Prebuilt cards for catalogs (instant)
+// Map<tt, { id, type, name, poster, background, logo, imdbRating, runtime, year, releaseDate, description }>
+const CARDS = new Map();
+
 let LAST_SYNC_AT = 0;
 let syncTimer = null;
 let syncInProgress = false;
 
-// manifest auto-refresh when catalog set changes
+// manifest rev increments if list set changes
 let MANIFEST_REV = 1;
 let LAST_LISTS_KEY = "";
-const listsKey = () => JSON.stringify(Object.keys(LISTS).sort());
 
-// ---- helpers ----
-const isImdb = (v) => /^tt\d{7,}$/i.test(String(v || ""));
-async function fetchText(url, accept = "text/html") {
-  const r = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      "Accept": accept,
-      "Accept-Language": "en-US,en;q=0.9"
-    }
-  });
-  if (!r.ok) throw new Error(`fetch ${url} -> ${r.status}`);
+// ----------------- UTILS -----------------
+function isImdb(v) { return /^tt\d{7,}$/i.test(String(v || "")); }
+function nowIso()  { return new Date().toISOString(); }
+function minToMs(m) { return m * 60 * 1000; }
+function listsKey() { return JSON.stringify(Object.keys(LISTS).sort()); }
+
+async function fetchText(url, accept) {
+  const headers = { "User-Agent": UA };
+  if (accept) headers["Accept"] = accept;
+  const r = await fetch(url, { headers });
+  if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
   return r.text();
 }
-const nowIso = () => new Date().toISOString();
-const minutes = (ms) => Math.round(ms / 60000);
+async function fetchJson(url) {
+  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept": "application/json" } });
+  if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
+  return r.json();
+}
 
-// ---- IMDb discovery / parsing ----
+// ----------------- GITHUB SNAPSHOT (optional) -----------------
+const GH_ENABLED = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+
+async function ghRequest(method, path, bodyObj) {
+  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${path}`;
+  const r = await fetch(url, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${GITHUB_TOKEN}`,
+      "Accept": "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "User-Agent": UA
+    },
+    body: bodyObj ? JSON.stringify(bodyObj) : undefined
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`GitHub ${method} ${path} -> ${r.status}: ${t}`);
+  }
+  return r.json();
+}
+async function ghGetSha(path) {
+  try {
+    const data = await ghRequest("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(SNAPSHOT_BRANCH)}`);
+    return data && data.sha || null;
+  } catch (_) { return null; }
+}
+async function ghWriteSnapshot(obj) {
+  if (!GH_ENABLED) return;
+  const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
+  const sha = await ghGetSha(SNAPSHOT_FILE);
+  const body = {
+    message: "Update snapshot.json",
+    content,
+    branch: SNAPSHOT_BRANCH
+  };
+  if (sha) body.sha = sha;
+  await ghRequest("PUT", `/contents/${encodeURIComponent(SNAPSHOT_FILE)}`, body);
+}
+async function ghReadSnapshot() {
+  if (!GH_ENABLED) return null;
+  try {
+    const data = await ghRequest("GET", `/contents/${encodeURIComponent(SNAPSHOT_FILE)}?ref=${encodeURIComponent(SNAPSHOT_BRANCH)}`);
+    if (!data || !data.content) return null;
+    const buf = Buffer.from(data.content, "base64").toString("utf8");
+    return JSON.parse(buf);
+  } catch (_) { return null; }
+}
+
+// ----------------- IMDb DISCOVERY -----------------
 function parseImdbListsEnv() {
   try {
     const arr = JSON.parse(IMDB_LISTS_JSON);
-    return Array.isArray(arr) ? arr.filter(x => x && x.name && x.url) : [];
-  } catch { return []; }
+    if (Array.isArray(arr) && arr.length) return arr.map(x => ({ name: x.name, url: x.url }));
+  } catch(_) {}
+  return [];
 }
-
 async function discoverListsFromUser(userListsUrl) {
   if (!userListsUrl) return [];
   const u = new URL(userListsUrl);
-  u.searchParams.set("_", Date.now().toString());   // cache-buster
-  const html = await fetchText(u.toString());
-
-  const re = /href="\/list\/(ls\d{6,})\/[^"]*".*?>([^<]+)</gi;
-  const found = new Map();
-  let m;
-  while ((m = re.exec(html))) {
-    const id = m[1], name = m[2].replace(/\s+/g, " ").trim();
-    found.set(id, { name, url: `https://www.imdb.com/list/${id}/` });
-  }
-  return Array.from(found.values());
-}
-
-// Preferred: IMDb CSV export (exact list, no noise)
-async function fetchImdbListViaExport(listUrl) {
-  const m = listUrl.match(/\/list\/(ls\d{6,})/i);
-  if (!m) return null;
-  const id = m[1];
-  const csvUrl = `https://www.imdb.com/list/${id}/export?_${Date.now()}`;
-  const csv = await fetchText(csvUrl, "text/csv");
-  const rows = parse(csv, { columns: true, skip_empty_lines: true });
-  const items = [];
-  for (const r of rows) {
-    const tt = String(r.const || r.Const || r.tconst || "").trim();
-    if (!isImdb(tt)) continue;
-    const name = (r.Title || r.title || "").trim();
-    if (name && !FALLBACK.has(tt)) FALLBACK.set(tt, { name });
-    items.push({ id: tt });
-  }
-  return items;
-}
-
-// Strict HTML fallback (only from list content blocks; no "catch-all" scan)
-function idsAndTitlesFromHtmlStrict(html) {
-  const blocks = [];
-  // classic list block
-  const b1 = html.match(/<div[^>]+class="[^"]*\blister-list\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
-  if (b1) blocks.push(b1[1]);
-  // IPC grid area (new UI)
-  const b2 = html.match(/<section[^>]+data-testid="[^"]*list[^"]*"[^>]*>([\s\S]*?)<\/section>/i);
-  if (b2) blocks.push(b2[1]);
-
-  const scoped = blocks.length ? blocks.join("\n") : html; // best effort if structure changes
+  u.searchParams.set("_", Date.now().toString());
+  const html = await fetchText(u.toString(), "text/html");
+  // capture only /list/ls... rows
+  const re = /href="\/list\/(ls\d{6,})\/[^"]*"\s*>\s*([^<]+)</gi;
   const map = new Map();
   let m;
-
-  // titles from detail headers
-  const reTitleA = /<h3[^>]*>\s*(?:<span[^>]*>.*?<\/span>\s*)*<a[^>]*href="\/title\/(tt\d{7,})\/[^"]*"[^>]*>(.*?)<\/a>/gis;
-  while ((m = reTitleA.exec(scoped))) {
-    const tt = m[1];
-    const text = m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-    if (!map.has(tt)) map.set(tt, { id: tt, name: text });
+  while ((m = re.exec(html))) {
+    const id = m[1];
+    const name = m[2].replace(/\s+/g, " ").trim();
+    map.set(id, { name, url: `https://www.imdb.com/list/${id}/` });
   }
-  // images that carry data-tconst (alt=title, src poster)
-  const reImg1 = /<img[^>]*\sdata-tconst="(tt\d{7,})"[^>]*\salt="([^"]+)"[^>]*\s(?:src|loadlate)="([^"]+)"[^>]*>/gi;
-  const reImg2 = /<img[^>]*\salt="([^"]+)"[^>]*\s(?:src|loadlate)="([^"]+)"[^>]*\sdata-tconst="(tt\d{7,})"[^>]*>/gi;
-  const bump = (tt, name, poster) => {
-    const prev = map.get(tt) || { id: tt };
-    if (name && !prev.name) prev.name = name.trim();
-    if (poster && !prev.poster) prev.poster = poster;
-    map.set(tt, prev);
-  };
-  while ((m = reImg1.exec(scoped))) bump(m[1], m[2], m[3]);
-  while ((m = reImg2.exec(scoped))) bump(m[3], m[1], m[2]);
-
   return Array.from(map.values());
 }
 
-async function fetchImdbListItemsStrictHTML(listUrl, maxPages = 60) {
-  const seen = new Set();
-  const items = [];
-  let url = new URL(listUrl).toString();
-  let pages = 0;
+// ----------------- IMDb LIST PARSER (robust) -----------------
+function extractBlock(html) {
+  // Try multiple containers; fallback to whole html if nothing matches
+  const tries = [
+    /<div[^>]+class="[^"]*\blister-list\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    /<ul[^>]+class="[^"]*\bipc-metadata-list\b[^"]*"[^>]*>([\s\S]*?)<\/ul>/i,
+    /<section[^>]+data-testid="[^"]*list[^"]*"[^>]*>([\s\S]*?)<\/section>/i
+  ];
+  for (let i=0;i<tries.length;i++) {
+    const m = html.match(tries[i]);
+    if (m && m[1]) return m[1];
+  }
+  return html; // best effort
+}
+function idsAndTitlesFromHtmlStrict(html) {
+  const scoped = extractBlock(html);
+  const found = new Map();
+  let m;
 
-  while (url && pages < maxPages) {
-    const u = new URL(url);
-    u.searchParams.set("_", Date.now() + "" + Math.random().toString().slice(2));
-    let html;
-    try { html = await fetchText(u.toString()); } catch { break; }
-
-    const found = idsAndTitlesFromHtmlStrict(html);
-    let added = 0;
-    for (const it of found) {
-      const tt = it.id;
-      if (!tt || seen.has(tt)) continue;
-      seen.add(tt);
-      if ((it.name || it.poster) && !FALLBACK.has(tt)) FALLBACK.set(tt, { name: it.name, poster: it.poster });
-      items.push({ id: tt });
-      added++;
-    }
-
-    pages++;
-    // follow the page's own next link (if present)
-    let nextUrl = null;
-    let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
-    if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
-    if (m) { try { nextUrl = new URL(m[1], "https://www.imdb.com").toString(); } catch {} }
-    if (!nextUrl || added === 0) break;
-    url = nextUrl;
+  // 1) data-tconst (grid/new UI)
+  const reData = /data-tconst="(tt\d{7,})"/gi;
+  while ((m = reData.exec(scoped))) {
+    const tt = m[1];
+    if (!found.has(tt)) found.set(tt, { id: tt });
   }
 
-  return items;
+  // 2) lister-item blocks (classic detail)
+  const reLister = /<div[^>]+class="[^"]*\blister-item\b[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+  while ((m = reLister.exec(scoped))) {
+    const block = m[1];
+    const m2 = block.match(/href="\/title\/(tt\d{7,})\//i);
+    if (m2) {
+      const tt = m2[1];
+      const t = block.match(/<h3[^>]*>[\s\S]*?<a[^>]*>(.*?)<\/a>/i);
+      const title = t ? t[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : "";
+      const img = block.match(/<img[^>]+(?:loadlate|src)="([^"]+)"[^>]*>/i);
+      const poster = img ? img[1] : "";
+      const prev = found.get(tt) || { id: tt };
+      if (title && !prev.name) prev.name = title;
+      if (poster && !prev.poster) prev.poster = poster;
+      found.set(tt, prev);
+    }
+  }
+
+  // 3) summary items (new UI)
+  const reSumm = /<li[^>]+class="[^"]*\bipc-metadata-list-summary-item\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+  while ((m = reSumm.exec(scoped))) {
+    const block = m[1];
+    const m2 = block.match(/href="\/title\/(tt\d{7,})\//i);
+    if (m2) {
+      const tt = m2[1];
+      // title text or img alt
+      const t = block.match(/<a[^>]*>(.*?)<\/a>/i);
+      const title = t ? t[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : "";
+      const img = block.match(/<img[^>]+alt="([^"]+)"[^>]*?(?:loadlate|src)="([^"]+)"/i);
+      const altTitle = img ? img[1] : "";
+      const poster = img ? img[2] : "";
+      const name = title || altTitle;
+      const prev = found.get(tt) || { id: tt };
+      if (name && !prev.name) prev.name = name;
+      if (poster && !prev.poster) prev.poster = poster;
+      found.set(tt, prev);
+    }
+  }
+
+  // 4) fallback inside scoped only: any /title/ links + nearby img alt
+  const reAny = /<a[^>]+href="\/title\/(tt\d{7,})\/[^"]*"[^>]*>(.*?)<\/a>/gi;
+  while ((m = reAny.exec(scoped))) {
+    const tt = m[1];
+    const maybe = m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    const prev = found.get(tt) || { id: tt };
+    if (maybe && !prev.name) prev.name = maybe;
+    found.set(tt, prev);
+  }
+
+  return Array.from(found.values());
+}
+
+function findNextLink(html) {
+  let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
+  if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
+  if (!m) return null;
+  try { return new URL(m[1], "https://www.imdb.com").toString(); }
+  catch { return null; }
+}
+
+function withParam(url, key, val) {
+  const u = new URL(url);
+  u.searchParams.set(key, val);
+  return u.toString();
 }
 
 async function fetchImdbListItems(listUrl) {
-  // 1) CSV export (preferred)
-  try {
-    const items = await fetchImdbListViaExport(listUrl);
-    if (items && items.length) return items;
-  } catch (e) {
-    console.warn("IMDb export failed:", e.message);
+  // try multiple modes and paginate
+  const modes = ["detail", "grid", "compact"];
+  const seen = new Set();
+  const items = [];
+
+  for (let i=0;i<modes.length;i++) {
+    let url = withParam(listUrl, "mode", modes[i]);
+    let pages = 0;
+    while (url && pages < 50) {
+      let html;
+      try { html = await fetchText(withParam(url, "_", Date.now().toString()), "text/html"); }
+      catch(_) { break; }
+      const found = idsAndTitlesFromHtmlStrict(html);
+      let added = 0;
+      for (let j=0;j<found.length;j++) {
+        const tt = found[j].id;
+        if (!isImdb(tt) || seen.has(tt)) continue;
+        seen.add(tt); added++;
+        if ((found[j].name || found[j].poster) && !FALLBACK.has(tt)) {
+          FALLBACK.set(tt, { name: found[j].name || undefined, poster: found[j].poster || undefined });
+        }
+        items.push({ id: tt });
+      }
+      pages++;
+      const nextUrl = findNextLink(html);
+      if (!nextUrl || added === 0) break;
+      url = nextUrl;
+    }
+    if (items.length) break; // success
   }
-  // 2) Strict HTML fallback (still safe)
-  return await fetchImdbListItemsStrictHTML(listUrl);
+  return items;
 }
 
-// ---- Cinemeta (try movie then series) ----
+// ----------------- Cinemeta -----------------
 async function fetchCinemeta(kind, imdbId) {
   try {
-    const r = await fetch(`${CINEMETA}/meta/${encodeURIComponent(kind)}/${encodeURIComponent(imdbId)}.json`);
+    const r = await fetch(`${CINEMETA}/meta/${encodeURIComponent(kind)}/${encodeURIComponent(imdbId)}.json`, {
+      headers: { "User-Agent": UA, "Accept": "application/json" }
+    });
     if (!r.ok) return null;
-    const { meta } = await r.json();
-    return meta || null;
-  } catch { return null; }
+    const obj = await r.json();
+    return obj && obj.meta ? obj.meta : null;
+  } catch(_) { return null; }
 }
 async function getBestMeta(imdbId) {
   if (BEST.has(imdbId)) return BEST.get(imdbId);
@@ -196,76 +298,72 @@ async function getBestMeta(imdbId) {
 async function mapLimit(arr, limit, fn) {
   const results = new Array(arr.length);
   let i = 0;
-  const runners = new Array(Math.min(limit, arr.length)).fill(0).map(async () => {
+  const workers = new Array(Math.min(limit, arr.length)).fill(0).map(async () => {
     while (i < arr.length) {
       const idx = i++;
       results[idx] = await fn(arr[idx], idx);
     }
   });
-  await Promise.all(runners);
+  await Promise.all(workers);
   return results;
 }
 
-// ---- Snapshot from cache (BEST + FALLBACK) ----
-function snapshotForId(tt) {
+// Build a “card” for catalogs from BEST + FALLBACK
+function buildCard(tt) {
   const rec = BEST.get(tt) || { kind: null, meta: null };
   const meta = rec.meta;
   const fb = FALLBACK.get(tt) || {};
-
-  const snap = {
+  const card = {
     id: tt,
     type: rec.kind || "movie",
-    name: (meta && meta.name) || fb.name || tt,
+    name: meta && meta.name ? meta.name : (fb.name || tt),
+    poster: meta && meta.poster ? meta.poster : (fb.poster || undefined),
+    background: meta && meta.background ? meta.background : undefined,
+    logo: meta && meta.logo ? meta.logo : undefined,
+    imdbRating: (meta && (meta.imdbRating != null ? meta.imdbRating : meta.rating != null ? meta.rating : null)),
+    runtime: meta && meta.runtime != null ? meta.runtime : undefined,
+    year: meta && meta.year != null ? meta.year : undefined,
+    releaseDate: meta && (meta.releaseInfo || meta.released) ? (meta.releaseInfo || meta.released) : undefined,
+    description: meta && meta.description ? meta.description : undefined
   };
-
-  if (meta) {
-    snap.poster      = meta.poster || (fb.poster || undefined);
-    snap.background  = meta.background || undefined;
-    snap.logo        = meta.logo || undefined;
-    snap.imdbRating  = (meta.imdbRating != null ? meta.imdbRating : meta.rating) != null
-      ? (meta.imdbRating != null ? meta.imdbRating : meta.rating)
-      : undefined;
-    snap.runtime     = meta.runtime != null ? meta.runtime : undefined;
-    snap.year        = meta.year != null ? meta.year : undefined;
-    snap.releaseDate = (meta.releaseInfo != null ? meta.releaseInfo : meta.released) != null
-      ? (meta.releaseInfo != null ? meta.releaseInfo : meta.released)
-      : undefined;
-    snap.description = meta.description || undefined;
-  } else {
-    snap.poster = fb.poster || undefined;
-  }
-
-  return snap;
+  return card;
 }
 
-// ---- sorting (nulls to bottom, stable) ----
+// ----------------- Sorting -----------------
 function toTs(dateStr, year) {
-  if (dateStr) { const t = Date.parse(dateStr); if (!Number.isNaN(t)) return t; }
-  if (year)    { const t = Date.parse(`${year}-01-01`); if (!Number.isNaN(t)) return t; }
+  if (dateStr) {
+    const n = Date.parse(dateStr);
+    if (!Number.isNaN(n)) return n;
+  }
+  if (year) {
+    const n = Date.parse(String(year) + "-01-01");
+    if (!Number.isNaN(n)) return n;
+  }
   return null;
 }
-function stableSort(items, sort) {
-  const s = String(sort || "name_asc").toLowerCase();
+function stableSort(items, sortKey) {
+  const s = String(sortKey || "name_asc").toLowerCase();
   const dir = s.endsWith("_asc") ? 1 : -1;
   const key = s.split("_")[0];
 
-  const cmpNullBottom = (a, b) => {
-    const na = (a == null), nb = (b == null);
+  function cmpNullBottom(a, b) {
+    const na = (a === null || a === undefined);
+    const nb = (b === null || b === undefined);
     if (na && nb) return 0;
     if (na) return 1;
     if (nb) return -1;
     return a < b ? -1 : a > b ? 1 : 0;
-  };
+  }
 
   return items
     .map((m, i) => ({ m, i }))
     .sort((A, B) => {
       const a = A.m, b = B.m;
       let c = 0;
-      if (key === "date")     c = cmpNullBottom(toTs(a.releaseDate, a.year), toTs(b.releaseDate, b.year));
-      else if (key === "rating")  c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
-      else if (key === "runtime") c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
-      else /* name */         c = (a.name || "").localeCompare(b.name || "");
+      if (key === "date") c = cmpNullBottom(toTs(a.releaseDate, a.year), toTs(b.releaseDate, b.year));
+      else if (key === "rating") c = cmpNullBottom(a.imdbRating, b.imdbRating);
+      else if (key === "runtime") c = cmpNullBottom(a.runtime, b.runtime);
+      else c = (a.name || "").localeCompare(b.name || "");
       if (c === 0) {
         c = (a.name || "").localeCompare(b.name || "");
         if (c === 0) c = (a.id || "").localeCompare(b.id || "");
@@ -276,27 +374,45 @@ function stableSort(items, sort) {
     .map(x => x.m);
 }
 
-// ---- full sync (discover lists, fetch items, preload metas) ----
+// ----------------- SYNC -----------------
 async function fullSync({ rediscover = true } = {}) {
   if (syncInProgress) return;
   syncInProgress = true;
-  const started = Date.now();
   try {
+    // discover lists
     let cfg = parseImdbListsEnv();
-    if ((!cfg || cfg.length === 0) && (IMDB_USER_URL || rediscover)) {
+    if ((!cfg || cfg.length === 0) && (IMDB_USER_URL && rediscover)) {
       try { cfg = await discoverListsFromUser(IMDB_USER_URL); }
-      catch (e) { console.warn("IMDb discovery failed:", e.message); cfg = []; }
+      catch(e) { console.warn("IMDb discovery failed:", e.message); cfg = []; }
     }
 
-    const lists = {};
-    const unique = new Set();
-    for (const { name, url } of cfg) {
-      const items = await fetchImdbListItems(url).catch(() => []);
-      lists[name] = { url, ids: items.map(it => it.id) };
-      items.forEach(it => unique.add(it.id));
-    }
-    LISTS = lists;
+    // fetch items for each list
+    const nextLISTS = Object.create(null);
+    const allIdsSet = new Set();
 
+    for (let i=0;i<cfg.length;i++) {
+      const L = cfg[i];
+      let items = [];
+      try { items = await fetchImdbListItems(L.url); }
+      catch(e) { console.warn("Fetch list failed:", L.name, e.message); }
+      nextLISTS[L.name] = { url: L.url, ids: items.map(x => x.id) };
+      for (let j=0;j<items.length;j++) allIdsSet.add(items[j].id);
+    }
+
+    // preload Cinemeta (both types) for all unique ids
+    const idsAll = Array.from(allIdsSet);
+    await mapLimit(idsAll, 8, async (tt) => { if (isImdb(tt)) await getBestMeta(tt); });
+
+    // build cards snapshot
+    CARDS.clear();
+    for (let i=0;i<idsAll.length;i++) {
+      const tt = idsAll[i];
+      CARDS.set(tt, buildCard(tt));
+    }
+
+    LISTS = nextLISTS;
+
+    // version bump if list set changed (so Stremio updates catalogs without reinstall)
     const key = listsKey();
     if (key !== LAST_LISTS_KEY) {
       LAST_LISTS_KEY = key;
@@ -304,14 +420,21 @@ async function fullSync({ rediscover = true } = {}) {
       console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
     }
 
-    const idsAll = Array.from(unique);
-    await mapLimit(idsAll, 8, async (tt) => {
-      if (!isImdb(tt)) return null;
-      return getBestMeta(tt);
-    });
-
     LAST_SYNC_AT = Date.now();
-    console.log(`[SYNC] ok in ${minutes(LAST_SYNC_AT - started)} min, ids=${idsAll.length}, lists=${Object.keys(LISTS).length}`);
+    console.log(`[SYNC] ${idsAll.length} ids across ${Object.keys(LISTS).length} lists`);
+
+    // persist snapshot to GitHub (optional)
+    const snap = {
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      fallback: Object.fromEntries(Array.from(FALLBACK.entries())), // { tt: {name,poster}, ... }
+      cards: Object.fromEntries(Array.from(CARDS.entries()))        // { tt: card, ... }
+    };
+    if (GH_ENABLED) {
+      try { await ghWriteSnapshot(snap); console.log("[SYNC] snapshot saved to GitHub"); }
+      catch(e) { console.warn("[SYNC] failed to save snapshot:", e.message); }
+    }
   } catch (e) {
     console.error("[SYNC] failed:", e);
   } finally {
@@ -319,26 +442,51 @@ async function fullSync({ rediscover = true } = {}) {
   }
 }
 
-function scheduleNextSync(reset = false) {
+function scheduleNextSync(reset) {
   if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
   if (IMDB_SYNC_MINUTES <= 0) return;
-  const delayMs = IMDB_SYNC_MINUTES * 60 * 1000;
+  const delay = minToMs(IMDB_SYNC_MINUTES);
   syncTimer = setTimeout(async () => {
     await fullSync({ rediscover: true });
     scheduleNextSync(true);
-  }, reset ? IMDB_SYNC_MINUTES * 60 * 1000 : delayMs);
+  }, reset ? delay : delay);
 }
 
-// initial sync + schedule
-fullSync({ rediscover: true }).then(() => scheduleNextSync(false));
-
-function maybeBackgroundSync() {
-  if (IMDB_SYNC_MINUTES <= 0) return;
-  const tooOld = Date.now() - LAST_SYNC_AT > IMDB_SYNC_MINUTES * 60 * 1000;
-  if (tooOld && !syncInProgress) fullSync({ rediscover: true }).then(() => scheduleNextSync(true));
+async function loadSnapshotFromGitHubAtBoot() {
+  if (!GH_ENABLED) return false;
+  const obj = await ghReadSnapshot();
+  if (!obj) return false;
+  try {
+    LISTS = obj.lists || Object.create(null);
+    FALLBACK.clear();
+    if (obj.fallback) {
+      const entries = Object.keys(obj.fallback);
+      for (let i=0;i<entries.length;i++) {
+        const tt = entries[i];
+        const v = obj.fallback[tt] || {};
+        FALLBACK.set(tt, { name: v.name, poster: v.poster });
+      }
+    }
+    CARDS.clear();
+    if (obj.cards) {
+      const entries = Object.keys(obj.cards);
+      for (let i=0;i<entries.length;i++) {
+        const tt = entries[i];
+        CARDS.set(tt, obj.cards[tt]);
+      }
+    }
+    MANIFEST_REV = obj.manifestRev || 1;
+    LAST_SYNC_AT = obj.lastSyncAt || 0;
+    LAST_LISTS_KEY = listsKey();
+    console.log("[BOOT] snapshot loaded from GitHub");
+    return true;
+  } catch(e) {
+    console.warn("[BOOT] invalid snapshot:", e.message);
+    return false;
+  }
 }
 
-// ---- server ----
+// ----------------- SERVER -----------------
 const app = express();
 app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
 
@@ -351,22 +499,27 @@ function adminAllowed(req) {
   const url = new URL(req.originalUrl, `http://${req.headers.host}`);
   return (url.searchParams.get("admin") || req.headers["x-admin-key"]) === ADMIN_PASSWORD;
 }
+function absoluteBase(req) {
+  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const host  = req.headers["x-forwarded-host"] || req.get("host");
+  return `${proto}://${host}`;
+}
 
-// HEALTH
 app.get("/health", (_, res) => res.status(200).send("ok"));
 
-// MANIFEST (auto-version; no-cache)
+// ---- Manifest (no-cache; auto-version bump) ----
 const baseManifest = {
   id: "org.my.csvlists",
-  version: "8.6.0",
+  version: "9.0.0",
   name: "My Lists",
-  description: "Your IMDb lists under one section; opens real title pages so streams load.",
+  description: "Your IMDb lists as instant catalogs; opens real pages so streams load.",
   resources: ["catalog", "meta"],
   types: ["my lists", "movie", "series"],
   idPrefixes: ["tt"]
 };
 function catalogs() {
-  return Object.keys(LISTS).map((name) => ({
+  const names = Object.keys(LISTS);
+  return names.map((name) => ({
     type: "My lists",
     id: `list:${name}`,
     name: `🗂 ${name}`,
@@ -383,7 +536,7 @@ app.get("/manifest.json", (req, res) => {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.setHeader("Pragma", "no-cache");
-    const version = `${baseManifest.version}.${MANIFEST_REV}`;
+    const version = baseManifest.version + "." + MANIFEST_REV;
     res.json({ ...baseManifest, version, catalogs: catalogs() });
   } catch (e) {
     console.error("Manifest error:", e);
@@ -391,26 +544,25 @@ app.get("/manifest.json", (req, res) => {
   }
 });
 
-// utils
+// ---- helpers ----
 function parseExtra(extraStr, queryObj) {
   const params = new URLSearchParams(extraStr || "");
   const fromPath = Object.fromEntries(params.entries());
   return { ...fromPath, ...(queryObj || {}) };
 }
 
-// CATALOG (cache-only; instant)
+// ---- Catalog (instant, from CARDS) ----
 app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     res.setHeader("Cache-Control", "no-store");
-    maybeBackgroundSync();
 
     const { id } = req.params;
-    if (!id?.startsWith("list:")) return res.json({ metas: [] });
+    if (!id || !id.startsWith("list:")) return res.json({ metas: [] });
 
     const listName = id.slice(5);
     const list = LISTS[listName];
-    if (!list) return res.json({ metas: [] });
+    if (!list || !list.ids || !list.ids.length) return res.json({ metas: [] });
 
     const extra = parseExtra(req.params.extra, req.query);
     const q = String(extra.search || "").toLowerCase().trim();
@@ -418,19 +570,18 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
     const skip = Math.max(0, Number(extra.skip || 0));
     const limit = Math.min(Number(extra.limit || 100), 200);
 
-    let snaps = (list.ids || []).map(snapshotForId);
+    let metas = list.ids.map((tt) => CARDS.get(tt) || { id: tt, type: "movie", name: FALLBACK.get(tt)?.name || tt });
 
     if (q) {
-      snaps = snaps.filter(m =>
+      metas = metas.filter(m =>
         (m.name || "").toLowerCase().includes(q) ||
-        (m.id || "").toLowerCase().includes(q) ||
-        (m.description || "").toLowerCase().includes(q)
+        (m.description || "").toLowerCase().includes(q) ||
+        (m.id || "").toLowerCase().includes(q)
       );
     }
 
-    snaps = stableSort(snaps, sort);
-    const page = snaps.slice(skip, skip + limit);
-
+    metas = stableSort(metas, sort);
+    const page = metas.slice(skip, skip + limit);
     res.json({ metas: page });
   } catch (e) {
     console.error("Catalog error:", e);
@@ -438,29 +589,21 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
   }
 });
 
-// META (cache-first; fetch on-demand if missing)
+// ---- Meta (use preloaded Cinemeta; fallback to minimal) ----
 app.get("/meta/:type/:id.json", async (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     res.setHeader("Cache-Control", "no-store");
-    maybeBackgroundSync();
-
     const imdbId = req.params.id;
     if (!isImdb(imdbId))
       return res.json({ meta: { id: imdbId, type: "movie", name: "Unknown item" } });
 
     let rec = BEST.get(imdbId);
-    if (!rec) rec = await getBestMeta(imdbId); // on-demand
+    if (!rec) rec = await getBestMeta(imdbId);
 
     if (!rec || !rec.meta) {
       const fb = FALLBACK.get(imdbId) || {};
-      const meta = {
-        id: imdbId,
-        type: rec && rec.kind ? rec.kind : "movie",
-        name: fb.name || imdbId,
-        poster: fb.poster || undefined
-      };
-      return res.json({ meta });
+      return res.json({ meta: { id: imdbId, type: rec && rec.kind ? rec.kind : "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
     }
     return res.json({ meta: { ...rec.meta, id: imdbId, type: rec.kind } });
   } catch (e) {
@@ -469,75 +612,65 @@ app.get("/meta/:type/:id.json", async (req, res) => {
   }
 });
 
-// ADMIN
-function absoluteBase(req) {
-  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
-  const host  = req.headers["x-forwarded-host"] || req.get("host");
-  return `${proto}://${host}`;
-}
+// ---- Admin ----
 app.get("/admin", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
 
-  let discovered = [];
-  try {
-    if (IMDB_USER_URL) {
-      const u = new URL(IMDB_USER_URL);
-      u.searchParams.set("_", Date.now().toString());
-      discovered = await discoverListsFromUser(u.toString());
-    }
-  } catch {}
-
   const manifestUrl = `${absoluteBase(req)}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`;
-  const uiLists = Object.entries(LISTS)
-    .map(([name, v]) => `<li><b>${name}</b> <small>(${(v.ids||[]).length} items)</small><br/><small>${v.url || ""}</small></li>`)
-    .join("") || "<li>(none)</li>";
+  const names = Object.keys(LISTS);
+  const listHtml = names.length
+    ? `<ul>${names.map(n => `<li><b>${n}</b> <small>(${(LISTS[n].ids||[]).length} items)</small><br/><small>${LISTS[n].url || ""}</small></li>`).join("")}</ul>`
+    : "<p>(no lists yet)</p>";
 
-  const discLists = Array.isArray(discovered) && discovered.length
-    ? `<ul>${discovered.map(x=>`<li><b>${x.name}</b><br/><small>${x.url}</small></li>`).join("")}</ul>`
-    : `<p><small>${IMDB_USER_URL ? "No public lists found (or IMDb unreachable)." : "Set IMDB_USER_URL or IMDB_LISTS in your environment."}</small></p>`;
+  let discoveredHtml = "<p><small>Set IMDB_USER_URL or IMDB_LISTS to discover your lists.</small></p>";
+  if (IMDB_USER_URL) {
+    try {
+      const discovered = await discoverListsFromUser(IMDB_USER_URL);
+      discoveredHtml = discovered.length
+        ? `<ul>${discovered.map(x => `<li><b>${x.name}</b><br/><small>${x.url}</small></li>`).join("")}</ul>`
+        : "<p><small>No public lists found (or IMDb temporarily unreachable).</small></p>";
+    } catch (_) {}
+  }
 
   res.type("html").send(`<!doctype html>
-<html>
-<head>
-  <title>My Lists – Admin</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:760px}
-    h1{margin:0 0 16px}
-    .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
-    button{padding:10px 16px;border:0;border-radius:8px;background:#6c5ce7;color:#fff;cursor:pointer}
-    small{color:#666}
-    .code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f6f6;padding:4px 6px;border-radius:6px}
-    .btn2{background:#2d6cdf}
-  </style>
-</head>
-<body>
+<html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>My Lists – Admin</title>
+<style>
+body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:760px}
+.card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
+button{padding:10px 16px;border:0;border-radius:8px;background:#6c5ce7;color:#fff;cursor:pointer}
+small{color:#666}
+.code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f6f6;padding:4px 6px;border-radius:6px}
+.btn2{background:#2d6cdf}
+</style>
+</head><body>
   <h1>My Lists – Admin</h1>
 
   <div class="card">
-    <h3>Current Cached Lists</h3>
-    <ul>${uiLists}</ul>
-    <p><small>Last sync: ${LAST_SYNC_AT ? new Date(LAST_SYNC_AT).toLocaleString() + " (" + minutes(Date.now()-LAST_SYNC_AT) + " min ago)" : "never"}</small></p>
-    <form method="POST" action="/api/sync-imdb?admin=${ADMIN_PASSWORD}">
+    <h3>Current Snapshot</h3>
+    ${listHtml}
+    <p><small>Last sync: ${LAST_SYNC_AT ? new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)" : "never"}</small></p>
+    <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
       <button class="btn2">Sync IMDb Lists Now</button>
     </form>
     <p><small>Auto-sync every ${IMDB_SYNC_MINUTES} min${IMDB_SYNC_MINUTES ? "" : " (disabled)"}.</small></p>
+    <p><small>Snapshot persistence: ${GH_ENABLED ? "GitHub enabled" : "disabled"}</small></p>
   </div>
 
   <div class="card">
     <h3>Discovered at <span class="code">${IMDB_USER_URL || "(IMDB_USER_URL not set)"}</span></h3>
-    ${discLists}
+    ${discoveredHtml}
   </div>
 
   <div class="card">
     <h3>Manifest URL</h3>
     <p class="code">${manifestUrl}</p>
   </div>
-</body>
-</html>`);
+</body></html>`);
 });
 
-app.post("/api/sync-imdb", async (req, res) => {
+app.post("/api/sync", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
     await fullSync({ rediscover: true });
@@ -549,8 +682,17 @@ app.post("/api/sync-imdb", async (req, res) => {
   }
 });
 
-// start
-app.listen(PORT, HOST, () => {
-  console.log(`Admin: http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
-  console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
-});
+// ----------------- BOOT -----------------
+(async () => {
+  // Try loading a persisted snapshot so catalogs work instantly after cold start
+  const ok = await loadSnapshotFromGitHubAtBoot();
+  if (!ok) console.log("[BOOT] no snapshot/persistence; catalogs will populate after first sync");
+
+  // Initial sync (non-blocking)
+  fullSync({ rediscover: true }).then(() => scheduleNextSync(false));
+
+  app.listen(PORT, HOST, () => {
+    console.log(`Admin: http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
+    console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
+  });
+})();
