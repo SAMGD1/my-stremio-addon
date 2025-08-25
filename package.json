@@ -1,16 +1,18 @@
 {
+{
   "name": "my-stremio-addon",
-  "version": "1.0.0",
+  "version": "9.0.0",
+  "description": "IMDb → Stremio addon. Syncs your IMDb lists every 60 min, serves them instantly with Cinemeta+IMDb fallback.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "csv-parse": "^6.1.0",
-    "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1"
+    "express": "^4.19.2"
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "author": "you",
+  "license": "MIT"
 }
