@@ -1,25 +1,6 @@
 // My Lists (IMDb-only) Stremio add-on
-// v8.4 – cached snapshot + auto/force sync + robust IMDb parsing + Cinemeta preload
-//
-// WHAT IT DOES
-// - Discovers all public lists from IMDB_USER_URL (or uses IMDB_LISTS whitelist).
-// - Scrapes each list page (multiple layouts) to collect tt ids + a fallback title.
-// - Preloads Cinemeta for each id (try movie → series) and caches results.
-// - Stremio catalogs/meta respond from cache (instant, stable).
-// - Auto-sync every IMDB_SYNC_MINUTES; "Sync now" in /admin triggers full refresh.
-// - Manifest version bumps when list set changes so Stremio refreshes dropdown.
-//
-// ENV NEEDED (Render → Environment):
-//   ADMIN_PASSWORD        e.g., Stremio_172
-//   SHARED_SECRET         optional; if set, add ?key=... when installing manifest
-//   IMDB_USER_URL         e.g., https://www.imdb.com/user/ur136127821/lists/
-//   IMDB_SYNC_MINUTES     e.g., 60
-//   IMDB_LISTS            optional JSON: [{ "name": "Marvel Movies", "url": "https://www.imdb.com/list/ls##########/" }]
-//
-// MANIFEST URL (from /admin page):
-//   https://<app>.onrender.com/manifest.json[?key=SHARED_SECRET]
-//
-// Node >= 18 (global fetch). Only dependency: express.
+// v8.5 – follows IMDb "next" pagination, IMDb fallback titles + posters,
+// cached snapshot, Cinemeta preload, auto/force sync, manifest auto-bump.
 
 const express = require("express");
 
@@ -31,19 +12,15 @@ const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 
 const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g., https://www.imdb.com/user/ur136127821/lists/
-const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional whitelist override
+const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional JSON whitelist
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 
 const CINEMETA = "https://v3-cinemeta.strem.io";
 
 // ---- state ----
-/** { [listName]: { url, ids: string[] } } */
-let LISTS = {};
-/** Map<tt, { kind:'movie'|'series'|null, meta:object|null }> */
-const BEST = new Map();
-/** Map<tt, { name?:string }>  — fallback human title parsed from IMDb */
-const FALLBACK = new Map();
-/** last successful full sync timestamp (ms) */
+let LISTS = {};                         // { [name]: { url, ids: string[] } }
+const BEST = new Map();                 // Map<tt, { kind:'movie'|'series'|null, meta:object|null }>
+const FALLBACK = new Map();             // Map<tt, { name?:string, poster?:string }>
 let LAST_SYNC_AT = 0;
 let syncTimer = null;
 let syncInProgress = false;
@@ -53,7 +30,7 @@ let MANIFEST_REV = 1;
 let LAST_LISTS_KEY = "";
 const listsKey = () => JSON.stringify(Object.keys(LISTS).sort());
 
-// ---- tiny helpers ----
+// ---- helpers ----
 const isImdb = (v) => /^tt\d{7,}$/i.test(String(v || ""));
 async function fetchText(url) {
   const r = await fetch(url, {
@@ -79,14 +56,12 @@ function parseImdbListsEnv() {
   }
 }
 
-// Discover lists from the user's page (cache-busted)
 async function discoverListsFromUser(userListsUrl) {
   if (!userListsUrl) return [];
   const u = new URL(userListsUrl);
   u.searchParams.set("_", Date.now().toString());   // cache-buster
   const html = await fetchText(u.toString());
 
-  // anchor like: href="/list/ls##########/" ... >List Title<
   const re = /href="\/list\/(ls\d{6,})\/[^"]*".*?>([^<]+)</gi;
   const found = new Map();
   let m;
@@ -97,8 +72,7 @@ async function discoverListsFromUser(userListsUrl) {
   return Array.from(found.values());
 }
 
-// Parse one list page HTML → [{ id, name? }, ...]
-// Handles multiple layouts: detail grid, AB tests, etc.
+// Parse a list page → [{ id, name?, poster? }, ...]
 function idsAndTitlesFromHtml(html) {
   const map = new Map();
   let m;
@@ -108,71 +82,86 @@ function idsAndTitlesFromHtml(html) {
   while ((m = reTitleA.exec(html))) {
     const tt = m[1];
     const text = m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-    if (tt && text) map.set(tt, { id: tt, name: text });
+    if (tt && text) {
+      const prev = map.get(tt) || { id: tt };
+      if (!prev.name) prev.name = text;
+      map.set(tt, prev);
+    }
   }
 
-  // 2) grid card: <img alt="Title" ... data-tconst="tt######">
-  const reImgAlt = /<img[^>]*\salt="([^"]+)"[^>]*\sdata-tconst="(tt\d{7,})"[^>]*>/gi;
-  while ((m = reImgAlt.exec(html))) {
-    const title = m[1]?.trim();
-    const tt = m[2];
-    if (tt && title && !map.has(tt)) map.set(tt, { id: tt, name: title });
-  }
+  // 2) grid cards with image + tconst (capture alt + poster)
+  // order of attributes varies; do two relaxed passes
+  const reImg1 = /<img[^>]*\sdata-tconst="(tt\d{7,})"[^>]*\salt="([^"]+)"[^>]*\s(?:src|loadlate)="([^"]+)"[^>]*>/gi;
+  const reImg2 = /<img[^>]*\salt="([^"]+)"[^>]*\s(?:src|loadlate)="([^"]+)"[^>]*\sdata-tconst="(tt\d{7,})"[^>]*>/gi;
+  const bump = (tt, name, poster) => {
+    const prev = map.get(tt) || { id: tt };
+    if (name && !prev.name) prev.name = name.trim();
+    if (poster && !prev.poster) prev.poster = poster;
+    map.set(tt, prev);
+  };
+  while ((m = reImg1.exec(html))) bump(m[1], m[2], m[3]);
+  while ((m = reImg2.exec(html))) bump(m[3], m[1], m[2]);
 
-  // 3) Any remaining tconsts (even without a title) to ensure completeness
+  // 3) Any remaining tconsts (even without title)
   const reAnyTconst = /(?:data-tconst|href="\/title\/)(tt\d{7,})/gi;
   while ((m = reAnyTconst.exec(html))) {
     const tt = m[1];
-    if (tt && !map.has(tt)) map.set(tt, { id: tt });
+    if (!map.has(tt)) map.set(tt, { id: tt });
   }
 
   return Array.from(map.values());
 }
 
-// Walk through list pages; try a few URL variants per page for maximum robustness
-async function fetchImdbListItemsAllPages(listUrl, maxPages = 25) {
-  const base = new URL(listUrl);
-  const variants = [
-    (u) => { u.searchParams.set("mode", "detail"); u.searchParams.set("sort", "listOrder,asc"); },
-    (u) => { u.searchParams.delete("mode");         u.searchParams.set("sort", "listOrder,asc"); },
-    (u) => { u.searchParams.delete("mode");         u.searchParams.delete("sort"); }
-  ];
+// Extract "next page" link from HTML (different IMDb layouts)
+function extractNextLink(html, currentUrl) {
+  let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
+  if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
+  if (!m) return null;
+  try {
+    return new URL(m[1], "https://www.imdb.com").toString();
+  } catch {
+    return null;
+  }
+}
 
+// Walk the entire list by following the page's own "next" link.
+// This is more reliable than trying to force ?page=2,3,... ourselves.
+async function fetchImdbListItemsAllPages(listUrl, maxPages = 200) {
   const seen = new Set();
   const items = [];
+  let url = new URL(listUrl).toString();
+  let pages = 0;
 
-  for (let p = 1; p <= maxPages; p++) {
-    let html = null;
-
-    for (const setup of variants) {
-      const u = new URL(base.toString());
-      setup(u);
-      u.searchParams.set("page", String(p));
-      u.searchParams.set("_", Date.now() + "" + Math.random().toString().slice(2)); // cache-buster
-
-      try {
-        const h = await fetchText(u.toString());
-        if (h && /tt\d{7,}/.test(h)) { html = h; break; }
-      } catch {
-        // try next variant
-      }
+  while (url && pages < maxPages) {
+    const u = new URL(url);
+    u.searchParams.set("_", Date.now() + "" + Math.random().toString().slice(2)); // cache-buster
+    let html;
+    try {
+      html = await fetchText(u.toString());
+    } catch {
+      break;
     }
-
-    if (!html) break; // nothing usable → stop
 
     const found = idsAndTitlesFromHtml(html);
     let added = 0;
-
     for (const it of found) {
       const tt = it.id;
       if (!tt || seen.has(tt)) continue;
       seen.add(tt);
-      if (it.name && !FALLBACK.has(tt)) FALLBACK.set(tt, { name: it.name });
-      items.push({ id: tt, name: it.name });
+      if ((it.name || it.poster) && !FALLBACK.has(tt)) FALLBACK.set(tt, { name: it.name, poster: it.poster });
+      else if (FALLBACK.has(tt)) {
+        // merge if we learned more info on a later page
+        const prev = FALLBACK.get(tt);
+        FALLBACK.set(tt, { name: prev.name || it.name, poster: prev.poster || it.poster });
+      }
+      items.push({ id: tt });
       added++;
     }
 
-    if (found.length === 0 || added === 0) break; // end reached
+    pages++;
+    const nextUrl = extractNextLink(html, url);
+    if (!nextUrl || added === 0) break;
+    url = nextUrl;
   }
 
   return items;
@@ -181,15 +170,11 @@ async function fetchImdbListItemsAllPages(listUrl, maxPages = 25) {
 // ---- Cinemeta (try movie then series) ----
 async function fetchCinemeta(kind, imdbId) {
   try {
-    const r = await fetch(
-      `${CINEMETA}/meta/${encodeURIComponent(kind)}/${encodeURIComponent(imdbId)}.json`
-    );
+    const r = await fetch(`${CINEMETA}/meta/${encodeURIComponent(kind)}/${encodeURIComponent(imdbId)}.json`);
     if (!r.ok) return null;
     const { meta } = await r.json();
     return meta || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 async function getBestMeta(imdbId) {
   if (BEST.has(imdbId)) return BEST.get(imdbId);
@@ -201,8 +186,6 @@ async function getBestMeta(imdbId) {
   BEST.set(imdbId, rec);
   return rec;
 }
-
-// limit concurrency when preloading many metas
 async function mapLimit(arr, limit, fn) {
   const results = new Array(arr.length);
   let i = 0;
@@ -220,27 +203,27 @@ async function mapLimit(arr, limit, fn) {
 function snapshotForId(tt) {
   const rec = BEST.get(tt) || { kind: null, meta: null };
   const meta = rec.meta;
-  const fb = FALLBACK.get(tt);
+  const fb = FALLBACK.get(tt) || {};
 
   const snap = {
     id: tt,
     type: rec.kind || "movie",
-    name: meta?.name || fb?.name || tt, // guaranteed human-ish name if IMDb provided it
+    name: (meta && meta.name) || fb.name || tt,
   };
-  if (meta) {
-    snap.poster      = meta.poster || undefined;
-    snap.background  = meta.background || undefined;
-    snap.logo        = meta.logo || undefined;
-    snap.imdbRating  = meta.imdbRating ?? meta.rating ?? undefined;
-    snap.runtime     = meta.runtime ?? undefined;
-    snap.year        = meta.year ?? undefined;
-    snap.releaseDate = meta.releaseInfo ?? meta.released ?? undefined;
-    snap.description = meta.description || undefined;
-  }
+  // prefer Cinemeta poster but fall back to IMDb image (m.media-amazon.com)
+  snap.poster      = (meta && meta.poster) || fb.poster || undefined;
+  snap.background  = meta && meta.background || undefined;
+  snap.logo        = meta && meta.logo || undefined;
+  snap.imdbRating  = (meta && (meta.imdbRating ?? meta.rating)) ?? undefined;
+  snap.runtime     = meta && meta.runtime ?? undefined;
+  snap.year        = meta && meta.year ?? undefined;
+  snap.releaseDate = meta && (meta.releaseInfo ?? meta.released) ?? undefined;
+  snap.description = meta && meta.description || undefined;
+
   return snap;
 }
 
-// ---- sorting helpers (nulls to bottom, stable) ----
+// ---- sorting (nulls to bottom, stable) ----
 function toTs(dateStr, year) {
   if (dateStr) { const t = Date.parse(dateStr); if (!Number.isNaN(t)) return t; }
   if (year)    { const t = Date.parse(`${year}-01-01`); if (!Number.isNaN(t)) return t; }
@@ -284,27 +267,21 @@ async function fullSync({ rediscover = true } = {}) {
   syncInProgress = true;
   const started = Date.now();
   try {
-    // 1) discover list set
     let cfg = parseImdbListsEnv();
     if ((!cfg || cfg.length === 0) && (IMDB_USER_URL || rediscover)) {
       try { cfg = await discoverListsFromUser(IMDB_USER_URL); }
       catch (e) { console.warn("IMDb discovery failed:", e.message); cfg = []; }
     }
 
-    // 2) fetch items per list; record fallback titles; collect unique ids
     const lists = {};
     const unique = new Set();
     for (const { name, url } of cfg) {
       const items = await fetchImdbListItemsAllPages(url).catch(() => []);
       lists[name] = { url, ids: items.map(it => it.id) };
-      items.forEach(it => {
-        if (it.name && !FALLBACK.has(it.id)) FALLBACK.set(it.id, { name: it.name });
-        unique.add(it.id);
-      });
+      items.forEach(it => unique.add(it.id));
     }
     LISTS = lists;
 
-    // manifest bump if catalogs changed
     const key = listsKey();
     if (key !== LAST_LISTS_KEY) {
       LAST_LISTS_KEY = key;
@@ -312,7 +289,6 @@ async function fullSync({ rediscover = true } = {}) {
       console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
     }
 
-    // 3) preload Cinemeta (movie→series) for all unique ids (limited concurrency)
     const idsAll = Array.from(unique);
     await mapLimit(idsAll, 8, async (tt) => {
       if (!isImdb(tt)) return null;
@@ -328,7 +304,6 @@ async function fullSync({ rediscover = true } = {}) {
   }
 }
 
-// schedule auto-sync
 function scheduleNextSync(reset = false) {
   if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
   if (IMDB_SYNC_MINUTES <= 0) return;
@@ -342,19 +317,15 @@ function scheduleNextSync(reset = false) {
 // initial sync + schedule
 fullSync({ rediscover: true }).then(() => scheduleNextSync(false));
 
-// if service slept, kick background sync on first useful request if stale
 function maybeBackgroundSync() {
   if (IMDB_SYNC_MINUTES <= 0) return;
   const tooOld = Date.now() - LAST_SYNC_AT > IMDB_SYNC_MINUTES * 60 * 1000;
   if (tooOld && !syncInProgress) fullSync({ rediscover: true }).then(() => scheduleNextSync(true));
 }
 
-// ---- express ----
+// ---- server ----
 const app = express();
-app.use((_, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  next();
-});
+app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
 
 function addonAllowed(req) {
   if (!SHARED_SECRET) return true;
@@ -369,10 +340,10 @@ function adminAllowed(req) {
 // HEALTH
 app.get("/health", (_, res) => res.status(200).send("ok"));
 
-// MANIFEST (auto-version; no-cache headers)
+// MANIFEST (auto-version; no-cache)
 const baseManifest = {
   id: "org.my.csvlists",
-  version: "8.4.0",
+  version: "8.5.0",
   name: "My Lists",
   description: "Your IMDb lists under one section; opens real title pages so streams load.",
   resources: ["catalog", "meta"],
@@ -467,8 +438,14 @@ app.get("/meta/:type/:id.json", async (req, res) => {
     if (!rec) rec = await getBestMeta(imdbId); // on-demand
 
     if (!rec || !rec.meta) {
-      const fb = FALLBACK.get(imdbId);
-      return res.json({ meta: { id: imdbId, type: rec?.kind || "movie", name: fb?.name || imdbId } });
+      const fb = FALLBACK.get(imdbId) || {};
+      const meta = {
+        id: imdbId,
+        type: rec?.kind || "movie",
+        name: fb.name || imdbId,
+        poster: fb.poster || undefined
+      };
+      return res.json({ meta });
     }
     return res.json({ meta: { ...rec.meta, id: imdbId, type: rec.kind } });
   } catch (e) {
@@ -486,7 +463,6 @@ function absoluteBase(req) {
 app.get("/admin", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
 
-  // Re-discover for UI (non-blocking for cache)
   let discovered = [];
   try {
     if (IMDB_USER_URL) {
@@ -494,7 +470,7 @@ app.get("/admin", async (req, res) => {
       u.searchParams.set("_", Date.now().toString());
       discovered = await discoverListsFromUser(u.toString());
     }
-  } catch { /* ignore */ }
+  } catch {}
 
   const manifestUrl = `${absoluteBase(req)}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`;
   const uiLists = Object.entries(LISTS)
@@ -546,7 +522,6 @@ app.get("/admin", async (req, res) => {
 </html>`);
 });
 
-// Force sync (re-discover + reset timer)
 app.post("/api/sync-imdb", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
