@@ -1,5 +1,4 @@
 {
-{
   "name": "my-stremio-addon",
   "version": "9.0.0",
   "description": "IMDb → Stremio addon. Syncs your IMDb lists every 60 min, serves them instantly with Cinemeta+IMDb fallback.",
