@@ -1,9 +1,9 @@
 /*  My Lists – IMDb → Cinemeta snapshot add-on
- *  v9.0 – instant catalogs from a preloaded snapshot
- *  - Auto-sync every IMDB_SYNC_MINUTES (60 default)
+ *  v9.1 – instant catalogs from a preloaded snapshot
+ *  - Auto-sync every IMDB_SYNC_MINUTES (default 60)
  *  - Force sync from /admin
- *  - Cinemeta posters/titles first; IMDb fallback (no TT placeholders)
- *  - Manifest auto-bump when list set changes
+ *  - Cinemeta posters/titles first; IMDb title-page fallback (no TT placeholders)
+ *  - Manifest auto-bump when list set changes (no reinstall)
  *  - Optional GitHub snapshot persistence for fast cold starts
  */
 
@@ -16,8 +16,8 @@ const HOST = "0.0.0.0";
 const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 
-const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/ur136127821/lists/
-const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional static whitelist: [{"name":"Marvel Movies","url":"https://www.imdb.com/list/ls.../"}]
+const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/urXXXX/lists/
+const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional whitelist: [{"name":"Marvel Movies","url":"https://www.imdb.com/list/ls.../"}]
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 
 const GITHUB_TOKEN   = process.env.GITHUB_TOKEN || "";
@@ -29,7 +29,7 @@ const SNAPSHOT_DIR   = process.env.SNAPSHOT_DIR || "snapshot";
 // ----------------- CONSTANTS -----------------
 const CINEMETA = "https://v3-cinemeta.strem.io";
 const SNAPSHOT_FILE = `${SNAPSHOT_DIR}/snapshot.json`;
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/9.0";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/9.1";
 
 // ----------------- STATE -----------------
 // lists: { [name]: { url, ids: [ 'tt...' ] } }
@@ -73,6 +73,11 @@ async function fetchJson(url) {
   if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
   return r.json();
 }
+function withParam(url, key, val) {
+  const u = new URL(url);
+  u.searchParams.set(key, val);
+  return u.toString();
+}
 
 // ----------------- GITHUB SNAPSHOT (optional) -----------------
 const GH_ENABLED = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
@@ -105,11 +110,7 @@ async function ghWriteSnapshot(obj) {
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
   const sha = await ghGetSha(SNAPSHOT_FILE);
-  const body = {
-    message: "Update snapshot.json",
-    content,
-    branch: SNAPSHOT_BRANCH
-  };
+  const body = { message: "Update snapshot.json", content, branch: SNAPSHOT_BRANCH };
   if (sha) body.sha = sha;
   await ghRequest("PUT", `/contents/${encodeURIComponent(SNAPSHOT_FILE)}`, body);
 }
@@ -136,14 +137,16 @@ async function discoverListsFromUser(userListsUrl) {
   const u = new URL(userListsUrl);
   u.searchParams.set("_", Date.now().toString());
   const html = await fetchText(u.toString(), "text/html");
-  // capture only /list/ls... rows
-  const re = /href="\/list\/(ls\d{6,})\/[^"]*"\s*>\s*([^<]+)</gi;
+  // capture only /list/ls... cards/links
   const map = new Map();
+  // Common link for list title:
+  const re = /<a[^>]+href="\/list\/(ls\d{6,})\/"[^>]*>(.*?)<\/a>/gi;
   let m;
   while ((m = re.exec(html))) {
     const id = m[1];
-    const name = m[2].replace(/\s+/g, " ").trim();
-    map.set(id, { name, url: `https://www.imdb.com/list/${id}/` });
+    const raw = m[2].replace(/<[^>]+>/g, "");
+    const name = raw.replace(/\s+/g, " ").trim();
+    if (!map.has(id) && name) map.set(id, { name, url: `https://www.imdb.com/list/${id}/` });
   }
   return Array.from(map.values());
 }
@@ -199,7 +202,6 @@ function idsAndTitlesFromHtmlStrict(html) {
     const m2 = block.match(/href="\/title\/(tt\d{7,})\//i);
     if (m2) {
       const tt = m2[1];
-      // title text or img alt
       const t = block.match(/<a[^>]*>(.*?)<\/a>/i);
       const title = t ? t[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : "";
       const img = block.match(/<img[^>]+alt="([^"]+)"[^>]*?(?:loadlate|src)="([^"]+)"/i);
@@ -213,7 +215,7 @@ function idsAndTitlesFromHtmlStrict(html) {
     }
   }
 
-  // 4) fallback inside scoped only: any /title/ links + nearby img alt
+  // 4) fallback inside scoped only: any /title/ links + nearby anchor text
   const reAny = /<a[^>]+href="\/title\/(tt\d{7,})\/[^"]*"[^>]*>(.*?)<\/a>/gi;
   while ((m = reAny.exec(scoped))) {
     const tt = m[1];
@@ -225,21 +227,14 @@ function idsAndTitlesFromHtmlStrict(html) {
 
   return Array.from(found.values());
 }
-
 function findNextLink(html) {
   let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
   if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
+  if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*data-testid="pagination-next-page-button"[^>]*>/i);
   if (!m) return null;
   try { return new URL(m[1], "https://www.imdb.com").toString(); }
   catch { return null; }
 }
-
-function withParam(url, key, val) {
-  const u = new URL(url);
-  u.searchParams.set(key, val);
-  return u.toString();
-}
-
 async function fetchImdbListItems(listUrl) {
   // try multiple modes and paginate
   const modes = ["detail", "grid", "compact"];
@@ -272,6 +267,37 @@ async function fetchImdbListItems(listUrl) {
     if (items.length) break; // success
   }
   return items;
+}
+
+// ----------------- Strong IMDb title-page fallback -----------------
+async function fetchImdbTitleFallback(tt) {
+  try {
+    const html = await fetchText(`https://www.imdb.com/title/${tt}/`, "text/html");
+
+    // JSON-LD first
+    const m = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/i);
+    if (m) {
+      try {
+        const j = JSON.parse(m[1]);
+        const node = Array.isArray(j && j["@graph"]) ? j["@graph"][0] : j;
+        let name = null, image = null;
+        if (node && typeof node === "object") {
+          if (typeof node.name === "string") name = node.name;
+          if (typeof node.headline === "string" && !name) name = node.headline;
+          if (typeof node.image === "string") image = node.image;
+          else if (node.image && typeof node.image.url === "string") image = node.image.url;
+        }
+        if (name || image) return { name: name || null, poster: image || null };
+      } catch (_) { /* continue to OG */ }
+    }
+
+    // OpenGraph fallback
+    const t = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i);
+    const p = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i);
+    return { name: t ? t[1] : null, poster: p ? p[1] : null };
+  } catch (_) {
+    return { name: null, poster: null };
+  }
 }
 
 // ----------------- Cinemeta -----------------
@@ -311,20 +337,32 @@ async function mapLimit(arr, limit, fn) {
 // Build a “card” for catalogs from BEST + FALLBACK
 function buildCard(tt) {
   const rec = BEST.get(tt) || { kind: null, meta: null };
-  const meta = rec.meta;
+  const meta = rec.meta || null;
   const fb = FALLBACK.get(tt) || {};
+  const nameFromMeta = meta && typeof meta.name === "string" ? meta.name : null;
+  const posterFromMeta = meta && typeof meta.poster === "string" ? meta.poster : null;
+  const backgroundFromMeta = meta && typeof meta.background === "string" ? meta.background : null;
+  const logoFromMeta = meta && typeof meta.logo === "string" ? meta.logo : null;
+  const imdbRatingFromMeta =
+    meta && (meta.imdbRating !== undefined ? meta.imdbRating : (meta.rating !== undefined ? meta.rating : null));
+  const runtimeFromMeta = meta && meta.runtime !== undefined ? meta.runtime : null;
+  const yearFromMeta = meta && meta.year !== undefined ? meta.year : null;
+  const releaseFromMeta =
+    meta && (meta.releaseInfo !== undefined ? meta.releaseInfo : (meta.released !== undefined ? meta.released : null));
+  const descFromMeta = meta && typeof meta.description === "string" ? meta.description : null;
+
   const card = {
     id: tt,
     type: rec.kind || "movie",
-    name: meta && meta.name ? meta.name : (fb.name || tt),
-    poster: meta && meta.poster ? meta.poster : (fb.poster || undefined),
-    background: meta && meta.background ? meta.background : undefined,
-    logo: meta && meta.logo ? meta.logo : undefined,
-    imdbRating: (meta && (meta.imdbRating != null ? meta.imdbRating : meta.rating != null ? meta.rating : null)),
-    runtime: meta && meta.runtime != null ? meta.runtime : undefined,
-    year: meta && meta.year != null ? meta.year : undefined,
-    releaseDate: meta && (meta.releaseInfo || meta.released) ? (meta.releaseInfo || meta.released) : undefined,
-    description: meta && meta.description ? meta.description : undefined
+    name: nameFromMeta || fb.name || tt,
+    poster: posterFromMeta || fb.poster || undefined,
+    background: backgroundFromMeta || undefined,
+    logo: logoFromMeta || undefined,
+    imdbRating: imdbRatingFromMeta !== null ? imdbRatingFromMeta : undefined,
+    runtime: runtimeFromMeta !== null ? runtimeFromMeta : undefined,
+    year: yearFromMeta !== null ? yearFromMeta : undefined,
+    releaseDate: releaseFromMeta !== null ? releaseFromMeta : undefined,
+    description: descFromMeta || undefined
   };
   return card;
 }
@@ -403,12 +441,23 @@ async function fullSync({ rediscover = true } = {}) {
     const idsAll = Array.from(allIdsSet);
     await mapLimit(idsAll, 8, async (tt) => { if (isImdb(tt)) await getBestMeta(tt); });
 
-    // build cards snapshot
+    // build cards snapshot, then backfill any weak bits from IMDb title page
     CARDS.clear();
-    for (let i=0;i<idsAll.length;i++) {
-      const tt = idsAll[i];
-      CARDS.set(tt, buildCard(tt));
-    }
+    await mapLimit(idsAll, 6, async (tt) => {
+      let card = buildCard(tt);
+      const weakName = !card.name || /^tt\d{7,}$/i.test(card.name);
+      const weakPoster = !card.poster;
+
+      if (weakName || weakPoster) {
+        const fb = await fetchImdbTitleFallback(tt);
+        if (fb.name && weakName) card.name = fb.name;
+        if (fb.poster && weakPoster) card.poster = fb.poster;
+
+        const prev = FALLBACK.get(tt) || {};
+        FALLBACK.set(tt, { name: card.name || prev.name || undefined, poster: card.poster || prev.poster || undefined });
+      }
+      CARDS.set(tt, card);
+    });
 
     LISTS = nextLISTS;
 
@@ -441,7 +490,6 @@ async function fullSync({ rediscover = true } = {}) {
     syncInProgress = false;
   }
 }
-
 function scheduleNextSync(reset) {
   if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
   if (IMDB_SYNC_MINUTES <= 0) return;
@@ -451,7 +499,6 @@ function scheduleNextSync(reset) {
     scheduleNextSync(true);
   }, reset ? delay : delay);
 }
-
 async function loadSnapshotFromGitHubAtBoot() {
   if (!GH_ENABLED) return false;
   const obj = await ghReadSnapshot();
@@ -510,7 +557,7 @@ app.get("/health", (_, res) => res.status(200).send("ok"));
 // ---- Manifest (no-cache; auto-version bump) ----
 const baseManifest = {
   id: "org.my.csvlists",
-  version: "9.0.0",
+  version: "9.1.0",
   name: "My Lists",
   description: "Your IMDb lists as instant catalogs; opens real pages so streams load.",
   resources: ["catalog", "meta"],
@@ -570,7 +617,12 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
     const skip = Math.max(0, Number(extra.skip || 0));
     const limit = Math.min(Number(extra.limit || 100), 200);
 
-    let metas = list.ids.map((tt) => CARDS.get(tt) || { id: tt, type: "movie", name: FALLBACK.get(tt)?.name || tt });
+    let metas = list.ids.map((tt) => {
+      const c = CARDS.get(tt);
+      if (c) return c;
+      const fb = FALLBACK.get(tt) || {};
+      return { id: tt, type: "movie", name: fb.name || tt, poster: fb.poster || undefined };
+    });
 
     if (q) {
       metas = metas.filter(m =>
@@ -603,7 +655,7 @@ app.get("/meta/:type/:id.json", async (req, res) => {
 
     if (!rec || !rec.meta) {
       const fb = FALLBACK.get(imdbId) || {};
-      return res.json({ meta: { id: imdbId, type: rec && rec.kind ? rec.kind : "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
+      return res.json({ meta: { id: imdbId, type: (rec && rec.kind) ? rec.kind : "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
     }
     return res.json({ meta: { ...rec.meta, id: imdbId, type: rec.kind } });
   } catch (e) {
@@ -691,8 +743,5 @@ app.post("/api/sync", async (req, res) => {
   // Initial sync (non-blocking)
   fullSync({ rediscover: true }).then(() => scheduleNextSync(false));
 
-  app.listen(PORT, HOST, () => {
-    console.log(`Admin: http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
-    console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
-  });
+  const app = express();
 })();
