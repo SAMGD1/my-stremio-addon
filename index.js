@@ -1,9 +1,9 @@
-/* My Lists — IMDb → Cinemeta snapshot add-on (stable)
-   - Discovers public lists from IMDB_USER_URL automatically
-   - Uses /export CSV for each list (most reliable), HTML as fallback
-   - Prebuilds posters/titles via Cinemeta, with title-page fallback
-   - Snapshots to GitHub (optional) for instant cold starts
-   - Manifest auto-bumps on list-set change (no reinstall)
+/* My Lists — IMDb → Cinemeta snapshot add-on (v9.3)
+   - Auto-discovers public lists from IMDB_USER_URL
+   - Preferred: CSV /export; Fallback: HTML with full pagination (detail/grid/compact)
+   - Prebuilds tiles (posters/titles) via Cinemeta + per-title IMDb fallback
+   - Manifest auto-bump on list-set changes (no reinstall)
+   - Optional GitHub snapshot for fast cold starts
 */
 
 const express = require("express");
@@ -28,19 +28,15 @@ const SNAPSHOT_DIR    = process.env.SNAPSHOT_DIR    || "snapshot";
 const GH_ENABLED = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 
 // ---------- CONSTANTS ----------
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyLists/Stable";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyLists/9.3";
 const CINEMETA = "https://v3-cinemeta.strem.io";
 const SNAPSHOT_FILE = `${SNAPSHOT_DIR}/snapshot.json`;
 
 // ---------- STATE ----------
-/** LISTS[name] = { url, ids: ['tt...'] } */
-let LISTS = Object.create(null);
-/** FALLBACK: Map<tt, {name?:string, poster?:string}> */
-const FALLBACK = new Map();
-/** BEST: Map<tt, {kind:'movie'|'series'|null, meta:object|null}> */
-const BEST = new Map();
-/** CARDS: Map<tt, cardObject> built after sync for instant catalogs */
-const CARDS = new Map();
+let LISTS = Object.create(null);                      // { [name]: {url, ids: ['tt...']} }
+const FALLBACK = new Map();                           // Map<tt, {name?:string, poster?:string}>
+const BEST = new Map();                               // Map<tt, {kind:'movie'|'series'|null, meta:object|null}>
+const CARDS = new Map();                              // Map<tt, prebuilt card>
 
 let LAST_SYNC_AT = 0;
 let MANIFEST_REV = 1;
@@ -50,27 +46,28 @@ let syncTimer = null;
 let syncing = false;
 
 // ---------- UTILS ----------
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const isImdb = v => /^tt\d{7,}$/.test(String(v||""));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const isImdb = (v) => /^tt\d{7,}$/.test(String(v||""));
 const listsKey = () => JSON.stringify(Object.keys(LISTS).sort());
 
-async function fetchText(url, accept) {
+async function fetchRaw(url, opts = {}) {
   const r = await fetch(url, {
+    ...opts,
     headers: {
       "User-Agent": UA,
-      "Accept": accept || "text/html,application/xhtml+xml",
       "Accept-Language": "en-US,en;q=0.9",
-      "Cache-Control": "no-cache"
+      ...(opts.headers || {})
     }
   });
   if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
+  return r;
+}
+async function fetchText(url, accept) {
+  const r = await fetchRaw(url, { headers: accept ? { Accept: accept } : {} });
   return r.text();
 }
 async function fetchJson(url) {
-  const r = await fetch(url, {
-    headers: { "User-Agent": UA, "Accept": "application/json", "Accept-Language": "en-US,en;q=0.9" }
-  });
-  if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
+  const r = await fetchRaw(url, { headers: { Accept: "application/json" } });
   return r.json();
 }
 
@@ -88,7 +85,7 @@ async function ghRequest(method, path, body) {
     body: body ? JSON.stringify(body) : undefined
   });
   if (!r.ok) {
-    const t = await r.text().catch(() => "");
+    const t = await r.text().catch(()=> "");
     throw new Error(`GitHub ${method} ${path} -> ${r.status}: ${t}`);
   }
   return r.json();
@@ -102,10 +99,8 @@ async function ghGetSha(path) {
 async function ghReadSnapshot() {
   if (!GH_ENABLED) return null;
   try {
-    const data = await ghGetSha(SNAPSHOT_FILE);
-    if (!data) return null; // file not found
-    const resp = await ghRequest("GET", `/contents/${encodeURIComponent(SNAPSHOT_FILE)}?ref=${encodeURIComponent(SNAPSHOT_BRANCH)}`);
-    const buf = Buffer.from(resp.content, "base64").toString("utf8");
+    const data = await ghRequest("GET", `/contents/${encodeURIComponent(SNAPSHOT_FILE)}?ref=${encodeURIComponent(SNAPSHOT_BRANCH)}`);
+    const buf = Buffer.from(data.content, "base64").toString("utf8");
     return JSON.parse(buf);
   } catch { return null; }
 }
@@ -118,95 +113,181 @@ async function ghWriteSnapshot(obj) {
   await ghRequest("PUT", `/contents/${encodeURIComponent(SNAPSHOT_FILE)}`, body);
 }
 
-// ---------- IMDb discovery & parsing ----------
-
-/** Find list links on the user page (public lists only) */
+// ---------- IMDb discovery ----------
+function extractListIdsFromUserHtml(html) {
+  const ids = new Set();
+  // any anchor to /list/lsXXXX/
+  let m, re = /href="\/list\/(ls\d{6,})\/"/gi;
+  while ((m = re.exec(html))) ids.add(m[1]);
+  return Array.from(ids);
+}
+async function fetchListName(listId) {
+  try {
+    const html = await fetchText(`https://www.imdb.com/list/${listId}/`, "text/html");
+    // Try H1 first
+    let m = html.match(/<h1[^>]*>(.*?)<\/h1>/i);
+    if (m) return m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    // Fallback to <title>
+    m = html.match(/<title>(.*?)<\/title>/i);
+    if (m) return m[1].replace(/- IMDb\s*$/i, "").trim();
+  } catch { /* ignore */ }
+  return `List ${listId}`;
+}
 async function discoverListsFromUser(userListsUrl) {
   if (!userListsUrl) return [];
   const html = await fetchText(userListsUrl, "text/html");
-  const found = new Map();
-  // Anchors like <a href="/list/ls4106685462/">Fallout Series</a>
-  const re = /<a[^>]+href="\/list\/(ls\d{6,})\/"[^>]*>(.*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html))) {
-    const id = m[1];
-    const raw = m[2].replace(/<[^>]+>/g, "");
-    const name = raw.replace(/\s+/g, " ").trim();
-    if (!found.has(id) && name) {
-      found.set(id, { name, url: `https://www.imdb.com/list/${id}/` });
-    }
+  const ids = extractListIdsFromUserHtml(html);
+  // If we didn't see names on the user page, resolve each list's name from its page
+  const results = [];
+  for (const id of ids) {
+    const name = await fetchListName(id);
+    results.push({ name, url: `https://www.imdb.com/list/${id}/` });
+    await sleep(120);
   }
-  return Array.from(found.values());
+  return results;
 }
 
-/** Preferred: CSV export endpoint — super stable for public lists */
+// ---------- IMDb list loaders ----------
 async function loadListViaCSV(listUrl) {
-  // ensure trailing slash before "export"
   const url = listUrl.endsWith("/") ? `${listUrl}export` : `${listUrl}/export`;
   const csv = await fetchText(url, "text/csv");
   const rows = parse(csv, { columns: true, skip_empty_lines: true });
-  const items = [];
+  const out = [];
   for (const r of rows) {
     const tt = String(r.Const || "").trim();
     if (!isImdb(tt)) continue;
-    items.push({ id: tt });
-    // keep fallback name immediately (fast)
+    out.push({ id: tt });
     if (r.Title && !FALLBACK.has(tt)) FALLBACK.set(tt, { name: r.Title });
   }
-  return items;
+  return out;
 }
 
-/** Fallback: parse list HTML when CSV fails */
-async function loadListViaHTML(listUrl) {
-  const html = await fetchText(listUrl, "text/html");
-  const items = [];
-  const seen = new Set();
-
-  // New UI summary items
-  let re = /<li[^>]+class="[^"]*\bipc-metadata-list-summary-item\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+// ---- Robust HTML fallback with pagination (detail → grid → compact) ----
+function extractBlock(html) {
+  const tries = [
+    /<div[^>]+class="[^"]*\blister-list\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    /<ul[^>]+class="[^"]*\bipc-metadata-list\b[^"]*"[^>]*>([\s\S]*?)<\/ul>/i,
+    /<section[^>]+data-testid="[^"]*list[^"]*"[^>]*>([\s\S]*?)<\/section>/i
+  ];
+  for (const rx of tries) {
+    const m = html.match(rx);
+    if (m && m[1]) return m[1];
+  }
+  return html;
+}
+function parseItemsFromHtml(html) {
+  const scoped = extractBlock(html);
+  const found = new Map();
   let m;
-  while ((m = re.exec(html))) {
-    const block = m[1];
-    const t = block.match(/href="\/title\/(tt\d{7,})\//i);
-    if (!t) continue;
-    const tt = t[1];
-    if (seen.has(tt)) continue;
-    seen.add(tt);
-    const at = block.match(/<a[^>]*>(.*?)<\/a>/i);
-    const img = block.match(/<img[^>]+alt="([^"]+)"[^>]*?(?:loadlate|src)="([^"]+)"/i);
-    const name = at ? at[1].replace(/<[^>]+>/g, "").trim() : (img ? img[1] : "");
-    const poster = img ? img[2] : "";
-    if (name || poster) {
-      const prev = FALLBACK.get(tt) || {};
-      FALLBACK.set(tt, { name: prev.name || name, poster: prev.poster || poster });
-    }
-    items.push({ id: tt });
+
+  // data-tconst (grid/new UI)
+  const reData = /data-tconst="(tt\d{7,})"/gi;
+  while ((m = reData.exec(scoped))) {
+    const tt = m[1];
+    if (!found.has(tt)) found.set(tt, { id: tt });
   }
 
-  // Classic lister blocks (extra safety)
-  re = /<div[^>]+class="[^"]*\blister-item\b[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
-  while ((m = re.exec(html))) {
+  // classic lister block
+  const reLister = /<div[^>]+class="[^"]*\blister-item\b[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+  while ((m = reLister.exec(scoped))) {
     const block = m[1];
     const t = block.match(/href="\/title\/(tt\d{7,})\//i);
-    if (!t) continue;
-    const tt = t[1];
-    if (seen.has(tt)) continue;
-    seen.add(tt);
-    const nameMatch = block.match(/<h3[^>]*>[\s\S]*?<a[^>]*>(.*?)<\/a>/i);
-    const img = block.match(/<img[^>]+(?:loadlate|src)="([^"]+)"/i);
-    const title = nameMatch ? nameMatch[1].replace(/<[^>]+>/g, "").trim() : "";
-    const poster = img ? img[1] : "";
-    if (title || poster) {
-      const prev = FALLBACK.get(tt) || {};
-      FALLBACK.set(tt, { name: prev.name || title, poster: prev.poster || poster });
+    if (t) {
+      const tt = t[1];
+      const nm = block.match(/<h3[^>]*>[\s\S]*?<a[^>]*>(.*?)<\/a>/i);
+      const title = nm ? nm[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : "";
+      const img = block.match(/<img[^>]+(?:loadlate|src)="([^"]+)"/i);
+      const poster = img ? img[1] : "";
+      const prev = found.get(tt) || { id: tt };
+      if (title && !prev.name) prev.name = title;
+      if (poster && !prev.poster) prev.poster = poster;
+      found.set(tt, prev);
     }
-    items.push({ id: tt });
+  }
+
+  // new UI summary item
+  const reSumm = /<li[^>]+class="[^"]*\bipc-metadata-list-summary-item\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+  while ((m = reSumm.exec(scoped))) {
+    const block = m[1];
+    const t = block.match(/href="\/title\/(tt\d{7,})\//i);
+    if (t) {
+      const tt = t[1];
+      const at = block.match(/<a[^>]*>(.*?)<\/a>/i);
+      const img = block.match(/<img[^>]+alt="([^"]+)"[^>]*?(?:loadlate|src)="([^"]+)"/i);
+      const title = at ? at[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : (img ? img[1] : "");
+      const poster = img ? img[2] : "";
+      const prev = found.get(tt) || { id: tt };
+      if (title && !prev.name) prev.name = title;
+      if (poster && !prev.poster) prev.poster = poster;
+      found.set(tt, prev);
+    }
+  }
+
+  // safety: any /title/ link nearby text
+  const reAny = /<a[^>]+href="\/title\/(tt\d{7,})\/[^"]*"[^>]*>(.*?)<\/a>/gi;
+  while ((m = reAny.exec(scoped))) {
+    const tt = m[1];
+    const maybe = m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    const prev = found.get(tt) || { id: tt };
+    if (maybe && !prev.name) prev.name = maybe;
+    found.set(tt, prev);
+  }
+
+  return Array.from(found.values());
+}
+function findNextLink(html) {
+  let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
+  if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
+  if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*data-testid="pagination-next-page-button"[^>]*>/i);
+  if (!m) return null;
+  try { return new URL(m[1], "https://www.imdb.com").toString(); }
+  catch { return null; }
+}
+function withParam(url, key, val) {
+  const u = new URL(url);
+  u.searchParams.set(key, val);
+  return u.toString();
+}
+async function loadListViaHTML(listUrl) {
+  const modes = ["detail", "grid", "compact"];
+  const seen = new Set();
+  const items = [];
+
+  for (const mode of modes) {
+    let url = withParam(listUrl, "mode", mode);
+    let pages = 0;
+
+    while (url && pages < 100) {
+      let html;
+      try { html = await fetchText(withParam(url, "_", Date.now().toString()), "text/html"); }
+      catch { break; }
+
+      const found = parseItemsFromHtml(html);
+      let added = 0;
+      for (const it of found) {
+        const tt = it.id;
+        if (!isImdb(tt) || seen.has(tt)) continue;
+        seen.add(tt); added++;
+        if (!FALLBACK.has(tt) && (it.name || it.poster)) {
+          FALLBACK.set(tt, { name: it.name, poster: it.poster });
+        }
+        items.push({ id: tt });
+      }
+
+      pages++;
+      const next = findNextLink(html);
+      if (!next || added === 0) break;
+      url = next;
+      await sleep(120);
+    }
+
+    if (items.length) break; // success in this mode
   }
 
   return items;
 }
 
-// ---------- Cinemeta + fallbacks ----------
+// ---------- Cinemeta + per-title fallback ----------
 async function fetchCinemeta(kind, tt) {
   try {
     const r = await fetch(`${CINEMETA}/meta/${kind}/${tt}.json`, {
@@ -227,24 +308,26 @@ async function getBestMeta(tt) {
   BEST.set(tt, rec);
   return rec;
 }
-
-/** Per-title fallback: title page JSON-LD / OpenGraph */
 async function imdbTitleFallback(tt) {
   try {
     const html = await fetchText(`https://www.imdb.com/title/${tt}/`, "text/html");
-    // JSON-LD first
-    const m = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/i);
+    // JSON-LD
+    let m = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/i);
     if (m) {
       try {
         const j = JSON.parse(m[1]);
         const node = Array.isArray(j && j["@graph"]) ? j["@graph"][0] : j;
-        const name = (node && node.name) || node && node.headline || null;
-        let image = null;
-        if (node && typeof node.image === "string") image = node.image;
-        else if (node && node.image && node.image.url) image = node.image.url;
-        return { name, poster: image || null };
+        let name = null, img = null;
+        if (node && typeof node === "object") {
+          if (typeof node.name === "string") name = node.name;
+          if (!name && typeof node.headline === "string") name = node.headline;
+          if (typeof node.image === "string") img = node.image;
+          else if (node.image && node.image.url) img = node.image.url;
+        }
+        if (name || img) return { name: name || null, poster: img || null };
       } catch { /* fallthrough */ }
     }
+    // OpenGraph fallback
     const t = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i);
     const p = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i);
     return { name: t ? t[1] : null, poster: p ? p[1] : null };
@@ -263,52 +346,35 @@ function buildCard(tt) {
     poster: (meta && meta.poster) || fb.poster || undefined,
     background: meta && meta.background || undefined,
     logo: meta && meta.logo || undefined,
-    imdbRating: meta && (meta.imdbRating ?? meta.rating),
+    imdbRating: meta ? (meta.imdbRating !== undefined ? meta.imdbRating : meta.rating) : undefined,
     runtime: meta && meta.runtime,
     year: meta && meta.year,
-    releaseDate: meta && (meta.releaseInfo ?? meta.released),
+    releaseDate: meta && (meta.releaseInfo || meta.released),
     description: meta && meta.description || undefined
   };
 }
 function toTs(d, y) {
-  if (d) {
-    const n = Date.parse(d); if (!Number.isNaN(n)) return n;
-  }
-  if (y) {
-    const n = Date.parse(`${y}-01-01`); if (!Number.isNaN(n)) return n;
-  }
+  if (d) { const n = Date.parse(d); if (!Number.isNaN(n)) return n; }
+  if (y) { const n = Date.parse(`${y}-01-01`); if (!Number.isNaN(n)) return n; }
   return null;
 }
 function stableSort(items, sortKey) {
   const s = String(sortKey || "name_asc").toLowerCase();
   const dir = s.endsWith("_asc") ? 1 : -1;
   const key = s.split("_")[0];
-
-  const cmpNullBottom = (a, b) => {
-    const na = a == null, nb = b == null;
-    if (na && nb) return 0;
-    if (na) return 1;
-    if (nb) return -1;
-    return a < b ? -1 : a > b ? 1 : 0;
-  };
-
+  const cmpNullBottom = (a,b) => (a==null && b==null) ? 0 : (a==null?1:(b==null?-1:(a<b?-1:(a>b?1:0))));
   return items
-    .map((m, i) => ({ m, i }))
-    .sort((A, B) => {
-      const a = A.m, b = B.m;
-      let c = 0;
-      if (key === "date") c = cmpNullBottom(toTs(a.releaseDate, a.year), toTs(b.releaseDate, b.year));
-      else if (key === "rating") c = cmpNullBottom(a.imdbRating, b.imdbRating);
-      else if (key === "runtime") c = cmpNullBottom(a.runtime, b.runtime);
-      else c = (a.name || "").localeCompare(b.name || "");
-      if (c === 0) {
-        c = (a.name || "").localeCompare(b.name || "");
-        if (c === 0) c = (a.id || "").localeCompare(b.id || "");
-        if (c === 0) c = A.i - B.i;
-      }
-      return c * dir;
+    .map((m,i)=>({m,i}))
+    .sort((A,B)=>{
+      const a=A.m,b=B.m; let c=0;
+      if (key==="date") c=cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
+      else if (key==="rating") c=cmpNullBottom(a.imdbRating,b.imdbRating);
+      else if (key==="runtime") c=cmpNullBottom(a.runtime,b.runtime);
+      else c=(a.name||"").localeCompare(b.name||"");
+      if (c===0){ c=(a.name||"").localeCompare(b.name||""); if(c===0) c=(a.id||"").localeCompare(b.id||""); if(c===0) c=A.i-B.i; }
+      return c*dir;
     })
-    .map(x => x.m);
+    .map(x=>x.m);
 }
 
 // ---------- SYNC ----------
@@ -316,19 +382,18 @@ async function fullSync() {
   if (syncing) return;
   syncing = true;
   try {
-    // 1) discover lists (keeps previous if discovery fails)
+    // 1) discover lists
     let listsCfg = [];
     if (IMDB_USER_URL) {
       try { listsCfg = await discoverListsFromUser(IMDB_USER_URL); }
       catch (e) { console.warn("Discovery failed:", e.message); }
     }
-
     if (!listsCfg.length) {
       console.warn("No lists discovered (or IMDb unreachable). Keeping previous lists.");
-      listsCfg = Object.keys(LISTS).map(name => ({ name, url: LISTS[name].url }));
+      listsCfg = Object.keys(LISTS).map(n => ({ name:n, url: LISTS[n].url }));
     }
 
-    // 2) fetch items per list (prefer CSV -> fallback HTML)
+    // 2) fetch items per list (CSV → HTML w/ pagination)
     const nextLISTS = Object.create(null);
     const allIds = new Set();
 
@@ -342,31 +407,25 @@ async function fullSync() {
       }
       nextLISTS[L.name] = { url: L.url, ids: items.map(x => x.id) };
       for (const it of items) allIds.add(it.id);
-      // be nice to IMDb between lists
-      await sleep(250);
+      await sleep(200);
     }
 
-    // 3) preload Cinemeta and build cards + title-page fallback (only during sync)
+    // 3) preload Cinemeta & build cards; backfill from IMDb title pages
     BEST.clear(); CARDS.clear();
     const ids = Array.from(allIds);
 
-    // limit concurrency a bit
-    const workers = 8;
     let i = 0;
-    await Promise.all(new Array(Math.min(workers, ids.length)).fill(0).map(async () => {
+    await Promise.all(new Array(Math.min(8, ids.length)).fill(0).map(async ()=>{
       while (i < ids.length) {
-        const idx = i++;
-        const tt = ids[idx];
+        const idx = i++; const tt = ids[idx];
         await getBestMeta(tt);
       }
     }));
 
-    // build cards and backfill missing name/poster from title pages
     i = 0;
-    await Promise.all(new Array(Math.min(6, ids.length)).fill(0).map(async () => {
+    await Promise.all(new Array(Math.min(6, ids.length)).fill(0).map(async ()=>{
       while (i < ids.length) {
-        const idx = i++;
-        const tt = ids[idx];
+        const idx = i++; const tt = ids[idx];
         let card = buildCard(tt);
         const weakName = !card.name || /^tt\d+/.test(card.name);
         const weakPoster = !card.poster;
@@ -384,13 +443,9 @@ async function fullSync() {
 
     LISTS = nextLISTS;
 
-    // 4) bump manifest if list set changed
+    // 4) manifest bump if set changed
     const key = listsKey();
-    if (key !== LAST_LISTS_KEY) {
-      LAST_LISTS_KEY = key;
-      MANIFEST_REV++;
-      console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
-    }
+    if (key !== LAST_LISTS_KEY) { LAST_LISTS_KEY = key; MANIFEST_REV++; console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV); }
 
     LAST_SYNC_AT = Date.now();
     console.log(`[SYNC] ${ids.length} ids across ${Object.keys(LISTS).length} lists`);
@@ -446,7 +501,7 @@ app.get("/health", (_, res) => res.status(200).send("ok"));
 // manifest
 const baseManifest = {
   id: "org.my.csvlists",
-  version: "9.2.0",
+  version: "9.3.0",
   name: "My Lists",
   description: "Your IMDb lists as instant catalogs; opens real movie/series pages so streams load.",
   resources: ["catalog", "meta"],
@@ -603,32 +658,23 @@ app.post("/api/sync", async (req, res) => {
 
 // ---------- BOOT ----------
 (async () => {
-  // try to warm with snapshot (instant catalogs on cold start)
+  // warm with snapshot if available
   if (GH_ENABLED) {
     try {
       const snap = await ghReadSnapshot();
       if (snap) {
         LISTS = snap.lists || Object.create(null);
-        FALLBACK.clear();
-        if (snap.fallback) for (const [k, v] of Object.entries(snap.fallback)) FALLBACK.set(k, v);
-        CARDS.clear();
-        if (snap.cards) for (const [k, v] of Object.entries(snap.cards)) CARDS.set(k, v);
+        FALLBACK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBACK.set(k, v);
+        CARDS.clear(); if (snap.cards) for (const [k,v] of Object.entries(snap.cards)) CARDS.set(k, v);
         MANIFEST_REV = snap.manifestRev || 1;
         LAST_SYNC_AT = snap.lastSyncAt || 0;
         LAST_LISTS_KEY = listsKey();
         console.log("[BOOT] snapshot loaded from GitHub");
-      } else {
-        console.log("[BOOT] no snapshot found at GitHub");
       }
-    } catch (e) {
-      console.warn("[BOOT] snapshot load failed:", e.message);
-    }
+    } catch (e) { console.warn("[BOOT] snapshot load failed:", e.message); }
   }
 
-  // kick first sync & scheduler
   fullSync().then(() => scheduleAutoSync()).catch(()=>{ scheduleAutoSync(); });
-
-  // start server
   app.listen(PORT, HOST, () => {
     console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
     console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
