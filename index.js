@@ -1,6 +1,7 @@
 // My Lists (IMDb-only) Stremio add-on
-// v8.5 – follows IMDb "next" pagination, IMDb fallback titles + posters,
-// cached snapshot, Cinemeta preload, auto/force sync, manifest auto-bump.
+// v8.5.1 – follows IMDb "next" pagination, IMDb fallback titles+posters,
+// cached snapshot, Cinemeta preload, auto/force sync, manifest auto-bump,
+// and NO mixing of && with ?? (Node-safe).
 
 const express = require("express");
 
@@ -90,7 +91,6 @@ function idsAndTitlesFromHtml(html) {
   }
 
   // 2) grid cards with image + tconst (capture alt + poster)
-  // order of attributes varies; do two relaxed passes
   const reImg1 = /<img[^>]*\sdata-tconst="(tt\d{7,})"[^>]*\salt="([^"]+)"[^>]*\s(?:src|loadlate)="([^"]+)"[^>]*>/gi;
   const reImg2 = /<img[^>]*\salt="([^"]+)"[^>]*\s(?:src|loadlate)="([^"]+)"[^>]*\sdata-tconst="(tt\d{7,})"[^>]*>/gi;
   const bump = (tt, name, poster) => {
@@ -113,7 +113,7 @@ function idsAndTitlesFromHtml(html) {
 }
 
 // Extract "next page" link from HTML (different IMDb layouts)
-function extractNextLink(html, currentUrl) {
+function extractNextLink(html) {
   let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
   if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
   if (!m) return null;
@@ -125,7 +125,6 @@ function extractNextLink(html, currentUrl) {
 }
 
 // Walk the entire list by following the page's own "next" link.
-// This is more reliable than trying to force ?page=2,3,... ourselves.
 async function fetchImdbListItemsAllPages(listUrl, maxPages = 200) {
   const seen = new Set();
   const items = [];
@@ -150,7 +149,6 @@ async function fetchImdbListItemsAllPages(listUrl, maxPages = 200) {
       seen.add(tt);
       if ((it.name || it.poster) && !FALLBACK.has(tt)) FALLBACK.set(tt, { name: it.name, poster: it.poster });
       else if (FALLBACK.has(tt)) {
-        // merge if we learned more info on a later page
         const prev = FALLBACK.get(tt);
         FALLBACK.set(tt, { name: prev.name || it.name, poster: prev.poster || it.poster });
       }
@@ -159,7 +157,7 @@ async function fetchImdbListItemsAllPages(listUrl, maxPages = 200) {
     }
 
     pages++;
-    const nextUrl = extractNextLink(html, url);
+    const nextUrl = extractNextLink(html);
     if (!nextUrl || added === 0) break;
     url = nextUrl;
   }
@@ -210,15 +208,24 @@ function snapshotForId(tt) {
     type: rec.kind || "movie",
     name: (meta && meta.name) || fb.name || tt,
   };
-  // prefer Cinemeta poster but fall back to IMDb image (m.media-amazon.com)
-  snap.poster      = (meta && meta.poster) || fb.poster || undefined;
-  snap.background  = meta && meta.background || undefined;
-  snap.logo        = meta && meta.logo || undefined;
-  snap.imdbRating  = (meta && (meta.imdbRating ?? meta.rating)) ?? undefined;
-  snap.runtime     = meta && meta.runtime ?? undefined;
-  snap.year        = meta && meta.year ?? undefined;
-  snap.releaseDate = meta && (meta.releaseInfo ?? meta.released) ?? undefined;
-  snap.description = meta && meta.description || undefined;
+
+  // Prefer Cinemeta poster but fall back to IMDb image (m.media-amazon.com).
+  if (meta) {
+    snap.poster      = meta.poster || fb.poster || undefined;
+    snap.background  = meta.background || undefined;
+    snap.logo        = meta.logo || undefined;
+    snap.imdbRating  = (meta.imdbRating != null ? meta.imdbRating : meta.rating) != null
+      ? (meta.imdbRating != null ? meta.imdbRating : meta.rating)
+      : undefined;
+    snap.runtime     = meta.runtime != null ? meta.runtime : undefined;
+    snap.year        = meta.year != null ? meta.year : undefined;
+    snap.releaseDate = (meta.releaseInfo != null ? meta.releaseInfo : meta.released) != null
+      ? (meta.releaseInfo != null ? meta.releaseInfo : meta.released)
+      : undefined;
+    snap.description = meta.description || undefined;
+  } else {
+    snap.poster = fb.poster || undefined;
+  }
 
   return snap;
 }
@@ -343,7 +350,7 @@ app.get("/health", (_, res) => res.status(200).send("ok"));
 // MANIFEST (auto-version; no-cache)
 const baseManifest = {
   id: "org.my.csvlists",
-  version: "8.5.0",
+  version: "8.5.1",
   name: "My Lists",
   description: "Your IMDb lists under one section; opens real title pages so streams load.",
   resources: ["catalog", "meta"],
@@ -441,7 +448,7 @@ app.get("/meta/:type/:id.json", async (req, res) => {
       const fb = FALLBACK.get(imdbId) || {};
       const meta = {
         id: imdbId,
-        type: rec?.kind || "movie",
+        type: rec && rec.kind ? rec.kind : "movie",
         name: fb.name || imdbId,
         poster: fb.poster || undefined
       };
