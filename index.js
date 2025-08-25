@@ -20,11 +20,11 @@ const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.i
 const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";  // optional whitelist: [{"name":"Marvel Movies","url":"https://www.imdb.com/list/ls.../"}]
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 
-const GITHUB_TOKEN   = process.env.GITHUB_TOKEN || "";
-const GITHUB_OWNER   = process.env.GITHUB_OWNER || "";
-const GITHUB_REPO    = process.env.GITHUB_REPO  || "";
-const SNAPSHOT_BRANCH= process.env.SNAPSHOT_BRANCH || "main";
-const SNAPSHOT_DIR   = process.env.SNAPSHOT_DIR || "snapshot";
+const GITHUB_TOKEN    = process.env.GITHUB_TOKEN  || "";
+const GITHUB_OWNER    = process.env.GITHUB_OWNER  || "";
+const GITHUB_REPO     = process.env.GITHUB_REPO   || "";
+const SNAPSHOT_BRANCH = process.env.SNAPSHOT_BRANCH || "main";
+const SNAPSHOT_DIR    = process.env.SNAPSHOT_DIR || "snapshot";
 
 // ----------------- CONSTANTS -----------------
 const CINEMETA = "https://v3-cinemeta.strem.io";
@@ -103,7 +103,7 @@ async function ghRequest(method, path, bodyObj) {
 async function ghGetSha(path) {
   try {
     const data = await ghRequest("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(SNAPSHOT_BRANCH)}`);
-    return data && data.sha || null;
+    return data && data.sha ? data.sha : null;
   } catch (_) { return null; }
 }
 async function ghWriteSnapshot(obj) {
@@ -351,7 +351,7 @@ function buildCard(tt) {
     meta && (meta.releaseInfo !== undefined ? meta.releaseInfo : (meta.released !== undefined ? meta.released : null));
   const descFromMeta = meta && typeof meta.description === "string" ? meta.description : null;
 
-  const card = {
+  return {
     id: tt,
     type: rec.kind || "movie",
     name: nameFromMeta || fb.name || tt,
@@ -364,7 +364,6 @@ function buildCard(tt) {
     releaseDate: releaseFromMeta !== null ? releaseFromMeta : undefined,
     description: descFromMeta || undefined
   };
-  return card;
 }
 
 // ----------------- Sorting -----------------
@@ -742,6 +741,9 @@ app.post("/api/sync", async (req, res) => {
 
   // Initial sync (non-blocking)
   fullSync({ rediscover: true }).then(() => scheduleNextSync(false));
-
-  const app = express();
 })();
+
+// ----------------- START SERVER (Render needs this) -----------------
+app.listen(PORT, HOST, () => {
+  console.log(`[START] listening on ${HOST}:${PORT}`);
+});
