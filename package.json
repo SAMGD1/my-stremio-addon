@@ -1,10 +1,16 @@
 {
   "name": "my-stremio-addon",
-  "version": "9.1.0",
-  "description": "IMDb → Stremio addon. Caches your lists every 60 min, serves instantly with Cinemeta+IMDb fallback.",
+  "version": "1.0.0",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
-  "dependencies": { "express": "^4.19.2" },
-  "engines": { "node": ">=18" },
-  "license": "MIT"
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "csv-parse": "^6.1.0",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
 }
