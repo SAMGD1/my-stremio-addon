@@ -1,9 +1,13 @@
-// My Lists – IMDb snapshot add-on (stable)
-// v8.4  — robust list scraping, clean ids only, manifest auto-bump, better syncing
+/*  My Lists (IMDb → Stremio) – robust, cached, auto-sync
+ *  - Discovers lists from IMDB_USER_URL and merges with IMDB_LISTS
+ *  - Robust list scraping: tries mode=detail/grid/compact, paginates via next links
+ *  - Preloads Cinemeta (movie → series), uses cached cards for instant catalogs
+ *  - Force sync: /api/sync-imdb   Admin UI: /admin?admin=PASSWORD
+ */
 
 const express = require("express");
 
-// -------- ENV ----------
+// -------- ENV --------
 const PORT = Number(process.env.PORT) || 7000;
 const HOST = "0.0.0.0";
 
@@ -11,446 +15,441 @@ const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 
 const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/ur136127821/lists/
-const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";   // optional: [{"name":"Marvel Movies","url":"https://www.imdb.com/list/ls.../"}]
+const IMDB_LISTS_JSON   = process.env.IMDB_LISTS || "[]";   // optional whitelist: [{ "name": "Marvel Movies", "url": "https://www.imdb.com/list/ls..." }]
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 
 const CINEMETA = "https://v3-cinemeta.strem.io";
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) MyLists/8.4";
 
-// -------- STATE ----------
-/** { [name]: { url, ids: string[] } } */
+// -------- RUNTIME STATE --------
+// { [listName]: { url, ids: string[] } }
 let LISTS = Object.create(null);
-/** Map<tt, { kind:'movie'|'series'|null, meta?:object }> */
+// Best Cinemeta per tt: Map<tt, {kind:'movie'|'series'|null, meta:object|null}>
 const BEST = new Map();
-/** last full sync time (ms) */
-let LAST_SYNC_AT = 0;
-/** manifest revision (bumps when list set changes so Stremio refreshes) */
-let MANIFEST_REV = 1;
-/** last list names key */
-let LAST_LISTS_KEY = "";
+// Prebuilt catalog cards: Map<tt, { id, type, name, poster, ... }>
+const CARDS = new Map();
 
+let LAST_SYNC_AT = 0;
 let syncTimer = null;
 let syncInProgress = false;
+let MANIFEST_REV = 1;
 
-// -------- HELPERS ----------
-function isImdb(v){ return /^tt\d{7,}$/i.test(String(v||"")); }
-function nowIso(){ return new Date().toISOString(); }
-function minutes(ms){ return Math.round(ms/60000); }
-function minToMs(m){ return m*60*1000; }
-function listsKey(){ return JSON.stringify(Object.keys(LISTS).sort()); }
-
-async function fetchWithRetry(url, opts, tries = 3) {
-  let lastErr;
-  for (let i=0;i<tries;i++){
-    try {
-      const r = await fetch(url, Object.assign({ headers: { "User-Agent": UA }}, opts||{}));
-      if (!r.ok) throw new Error("HTTP "+r.status);
-      return r;
-    } catch (e) {
-      lastErr = e;
-      await new Promise(r => setTimeout(r, 300 + i*500));
-    }
-  }
-  throw lastErr;
+// -------- HELPERS --------
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Safari/537.36";
+function headersHTML(referer) {
+  const h = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+  };
+  if (referer) h.Referer = referer;
+  return h;
 }
-async function fetchText(url, accept){
-  const r = await fetchWithRetry(url, { headers: accept ? { "User-Agent": UA, "Accept": accept } : undefined });
+async function fetchText(url, referer) {
+  const u = new URL(url);
+  // Bust CDN caches a little
+  u.searchParams.set("_", Date.now().toString());
+  const r = await fetch(u.toString(), { headers: headersHTML(referer) });
+  if (!r.ok) throw new Error(`GET ${u} -> ${r.status}`);
   return r.text();
 }
-async function fetchJson(url){
-  const r = await fetchWithRetry(url, { headers: { "User-Agent": UA, "Accept": "application/json" } });
-  return r.json();
-}
+function isImdb(v) { return /^tt\d{7,}$/i.test(String(v || "")); }
+function nowIso() { return new Date().toISOString(); }
+function minutes(ms) { return Math.round(ms / 60000); }
 
-// -------- IMDb DISCOVERY ----------
-function parseImdbListsEnv(){
+// -------- DISCOVERY (lists) --------
+function parseImdbListsEnv() {
   try {
     const arr = JSON.parse(IMDB_LISTS_JSON);
-    return Array.isArray(arr) ? arr.filter(x => x && x.name && x.url) : [];
-  } catch { return []; }
+    if (Array.isArray(arr)) {
+      return arr
+        .map(x => ({ name: String(x.name || "").trim(), url: String(x.url || "").trim() }))
+        .filter(x => x.name && x.url.includes("/list/ls"));
+    }
+  } catch (_) {}
+  return [];
 }
-
-// find public lists on the user’s /lists/ page (cache-busted & resilient)
-async function discoverListsFromUser(userListsUrl){
+function listIdFromUrl(url) {
+  try {
+    const m = String(url).match(/\/list\/(ls\d{6,})\//i);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+async function discoverListsFromUser(userListsUrl) {
   if (!userListsUrl) return [];
-  const u = new URL(userListsUrl);
-  u.searchParams.set("_", String(Date.now())); // break IMDb caching
-  const html = await fetchText(u.toString(), "text/html");
-
-  // pick only /list/ls##########/ links that look like list cards/titles
+  let html;
+  try {
+    html = await fetchText(userListsUrl);
+  } catch {
+    return [];
+  }
+  // Match links to /list/ls##########/ and their titles
+  // (avoid noisy sidebar links by restricting to anchors)
+  const re = /<a[^>]+href="\/list\/(ls\d{6,})\/"[^>]*>(.*?)<\/a>/gi;
   const map = new Map();
   let m;
-
-  // 1) plain anchors inside list grid
-  const reA = /<a[^>]+href="\/list\/(ls\d{6,})\/"[^>]*>([^<]+)<\/a>/gi;
-  while ((m = reA.exec(html))) {
+  while ((m = re.exec(html))) {
     const id = m[1];
-    const name = m[2].replace(/<[^>]+>/g,"").replace(/\s+/g," ").trim();
-    if (name) map.set(id, { name, url: `https://www.imdb.com/list/${id}/` });
-  }
-
-  // 2) data-testid based (new UI)
-  const reCard = /data-testid="listOverview-title".*?<a[^>]+href="\/list\/(ls\d{6,})\/"[^>]*>([^<]+)<\/a>/gis;
-  while ((m = reCard.exec(html))) {
-    const id = m[1];
-    const name = m[2].replace(/<[^>]+>/g,"").replace(/\s+/g," ").trim();
-    if (name && !map.has(id)) map.set(id, { name, url: `https://www.imdb.com/list/${id}/` });
-  }
-
-  return Array.from(map.values());
-}
-
-// -------- IMDb LIST ITEMS (STRICT) ----------
-// scope to the actual list container, then pull data-tconst per item only
-function extractListBlock(html){
-  const tries = [
-    /<div[^>]+class="[^"]*\blister-list\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
-    /<ul[^>]+class="[^"]*\bipc-metadata-list\b[^"]*"[^>]*>([\s\S]*?)<\/ul>/i,
-    /<section[^>]+data-testid="[^"]*list[^"]*"[^>]*>([\s\S]*?)<\/section>/i
-  ];
-  for (let i=0;i<tries.length;i++){
-    const m = html.match(tries[i]);
-    if (m && m[1]) return m[1];
-  }
-  return html;
-}
-function idsFromListHtmlStrict(html){
-  const scoped = extractListBlock(html);
-  const out = [];
-  const seen = new Set();
-  let m;
-
-  // 1) preferred: data-tconst per card/row
-  const reT = /data-tconst="(tt\d{7,})"/gi;
-  while ((m = reT.exec(scoped))){
-    const tt = m[1];
-    if (!seen.has(tt)){ seen.add(tt); out.push(tt); }
-  }
-
-  // 2) classic lister rows (fallback)
-  const reLister = /<div[^>]+class="[^"]*\blister-item\b[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
-  while ((m = reLister.exec(scoped))){
-    const row = m[1];
-    const idm = row.match(/href="\/title\/(tt\d{7,})\//i);
-    if (idm){
-      const tt = idm[1];
-      if (!seen.has(tt)){ seen.add(tt); out.push(tt); }
+    const name = String(m[2] || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    if (id && name && !map.has(id)) {
+      map.set(id, { name, url: `https://www.imdb.com/list/${id}/` });
     }
   }
-
-  // DO NOT sweep whole page for /title/ links (that caused extra shows)
-  return out;
+  return Array.from(map.values());
 }
-function findNextListPage(html){
+function mergeListConfigs(envLists, discovered) {
+  const byId = new Map();
+  for (const L of [...envLists, ...discovered]) {
+    const id = listIdFromUrl(L.url);
+    if (!id) continue;
+    if (!byId.has(id)) byId.set(id, { name: L.name, url: L.url });
+    // Prefer the lexicographically longer name (often the “real” list title)
+    else if ((L.name || "").length > (byId.get(id).name || "").length) {
+      byId.set(id, { name: L.name, url: L.url });
+    }
+  }
+  return Array.from(byId.values());
+}
+
+// -------- LIST PARSER (robust) --------
+function extractIdsFromHtml(html) {
+  const out = new Set();
+  let m;
+
+  // 1) data-tconst (grid/new UI)
+  const re1 = /data-tconst="(tt\d{7,})"/gi;
+  while ((m = re1.exec(html))) out.add(m[1]);
+
+  // 2) classic /title/tt#########/
+  const re2 = /\/title\/(tt\d{7,})\//gi;
+  while ((m = re2.exec(html))) out.add(m[1]);
+
+  // 3) JSON blobs sometimes contain "const":"tt#########"
+  const re3 = /"const"\s*:\s*"(tt\d{7,})"/gi;
+  while ((m = re3.exec(html))) out.add(m[1]);
+
+  return Array.from(out);
+}
+function findNextUrl(html, currentUrl) {
+  // Look for various "next" anchors used across old/new layouts
   let m = html.match(/<a[^>]+rel="next"[^>]+href="([^"]+)"/i);
   if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*lister-page-next[^"]*"/i);
   if (!m) m = html.match(/<a[^>]+href="([^"]+)"[^>]*data-testid="pagination-next-page-button"[^>]*>/i);
   if (!m) return null;
-  try { return new URL(m[1], "https://www.imdb.com").toString(); } catch { return null; }
+  try { return new URL(m[1], new URL(currentUrl).origin).toString(); } catch { return null; }
 }
-async function fetchListIdsAllPages(listUrl, maxPages=50){
+async function fetchImdbListIdsAllPages(listUrl) {
+  const modes = ["detail", "grid", "compact"];
   const seen = new Set();
-  const ids = [];
-  let url = new URL(listUrl);
-  url.searchParams.set("_", String(Date.now()));    // cache-bust
-  url.searchParams.set("mode", "detail");          // detail has data-tconst most often
+  const all = [];
 
-  for (let p=0; p<maxPages; p++){
-    let html;
-    try { html = await fetchText(url.toString(), "text/html"); }
-    catch { break; }
+  for (const mode of modes) {
+    let url = new URL(listUrl);
+    url.searchParams.set("mode", mode);
 
-    const batch = idsFromListHtmlStrict(html);
-    let added = 0;
-    for (let i=0;i<batch.length;i++){
-      const tt = batch[i];
-      if (!seen.has(tt)){ seen.add(tt); ids.push(tt); added++; }
+    // Some lists also paginate by ?page=2, but the “next” link is more reliable.
+    let guard = 0;
+    while (url && guard++ < 50) {
+      let html;
+      try { html = await fetchText(url.toString(), listUrl); }
+      catch { break; }
+
+      const ids = extractIdsFromHtml(html);
+      let added = 0;
+      for (const tt of ids) {
+        if (!seen.has(tt)) {
+          seen.add(tt);
+          all.push(tt);
+          added++;
+        }
+      }
+
+      const nextUrl = findNextUrl(html, url.toString());
+      if (!nextUrl || added === 0) break;
+      url = new URL(nextUrl);
     }
-    const next = findNextListPage(html);
-    if (!next || added === 0) break;
-
-    // carry forward cache-buster
-    const n = new URL(next);
-    n.searchParams.set("_", String(Date.now()));
-    url = n;
+    if (all.length) break; // success with this mode
   }
-  return ids;
+
+  return all;
 }
 
-// -------- Cinemeta + fallback ----------
-async function fetchCinemeta(kind, imdbId){
+// -------- CINEMETA --------
+async function fetchCinemeta(kind, imdbId) {
   try {
-    const r = await fetchJson(`${CINEMETA}/meta/${encodeURIComponent(kind)}/${encodeURIComponent(imdbId)}.json`);
-    return r && r.meta ? r.meta : null;
+    const r = await fetch(`${CINEMETA}/meta/${encodeURIComponent(kind)}/${encodeURIComponent(imdbId)}.json`, {
+      headers: { "User-Agent": UA, "Accept": "application/json" }
+    });
+    if (!r.ok) return null;
+    const obj = await r.json();
+    return obj && obj.meta ? obj.meta : null;
   } catch { return null; }
 }
-async function getBestMeta(imdbId){
+async function getBestMeta(imdbId) {
   if (BEST.has(imdbId)) return BEST.get(imdbId);
-
   let meta = await fetchCinemeta("movie", imdbId);
-  if (meta){ const rec = { kind: "movie", meta }; BEST.set(imdbId, rec); return rec; }
-
+  if (meta) { const rec = { kind: "movie", meta }; BEST.set(imdbId, rec); return rec; }
   meta = await fetchCinemeta("series", imdbId);
-  if (meta){ const rec = { kind: "series", meta }; BEST.set(imdbId, rec); return rec; }
-
+  if (meta) { const rec = { kind: "series", meta }; BEST.set(imdbId, rec); return rec; }
   const rec = { kind: null, meta: null };
   BEST.set(imdbId, rec);
   return rec;
 }
-async function mapLimit(arr, limit, fn){
-  const res = new Array(arr.length);
+async function mapLimit(arr, limit, fn) {
+  const results = new Array(arr.length);
   let i = 0;
   const workers = new Array(Math.min(limit, arr.length)).fill(0).map(async () => {
-    while (i < arr.length){
+    while (i < arr.length) {
       const idx = i++;
-      res[idx] = await fn(arr[idx], idx);
+      results[idx] = await fn(arr[idx], idx);
     }
   });
   await Promise.all(workers);
-  return res;
+  return results;
 }
 
-// snapshot card used by catalog responses
-function makeCard(tt){
-  const rec = BEST.get(tt) || { kind: "movie", meta: null };
+// Build cached card for catalogs
+function buildCard(tt) {
+  const rec = BEST.get(tt) || { kind: null, meta: null };
   const meta = rec.meta;
-  const card = { id: tt, type: rec.kind || "movie", name: meta && meta.name ? meta.name : tt };
-  if (meta){
-    if (meta.poster) card.poster = meta.poster;
-    if (meta.background) card.background = meta.background;
-    if (meta.logo) card.logo = meta.logo;
-    if (meta.description) card.description = meta.description;
 
-    if (meta.imdbRating != null) card.imdbRating = meta.imdbRating;
-    else if (meta.rating != null) card.imdbRating = meta.rating;
+  const card = {
+    id: tt,
+    type: rec.kind || "movie",
+    name: (meta && meta.name) ? meta.name : tt
+  };
 
-    if (meta.runtime != null) card.runtime = meta.runtime;
-    if (meta.year != null) card.year = meta.year;
+  if (meta) {
+    if (typeof meta.poster === "string") card.poster = meta.poster;
+    if (typeof meta.background === "string") card.background = meta.background;
+    if (typeof meta.logo === "string") card.logo = meta.logo;
 
-    if (meta.releaseInfo != null) card.releaseDate = meta.releaseInfo;
-    else if (meta.released != null) card.releaseDate = meta.released;
+    const rating = (meta.imdbRating !== undefined) ? meta.imdbRating : (meta.rating !== undefined ? meta.rating : null);
+    if (rating !== null) card.imdbRating = rating;
+
+    if (meta.runtime !== undefined) card.runtime = meta.runtime;
+    if (meta.year !== undefined) card.year = meta.year;
+
+    const released = (meta.releaseInfo !== undefined) ? meta.releaseInfo : (meta.released !== undefined ? meta.released : null);
+    if (released !== null) card.releaseDate = released;
+
+    if (typeof meta.description === "string") card.description = meta.description;
   }
+
   return card;
 }
 
-// -------- sort helpers ----------
-function toTs(dateStr, year){
-  if (dateStr){
+// -------- SORTING --------
+function toTs(dateStr, year) {
+  if (dateStr) {
     const t = Date.parse(dateStr);
     if (!Number.isNaN(t)) return t;
   }
-  if (year){
+  if (year) {
     const t = Date.parse(String(year) + "-01-01");
     if (!Number.isNaN(t)) return t;
   }
   return null;
 }
-function stableSort(items, sortKey){
-  const s   = String(sortKey || "name_asc").toLowerCase();
+function stableSort(items, sortKey) {
+  const s = String(sortKey || "name_asc").toLowerCase();
   const dir = s.endsWith("_asc") ? 1 : -1;
   const key = s.split("_")[0];
 
-  function cmpNullBottom(a,b){
-    const na = (a==null), nb=(b==null);
-    if (na && nb) return 0;
-    if (na) return 1;
-    if (nb) return -1;
-    return a<b?-1:a>b?1:0;
+  function cmpNullBottom(a, b) {
+    const A = (a === null || a === undefined);
+    const B = (b === null || b === undefined);
+    if (A && B) return 0;
+    if (A) return 1;
+    if (B) return -1;
+    return a < b ? -1 : (a > b ? 1 : 0);
   }
 
   return items
-    .map((m,i)=>({m,i}))
-    .sort((A,B)=>{
-      const a=A.m, b=B.m;
-      let c=0;
-      if (key==="date")    c = cmpNullBottom(toTs(a.releaseDate, a.year), toTs(b.releaseDate, b.year));
-      else if (key==="rating")  c = cmpNullBottom(a.imdbRating, b.imdbRating);
-      else if (key==="runtime") c = cmpNullBottom(a.runtime, b.runtime);
-      else c = (a.name||"").localeCompare(b.name||"");
-      if (c===0){
-        c = (a.name||"").localeCompare(b.name||"");
-        if (c===0) c = (a.id||"").localeCompare(b.id||"");
-        if (c===0) c = A.i - B.i;
+    .map((m, i) => ({ m, i }))
+    .sort((A, B) => {
+      const a = A.m, b = B.m;
+      let c = 0;
+
+      if (key === "date")       c = cmpNullBottom(toTs(a.releaseDate, a.year), toTs(b.releaseDate, b.year));
+      else if (key === "rating")  c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+      else if (key === "runtime") c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
+      else                        c = (a.name || "").localeCompare(b.name || "");
+
+      if (c === 0) {
+        c = (a.name || "").localeCompare(b.name || "");
+        if (c === 0) c = (a.id || "").localeCompare(b.id || "");
+        if (c === 0) c = A.i - B.i;
       }
-      return c*dir;
+      return c * dir;
     })
-    .map(x=>x.m);
+    .map(x => x.m);
 }
 
-// -------- SYNC ----------
-async function fullSync({ rediscover = true } = {}){
+// -------- FULL SYNC --------
+async function fullSync({ rediscover = true } = {}) {
   if (syncInProgress) return;
   syncInProgress = true;
   const started = Date.now();
+
   try {
-    // 1) discover lists
-    let cfg = parseImdbListsEnv();
-    if ((!cfg || cfg.length===0) && (IMDB_USER_URL && rediscover)){
-      try { cfg = await discoverListsFromUser(IMDB_USER_URL); }
-      catch (e){ console.warn("IMDb discovery failed:", e.message); cfg = []; }
+    // 1) lists source = merge(IMDB_LISTS, discover(IMDB_USER_URL))
+    const envLists = parseImdbListsEnv();
+    let discovered = [];
+    if (rediscover && IMDB_USER_URL) {
+      try { discovered = await discoverListsFromUser(IMDB_USER_URL); }
+      catch { discovered = []; }
     }
+    const cfg = mergeListConfigs(envLists, discovered);
 
-    // 2) pull ids strictly from each list
-    const next = Object.create(null);
-    const all = new Set();
-    for (let i=0;i<cfg.length;i++){
-      const L = cfg[i];
+    // 2) fetch ids for each list
+    const nextLISTS = Object.create(null);
+    const allIds = new Set();
+    for (const L of cfg) {
       let ids = [];
-      try { ids = await fetchListIdsAllPages(L.url); }
-      catch(e){ console.warn("List fetch failed:", L.name, e.message); }
-      next[L.name] = { url: L.url, ids };
-      for (let j=0;j<ids.length;j++) all.add(ids[j]);
+      try { ids = await fetchImdbListIdsAllPages(L.url); }
+      catch { ids = []; }
+      nextLISTS[L.name] = { url: L.url, ids };
+      ids.forEach(id => allIds.add(id));
     }
+    LISTS = nextLISTS;
 
-    // 3) preload Cinemeta for every unique id
-    const every = Array.from(all);
-    await mapLimit(every, 8, async (tt)=> { if (isImdb(tt)) await getBestMeta(tt); });
+    // 3) preload Cinemeta & build cards
+    const idsArr = Array.from(allIds);
+    await mapLimit(idsArr, 8, async (tt) => { if (isImdb(tt)) await getBestMeta(tt); });
+    CARDS.clear();
+    idsArr.forEach(tt => CARDS.set(tt, buildCard(tt)));
 
-    LISTS = next;
-
-    // 4) bump manifest rev if list set changed (adds/removes lists)
-    const key = listsKey();
-    if (key !== LAST_LISTS_KEY){
-      LAST_LISTS_KEY = key;
-      MANIFEST_REV++;
-      console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
-    }
+    // 4) bump manifest if list names changed
+    MANIFEST_REV++;
 
     LAST_SYNC_AT = Date.now();
-    console.log(`[SYNC] ok – ${every.length} ids across ${Object.keys(LISTS).length} lists in ${minutes(LAST_SYNC_AT-started)} min`);
-  } catch (e){
+    console.log(`[SYNC] ok – ${idsArr.length} ids across ${Object.keys(LISTS).length} lists in ${minutes(LAST_SYNC_AT - started)} min`);
+  } catch (e) {
     console.error("[SYNC] failed:", e);
   } finally {
     syncInProgress = false;
   }
 }
-function scheduleNextSync(reset){
-  if (syncTimer){ clearTimeout(syncTimer); syncTimer=null; }
-  if (IMDB_SYNC_MINUTES<=0) return;
-  const delay = minToMs(IMDB_SYNC_MINUTES);
-  syncTimer = setTimeout(async ()=>{
-    await fullSync({ rediscover:true });
+function scheduleNextSync(reset = false) {
+  if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+  if (IMDB_SYNC_MINUTES <= 0) return;
+  const delayMs = IMDB_SYNC_MINUTES * 60 * 1000;
+  syncTimer = setTimeout(async () => {
+    await fullSync({ rediscover: true });
     scheduleNextSync(true);
-  }, reset?delay:delay);
-}
-function maybeBackgroundSync(){
-  if (IMDB_SYNC_MINUTES<=0) return;
-  const stale = Date.now()-LAST_SYNC_AT > minToMs(IMDB_SYNC_MINUTES);
-  if (stale && !syncInProgress) fullSync({ rediscover:true }).then(()=>scheduleNextSync(true));
+  }, reset ? delayMs : delayMs);
 }
 
-// kick off initial sync (non-blocking)
-fullSync({ rediscover:true }).then(()=>scheduleNextSync(false));
+// Kick initial sync
+fullSync({ rediscover: true }).then(() => scheduleNextSync(false));
 
-// -------- SERVER ----------
+function maybeBackgroundSync() {
+  if (IMDB_SYNC_MINUTES <= 0) return;
+  const stale = Date.now() - LAST_SYNC_AT > IMDB_SYNC_MINUTES * 60 * 1000;
+  if (stale && !syncInProgress) fullSync({ rediscover: true }).then(() => scheduleNextSync(true));
+}
+
+// -------- HTTP --------
 const app = express();
-app.use((_,res,next)=>{ res.setHeader("Access-Control-Allow-Origin","*"); next(); });
+app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
 
-function addonAllowed(req){
+function addonAllowed(req) {
   if (!SHARED_SECRET) return true;
-  const u = new URL(req.originalUrl, `http://${req.headers.host}`);
-  return u.searchParams.get("key") === SHARED_SECRET;
+  const url = new URL(req.originalUrl, `http://${req.headers.host}`);
+  return url.searchParams.get("key") === SHARED_SECRET;
 }
-function adminAllowed(req){
-  const u = new URL(req.originalUrl, `http://${req.headers.host}`);
-  return (u.searchParams.get("admin") || req.headers["x-admin-key"]) === ADMIN_PASSWORD;
+function adminAllowed(req) {
+  const url = new URL(req.originalUrl, `http://${req.headers.host}`);
+  return (url.searchParams.get("admin") || req.headers["x-admin-key"]) === ADMIN_PASSWORD;
 }
-function absoluteBase(req){
+function absoluteBase(req) {
   const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
-  const host  = req.headers["x-forwarded-host"]  || req.get("host");
+  const host  = req.headers["x-forwarded-host"] || req.get("host");
   return `${proto}://${host}`;
 }
 
-app.get("/health", (_,res)=>res.status(200).send("ok"));
+app.get("/health", (_, res) => res.status(200).send("ok"));
 
-// Manifest (no-cache + auto version bump)
+// Manifest with auto-rev bump so Stremio refreshes catalogs
 const baseManifest = {
   id: "org.my.csvlists",
-  version: "8.4.0",
+  version: "9.2.0",
   name: "My Lists",
-  description: "Your IMDb lists as instant catalogs. Opens real title pages so streams load.",
-  resources: ["catalog","meta"],
-  types: ["my lists","movie","series"],
+  description: "Your IMDb lists as instant catalogs (preloaded)",
+  resources: ["catalog", "meta"],
+  types: ["my lists", "movie", "series"],
   idPrefixes: ["tt"]
 };
-function catalogs(){
-  const names = Object.keys(LISTS);
-  return names.map(name => ({
+function catalogs() {
+  return Object.keys(LISTS).map((name) => ({
     type: "My lists",
     id: `list:${name}`,
     name: `🗂 ${name}`,
-    extraSupported: ["search","skip","limit","sort"],
+    extraSupported: ["search", "skip", "limit", "sort"],
     extra: [
-      { name:"search" }, { name:"skip" }, { name:"limit" },
-      { name:"sort", options:["date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"] }
+      { name: "search" }, { name: "skip" }, { name: "limit" },
+      { name: "sort", options: ["date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"] }
     ],
     posterShape: "poster"
   }));
 }
-app.get("/manifest.json", (req,res)=>{
-  try{
+app.get("/manifest.json", (req, res) => {
+  try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
-    res.setHeader("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");
-    res.setHeader("Pragma","no-cache");
-    res.json(Object.assign({}, baseManifest, { version: baseManifest.version+"."+MANIFEST_REV, catalogs: catalogs() }));
-  } catch(e){
+    const version = `${baseManifest.version}.${MANIFEST_REV}`;
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ...baseManifest, version, catalogs: catalogs() });
+  } catch (e) {
     console.error("Manifest error:", e);
     res.status(500).send("Internal Server Error");
   }
 });
 
-// helper to read extra params (from path + query)
-function parseExtra(extraStr, queryObj){
+// Catalog (all from CARDS cache)
+function parseExtra(extraStr, queryObj) {
   const params = new URLSearchParams(extraStr || "");
-  const fromPath = Object.fromEntries(params.entries());
-  return Object.assign({}, fromPath, queryObj || {});
+  return { ...Object.fromEntries(params.entries()), ...(queryObj || {}) };
 }
-
-// Catalog (instant from cache; default returns ALL items so you don’t get “only 25”)
-app.get("/catalog/:type/:id/:extra?.json", async (req,res)=>{
-  try{
+app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
+  try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
 
-    const id = req.params.id || "";
-    if (!id.startsWith("list:")) return res.json({ metas: [] });
-
+    const { id } = req.params;
+    if (!id || !id.startsWith("list:")) return res.json({ metas: [] });
     const listName = id.slice(5);
     const list = LISTS[listName];
     if (!list || !list.ids || !list.ids.length) return res.json({ metas: [] });
 
     const extra = parseExtra(req.params.extra, req.query);
-    const q     = String(extra.search || "").toLowerCase().trim();
-    const sort  = String(extra.sort || "name_asc").toLowerCase();
-    // IGNORE incoming limit by default → show everything; Stremio can still page via skip/limit if it sends them.
-    const skip  = Math.max(0, Number(extra.skip || 0));
+    const q = String(extra.search || "").toLowerCase().trim();
+    const sort = String(extra.sort || "name_asc").toLowerCase();
+    const skip = Math.max(0, Number(extra.skip || 0));
+    const limit = Math.min(Number(extra.limit || 100), 200);
 
-    let metas = list.ids.map(makeCard);
+    let metas = list.ids.map(tt => CARDS.get(tt) || { id: tt, type: "movie", name: tt });
 
-    if (q){
+    if (q) {
       metas = metas.filter(m =>
-        (m.name||"").toLowerCase().includes(q) ||
-        (m.id||"").toLowerCase().includes(q)   ||
-        (m.description||"").toLowerCase().includes(q)
+        (m.name || "").toLowerCase().includes(q) ||
+        (m.id || "").toLowerCase().includes(q) ||
+        (m.description || "").toLowerCase().includes(q)
       );
     }
 
     metas = stableSort(metas, sort);
-
-    // if client provided a limit, respect it; otherwise show all from `skip`
-    const limitParam = Number(extra.limit || 0);
-    const page = limitParam > 0 ? metas.slice(skip, skip + limitParam) : metas.slice(skip);
-
-    res.json({ metas: page });
-  } catch(e){
+    res.json({ metas: metas.slice(skip, skip + limit) });
+  } catch (e) {
     console.error("Catalog error:", e);
     res.status(500).send("Internal Server Error");
   }
 });
 
-// Meta (serve cached Cinemeta; fetch on demand if missing)
-app.get("/meta/:type/:id.json", async (req,res)=>{
-  try{
+// Meta (serve preloaded Cinemeta; fetch on demand if missing)
+app.get("/meta/:type/:id.json", async (req, res) => {
+  try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
 
@@ -460,58 +459,55 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
 
     let rec = BEST.get(imdbId);
     if (!rec) rec = await getBestMeta(imdbId);
-
-    if (!rec || !rec.meta){
+    if (!rec || !rec.meta)
       return res.json({ meta: { id: imdbId, type: rec && rec.kind ? rec.kind : "movie", name: imdbId } });
-    }
-    res.json({ meta: Object.assign({}, rec.meta, { id: imdbId, type: rec.kind }) });
-  } catch(e){
+
+    return res.json({ meta: { ...rec.meta, id: imdbId, type: rec.kind } });
+  } catch (e) {
     console.error("Meta error:", e);
     res.status(500).send("Internal Server Error");
   }
 });
 
 // Admin
-function absoluteManifestUrl(req){
-  return `${absoluteBase(req)}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`;
-}
-app.get("/admin", async (req,res)=>{
+app.get("/admin", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
 
-  let discoveredHtml = `<p><small>${IMDB_USER_URL ? "No public lists found (or IMDb temporarily unreachable)." : "Set IMDB_USER_URL or IMDB_LISTS in your environment."}</small></p>`;
-  if (IMDB_USER_URL){
-    try {
-      const lists = await discoverListsFromUser(IMDB_USER_URL);
-      discoveredHtml = lists.length
-        ? `<ul>${lists.map(x=>`<li><b>${x.name}</b><br/><small>${x.url}</small></li>`).join("")}</ul>`
-        : discoveredHtml;
-    } catch(_) {}
-  }
+  let discovered = [];
+  try { if (IMDB_USER_URL) discovered = await discoverListsFromUser(IMDB_USER_URL); }
+  catch { discovered = []; }
 
-  const uiLists = Object.keys(LISTS).length
-    ? `<ul>${Object.entries(LISTS).map(([name,v]) => `<li><b>${name}</b> <small>(${(v.ids||[]).length} items)</small><br/><small>${v.url||""}</small></li>`).join("")}</ul>`
-    : "<p>(no lists yet)</p>";
+  const manifestUrl = `${absoluteBase(req)}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`;
+  const uiLists = Object.entries(LISTS)
+    .map(([name, v]) => `<li><b>${name}</b> <small>(${(v.ids||[]).length} items)</small><br/><small>${v.url || ""}</small></li>`)
+    .join("") || "<li>(none)</li>";
+
+  const discLists = discovered.length
+    ? `<ul>${discovered.map(x => `<li><b>${x.name}</b><br/><small>${x.url}</small></li>`).join("")}</ul>`
+    : `<p><small>${IMDB_USER_URL ? "No public lists found (or IMDb unreachable right now)." : "Set IMDB_USER_URL or IMDB_LISTS in your environment."}</small></p>`;
 
   res.type("html").send(`<!doctype html>
-<html><head>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>My Lists – Admin</title>
-<style>
-body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:760px}
-.card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
-button{padding:10px 16px;border:0;border-radius:8px;background:#6c5ce7;color:#fff;cursor:pointer}
-small{color:#666}
-.code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f6f6;padding:4px 6px;border-radius:6px}
-.btn2{background:#2d6cdf}
-</style>
-</head><body>
+<html>
+<head>
+  <title>My Lists – Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:760px}
+    .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
+    button{padding:10px 16px;border:0;border-radius:8px;background:#6c5ce7;color:#fff;cursor:pointer}
+    small{color:#666}
+    .code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f6f6;padding:4px 6px;border-radius:6px}
+    .btn2{background:#2d6cdf}
+  </style>
+</head>
+<body>
   <h1>My Lists – Admin</h1>
 
   <div class="card">
     <h3>Current Snapshot</h3>
-    ${uiLists}
+    <ul>${uiLists}</ul>
     <p><small>Last sync: ${LAST_SYNC_AT ? new Date(LAST_SYNC_AT).toLocaleString() + " (" + minutes(Date.now()-LAST_SYNC_AT) + " min ago)" : "never"}</small></p>
-    <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
+    <form method="POST" action="/api/sync-imdb?admin=${ADMIN_PASSWORD}">
       <button class="btn2">Sync IMDb Lists Now</button>
     </form>
     <p><small>Auto-sync every ${IMDB_SYNC_MINUTES} min.</small></p>
@@ -519,30 +515,31 @@ small{color:#666}
 
   <div class="card">
     <h3>Discovered at <span class="code">${IMDB_USER_URL || "(IMDB_USER_URL not set)"}</span></h3>
-    ${discoveredHtml}
+    ${discLists}
   </div>
 
   <div class="card">
     <h3>Manifest URL</h3>
-    <p class="code">${absoluteManifestUrl(req)}</p>
+    <p class="code">${manifestUrl}</p>
   </div>
-</body></html>`);
+</body>
+</html>`);
 });
 
-app.post("/api/sync", async (req,res)=>{
+app.post("/api/sync-imdb", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    await fullSync({ rediscover:true });
+  try {
+    await fullSync({ rediscover: true });
     scheduleNextSync(true);
     res.status(200).send(`Synced at ${nowIso()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
-  } catch(e){
+  } catch (e) {
     console.error(e);
     res.status(500).send(String(e));
   }
 });
 
-// start
-app.listen(PORT, HOST, ()=>{
+// Start
+app.listen(PORT, HOST, () => {
   console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
   console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
 });
