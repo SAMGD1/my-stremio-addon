@@ -491,10 +491,7 @@ function sortMetas(metas, key) {
     })
     .map(x=>x.m);
 }
-const toTs = (d,y) => toTs2(d,y);
-function toTs2(dateStr, year) {
-  if (dateStr) { const t = Date.parse(dateStr); if (!Number.isNaN(t)) return t; }
-  if (year)    { const t = Date.parse(`${year}-01-01`); if (!Number.isNaN(t)) return t; }
+if (year)    { const t = Date.parse(`${year}-01-01`); if (!Number.isNaN(t)) return t; }
   return null;
 }
 
