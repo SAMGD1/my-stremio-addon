@@ -1,23 +1,21 @@
 /* My Lists – IMDb → Stremio (robust + customizable)
- * v10.2.0 + Admin prefs (drag order, enable/disable, default list, per-list default sort)
- * Based on your stable build; only additions are the Admin UI + prefs plumbing.
+ * v10.2
  */
-
 "use strict";
 const express = require("express");
 
-// ---------- ENV ----------
+// ─── ENV ───────────────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT || 7000);
 const HOST = "0.0.0.0";
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 
-const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/ur136127821/lists/
+const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/urXXXXXXX/lists/
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
-const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
+const UPGRADE_EPISODES_DEFAULT = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
 
-// optional fallback: comma-separated ls ids
+// Optional fallback: comma-separated ls######## IDs
 const IMDB_LIST_IDS = (process.env.IMDB_LIST_IDS || "")
   .split(/[,\s]+/)
   .map(s => s.trim())
@@ -32,31 +30,36 @@ const REQ_HEADERS = {
 };
 const CINEMETA = "https://v3-cinemeta.strem.io";
 
-// ---------- STATE ----------
-let LISTS = Object.create(null); // { lsid: { id, name, url, ids:[tt...] } }
-const BEST = new Map();          // Map<tt, {kind:'movie'|'series'|null, meta:object|null}>
-const FALLBACK = new Map();      // Map<tt, { name?, poster?, releaseDate?, year?, type? }>
-const EP2SER = new Map();        // Map<episode_tt, series_tt>
+// ─── STATE ─────────────────────────────────────────────────────────────────────
+/** LISTS = { lsid: { id, name, url, ids:[tt...] } } */
+let LISTS = Object.create(null);
+
+const BEST     = new Map(); // Map<tt, {kind:'movie'|'series'|null, meta:object|null}>
+const FALLBACK = new Map(); // Map<tt, { name?, poster?, releaseDate?, year?, type? }>
+const EP2SER   = new Map(); // Map<episode_tt, series_tt>
+
 let LAST_SYNC_AT = 0;
 let syncTimer = null;
 let syncInProgress = false;
+
+// manifest rev; will produce 10.2.<rev> (strict SemVer)
 let MANIFEST_REV = 1;
 let LAST_MANIFEST_KEY = "";
 
-// NEW: user preferences (in-memory)
+// In-memory PREFS (customization)
 let PREFS = {
-  enabled: [],            // [] => all discovered
-  order: [],              // list ids in desired order
-  defaultList: "",        // lsid to surface first (we’ll push it to the front)
-  perListSort: {},        // { lsid: "date_asc" | "name_desc" | ... }
-  upgradeEpisodes: UPGRADE_EPISODES
+  enabled: [],           // enabled lsid; empty = all
+  order: [],             // lsid display order
+  defaultList: "",       // lsid opened by default
+  perListSort: {},       // { lsid: "date_desc" | "name_asc" | ... }
+  upgradeEpisodes: UPGRADE_EPISODES_DEFAULT
 };
 
-// ---------- helpers ----------
-const isImdb = v => /^tt\d{7,}$/i.test(String(v||""));
+// ─── helpers ───────────────────────────────────────────────────────────────────
+const isImdb   = v => /^tt\d{7,}$/i.test(String(v||""));
 const isListId = v => /^ls\d{6,}$/i.test(String(v||""));
-const minutes = ms => Math.round(ms/60000);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+const minutes  = ms => Math.round(ms/60000);
+const sleep    = ms => new Promise(r => setTimeout(r, ms));
 
 async function fetchText(url) {
   const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
@@ -70,7 +73,7 @@ async function fetchJson(url) {
 }
 const withParam = (u,k,v) => { const x = new URL(u); x.searchParams.set(k,v); return x.toString(); };
 
-// ---------- discovery ----------
+// ─── discovery ─────────────────────────────────────────────────────────────────
 async function discoverListsFromUser(userListsUrl) {
   if (!userListsUrl) return [];
   const html = await fetchText(withParam(userListsUrl, "_", Date.now()));
@@ -80,6 +83,7 @@ async function discoverListsFromUser(userListsUrl) {
   const ids = new Set();
   let m;
   while ((m = re.exec(html))) ids.add(m[1]);
+
   // super-fallback: scan any /list/ls.../ occurence
   if (!ids.size) {
     const re2 = /\/list\/(ls\d{6,})\//gi;
@@ -148,7 +152,7 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
   return ids;
 }
 
-// ---------- metadata ----------
+// ─── metadata ─────────────────────────────────────────────────────────────────
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -180,13 +184,14 @@ async function episodeParentSeries(imdbId) {
 }
 async function getBestMeta(imdbId) {
   if (BEST.has(imdbId)) return BEST.get(imdbId);
-  // series first, then movie (prevents many mis-typed shows)
+
+  // series first, then movie — reduces mis-typed shows
   let meta = await fetchCinemeta("series", imdbId);
   if (meta) { const rec = { kind: "series", meta }; BEST.set(imdbId, rec); return rec; }
   meta = await fetchCinemeta("movie", imdbId);
   if (meta) { const rec = { kind: "movie", meta }; BEST.set(imdbId, rec); return rec; }
 
-  // fallback: IMDb JSON-LD
+  // fallback: IMDb JSON-LD/OG
   const ld = await imdbJsonLd(imdbId);
   let name, poster, released, year, type = "movie";
   try {
@@ -222,7 +227,11 @@ function cardFor(imdbId) {
     description: m.description || undefined
   };
 }
-function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
+function toTs(d,y){
+  if (d) { const t = Date.parse(d); if (!Number.isNaN(t)) return t; }
+  if (y) { const t = Date.parse(`${y}-01-01`); if (!Number.isNaN(t)) return t; }
+  return null;
+}
 function stableSort(items, sort) {
   const s = String(sort || "name_asc").toLowerCase();
   const dir = s.endsWith("_asc") ? 1 : -1;
@@ -251,13 +260,15 @@ async function mapLimit(arr, limit, fn) {
   return out;
 }
 
-// ---------- sync ----------
+// ─── sync ──────────────────────────────────────────────────────────────────────
 function manifestKey() {
-  // include prefs in the key so changing prefs bumps manifest
   const ids = Object.keys(LISTS).sort().join(",");
   const names = Object.keys(LISTS).map(id => LISTS[id]?.name || id).sort().join("|");
-  const prefsKey = JSON.stringify(PREFS);
-  return ids + "#" + names + "#" + prefsKey;
+  const prefsSig = JSON.stringify({
+    enabled: PREFS.enabled, order: PREFS.order, defaultList: PREFS.defaultList,
+    perListSort: PREFS.perListSort, upgradeEpisodes: PREFS.upgradeEpisodes
+  });
+  return ids + "#" + names + "#" + prefsSig;
 }
 async function fullSync({ rediscover = true } = {}) {
   if (syncInProgress) return;
@@ -269,7 +280,6 @@ async function fullSync({ rediscover = true } = {}) {
       try { discovered = await discoverListsFromUser(IMDB_USER_URL); }
       catch (e) { console.warn("[DISCOVER] failed:", e.message); }
     }
-    // fallback if discovery fails and IMDB_LIST_IDS provided
     if ((!discovered || !discovered.length) && IMDB_LIST_IDS.length) {
       discovered = IMDB_LIST_IDS.map(id => ({ id, name: id, url: `https://www.imdb.com/list/${id}/` }));
       console.log(`[DISCOVER] used IMDB_LIST_IDS fallback (${discovered.length})`);
@@ -280,7 +290,6 @@ async function fullSync({ rediscover = true } = {}) {
     for (const d of discovered) { next[d.id] = { id: d.id, name: d.name || d.id, url: d.url, ids: [] }; seen.add(d.id); }
     for (const id of Object.keys(LISTS)) if (!seen.has(id)) next[id] = LISTS[id];
 
-    // pull items per list
     const uniques = new Set();
     for (const id of Object.keys(next)) {
       const url = next[id].url || `https://www.imdb.com/list/${id}/`;
@@ -322,7 +331,11 @@ async function fullSync({ rediscover = true } = {}) {
     LAST_SYNC_AT = Date.now();
 
     const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV); }
+    if (key !== LAST_MANIFEST_KEY) {
+      LAST_MANIFEST_KEY = key;
+      MANIFEST_REV++;
+      console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
+    }
 
     console.log(`[SYNC] ok – ${idsToPreload.length} ids across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
   } catch (e) {
@@ -342,34 +355,10 @@ function maybeBackgroundSync() {
   if (stale && !syncInProgress) fullSync({ rediscover:true }).then(scheduleNextSync);
 }
 
-// ---------- prefs helpers ----------
-function effectiveEnabledListIds() {
-  const discovered = Object.keys(LISTS);
-  if (!PREFS.enabled || !PREFS.enabled.length) return discovered;
-  const set = new Set(discovered);
-  return PREFS.enabled.filter(id => set.has(id));
-}
-function orderedListIds() {
-  const enabled = effectiveEnabledListIds();
-  // start with name-ordered
-  let base = enabled.slice().sort((a,b)=> (LISTS[a]?.name||a).localeCompare(LISTS[b]?.name||b));
-  // apply custom order if present
-  if (PREFS.order && PREFS.order.length) {
-    const rank = new Map(base.map((id,i)=>[id, i+1000]));
-    PREFS.order.forEach((id, i)=>{ if (rank.has(id)) rank.set(id, i); });
-    base = base.sort((a,b)=> (rank.get(a)??9999)-(rank.get(b)??9999));
-  }
-  // bubble defaultList to front if set
-  if (PREFS.defaultList && base.includes(PREFS.defaultList)) {
-    base = [PREFS.defaultList, ...base.filter(x=>x!==PREFS.defaultList)];
-  }
-  return base;
-}
-
-// ---------- server ----------
+// ─── server ───────────────────────────────────────────────────────────────────
 const app = express();
 app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
-app.use(express.json());
+app.use(express.json()); // required for POST /api/prefs
 
 function addonAllowed(req){
   if (!SHARED_SECRET) return true;
@@ -388,20 +377,35 @@ const absoluteBase = req => {
 
 app.get("/health", (_,res)=>res.status(200).send("ok"));
 
-// Manifest (no spaces in version!)
+// Manifest (strict SemVer: 10.2.<rev>)
 const baseManifest = {
   id: "org.mylists.snapshot",
   version: "10.2.0",
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  // IMPORTANT: type must match catalogs' type exactly (case-sensitive)
   types: ["my lists","movie","series"],
   idPrefixes: ["tt"]
 };
+
+function effectiveEnabledListIds() {
+  const all = Object.keys(LISTS);
+  if (!PREFS.enabled || !PREFS.enabled.length) return all;
+  const set = new Set(all);
+  return PREFS.enabled.filter(id => set.has(id));
+}
 function catalogs(){
-  return orderedListIds().map(lsid => ({
-    type: "my lists",
+  const enabled = effectiveEnabledListIds();
+  const ordering = new Map(enabled.map((id, i) => [id, i + 1000]));
+  (PREFS.order || []).forEach((id, idx) => { if (ordering.has(id)) ordering.set(id, idx); });
+  const sorted = enabled.slice().sort((a,b) => {
+    const ia = ordering.get(a) ?? 9999, ib = ordering.get(b) ?? 9999;
+    if (ia !== ib) return ia - ib;
+    const na = LISTS[a]?.name || a, nb = LISTS[b]?.name || b;
+    return na.localeCompare(nb);
+  });
+  return sorted.map(lsid => ({
+    type: "My lists",
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
@@ -416,9 +420,16 @@ app.get("/manifest.json", (req,res)=>{
   try{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
-    const version = `${baseManifest.version}.${MANIFEST_REV}`;
+
+    // strict SemVer: "10.2.<rev>"
+    const [major, minor] = baseManifest.version.split("."); // "10","2","0" → we only use first two parts
+    const version = `${major}.${minor}.${MANIFEST_REV}`;
+
     res.json({ ...baseManifest, version, catalogs: catalogs() });
-  }catch(e){ console.error("manifest:", e); res.status(500).send("Internal Server Error");}
+  }catch(e){
+    console.error("manifest:", e);
+    res.status(500).send("Internal Server Error");
+  }
 });
 
 // Catalog
@@ -473,7 +484,7 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
 });
 
-// ---- Admin UI + Prefs ----
+// ─── Admin (customize UI) ─────────────────────────────────────────────────────
 app.get("/admin", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   const base = absoluteBase(req);
@@ -482,53 +493,55 @@ app.get("/admin", async (req,res)=>{
   let discovered = [];
   try { if (IMDB_USER_URL) discovered = await discoverListsFromUser(IMDB_USER_URL); } catch {}
 
-  const disc = discovered.map(d=>`<li><b>${(d.name||d.id).replace(/</g,"&lt;")}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none found or IMDb unreachable right now).</li>";
+  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none found or IMDb unreachable right now).</li>";
 
   res.type("html").send(`<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Admin</title>
 <style>
-body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:1000px}
+body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:980px}
 .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
 button{padding:10px 16px;border:0;border-radius:8px;background:#2d6cdf;color:#fff;cursor:pointer}
 small{color:#666}
 .code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f6f6;padding:4px 6px;border-radius:6px}
+.badge{display:inline-block;background:#eee;border-radius:999px;padding:2px 8px;font-size:12px;margin-left:6px}
 table{width:100%;border-collapse:collapse}
-th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:middle}
-tr[draggable="true"]{cursor:grab}
-tr.dragging{opacity:0.5}
-.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
+tr.dragging{opacity:.6}
 </style></head><body>
 <h1>My Lists – Admin</h1>
 
-<div class="card">
+<div class="card" id="snap">
   <h3>Current Snapshot</h3>
-  <div id="snapshot">(loading…)</div>
-  <p><small>Last sync: ${LAST_SYNC_AT ? new Date(LAST_SYNC_AT).toLocaleString() + " (" + minutes(Date.now()-LAST_SYNC_AT) + " min ago)" : "never"}</small></p>
-  <form method="POST" action="/api/sync?admin=${encodeURIComponent(ADMIN_PASSWORD)}"><button>Sync IMDb Lists Now</button></form>
-  <p><small>Auto-sync every ${IMDB_SYNC_MINUTES} min${IMDB_SYNC_MINUTES ? "" : " (disabled)"}.</small></p>
+  <ul id="snapRows"></ul>
+  <p><small id="lastSync">Last sync: never</small></p>
+  <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button>Sync IMDb Lists Now</button></form>
+  <p class="badge">Auto-sync every ${IMDB_SYNC_MINUTES} min${IMDB_SYNC_MINUTES ? "" : " (disabled)"}.</p>
 </div>
 
 <div class="card">
   <h3>Customize (enable/disable, order, defaults)</h3>
   <p>Drag rows to change order. First enabled row opens by default unless you pick one below.</p>
-  <div class="row"><b>Default list:</b> <select id="defaultList"></select>
-    <label style="margin-left:12px"><input type="checkbox" id="upgradeEp"> Upgrade episodes to parent series</label>
+  <div style="margin:6px 0">
+    <b>Default list:</b> <select id="defaultList"></select>
+    <label style="margin-left:12px">
+      <input type="checkbox" id="upgradeEp"> Upgrade episodes to parent series
+    </label>
   </div>
   <table id="tbl">
-    <thead><tr><th>Enabled</th><th>List (lsid)</th><th>Items</th><th>Default sort</th></tr></thead>
-    <tbody></tbody>
+    <thead><tr>
+      <th>Enabled</th><th>List (lsid)</th><th>Items</th><th>Default sort</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
   </table>
-  <div class="row" style="margin-top:10px">
-    <button id="saveBtn">Save</button>
-    <span id="msg" style="color:#2d6cdf"></span>
-  </div>
+  <div style="margin-top:10px"><button id="saveBtn">Save</button></div>
+  <p id="saveMsg" style="color:#2d6cdf"></p>
 </div>
 
 <div class="card">
   <h3>Discovered at <span class="code">${IMDB_USER_URL || "(IMDB_USER_URL not set)"}</span></h3>
   <ul>${disc}</ul>
-  <p><small>Debug: <a href="/api/debug-imdb?admin=${encodeURIComponent(ADMIN_PASSWORD)}">open</a> (shows the first part of HTML we receive)</small></p>
+  <p><small>Debug: <a href="/api/debug-imdb?admin=${ADMIN_PASSWORD}">open</a> (shows the first part of HTML we receive)</small></p>
 </div>
 
 <div class="card">
@@ -538,77 +551,95 @@ tr.dragging{opacity:0.5}
 </div>
 
 <script>
-async function jget(u){ const r=await fetch(u); return r.json(); }
-function el(t,a={},kids=[]){const e=document.createElement(t); for(const k in a){ if(k==="text") e.textContent=a[k]; else if(k==="html") e.innerHTML=a[k]; else e.setAttribute(k,a[k]); } kids.forEach(c=>e.appendChild(c)); return e;}
-
+async function j(url, opt){ const r = await fetch(url, opt); return r.json ? r.json() : r.text(); }
 async function load(){
-  const lists = await jget('/api/lists?admin=${encodeURIComponent(ADMIN_PASSWORD)}');
-  const prefs = await jget('/api/prefs?admin=${encodeURIComponent(ADMIN_PASSWORD)}');
-  const snapshot = document.getElementById('snapshot');
-  snapshot.innerHTML = '<ul>' + (Object.keys(lists).map(id=> {
-    const L=lists[id]; const count=(L.ids||[]).length;
-    return '<li><b>'+(L.name||id)+'</b> <small>('+(count)+' items)</small><br><small>https://www.imdb.com/list/'+id+'/</small></li>';
-  }).join('') || '<li>(none)</li>') + '</ul>';
-
-  const order = (prefs.order && prefs.order.length) ? prefs.order.slice() : Object.keys(lists);
-  const enabledSet = new Set((prefs.enabled && prefs.enabled.length) ? prefs.enabled : Object.keys(lists));
-
-  const dl = document.getElementById('defaultList');
-  dl.innerHTML = '';
-  order.forEach(lsid=>{
-    if(!lists[lsid]) return;
-    const o=document.createElement('option');
-    o.value=lsid; o.textContent=lists[lsid].name||lsid;
-    if (lsid===prefs.defaultList) o.selected=true;
-    dl.appendChild(o);
+  const lists = await j('/api/lists?admin=${ADMIN_PASSWORD}');
+  const prefs = await j('/api/prefs?admin=${ADMIN_PASSWORD}');
+  const snapRows = document.getElementById('snapRows');
+  snapRows.innerHTML = "";
+  Object.keys(lists).forEach(id=>{
+    const L = lists[id];
+    const li = document.createElement('li');
+    li.innerHTML = '<b>'+ (L.name||id) + '</b> <small>('+(L.ids||[]).length+' items)</small><br/><small>'+(L.url||'')+'</small>';
+    snapRows.appendChild(li);
   });
+  const lastSync = ${LAST_SYNC_AT} ? new Date(${LAST_SYNC_AT}).toLocaleString() + " (" + Math.round((Date.now()-${LAST_SYNC_AT})/60000) + " min ago)" : "never";
+  document.getElementById('lastSync').textContent = 'Last sync: ' + lastSync;
+
+  // build table rows (include ALL lists so new ones appear)
+  const tbody = document.getElementById('tbody');
+  tbody.innerHTML = "";
+  const ids = Object.keys(lists).sort((a,b)=> (lists[a].name||a).localeCompare(lists[b].name||b));
+
+  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : ids);
+  const defSel = document.getElementById('defaultList');
+  defSel.innerHTML = '<option value=""></option>';
+  ids.forEach(lsid => {
+    const opt = document.createElement('option');
+    opt.value = lsid; opt.textContent = lists[lsid].name || lsid;
+    if (prefs.defaultList === lsid) opt.selected = true;
+    defSel.appendChild(opt);
+  });
+
   document.getElementById('upgradeEp').checked = !!prefs.upgradeEpisodes;
 
-  const tbody = document.querySelector('#tbl tbody');
-  tbody.innerHTML = '';
-  function makeRow(lsid){
-    const L = lists[lsid]; if(!L) return null;
-    const tr=el('tr',{draggable:'true','data-id':lsid});
-    const cb=el('input',{type:'checkbox',class:'en'}); cb.checked = enabledSet.has(lsid);
-    const nameTd = el('td'); nameTd.appendChild(el('div',{text:(L.name||lsid)})); nameTd.appendChild(el('small',{text:lsid}));
-    const cnt=el('td',{text:String((L.ids||[]).length)});
-    const sel=el('select',{class:'sort'});
-    ["date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"].forEach(o=>{
-      const op=el('option',{value:o,text:o}); if ((prefs.perListSort&&prefs.perListSort[lsid])===o) op.selected=true; sel.appendChild(op);
-    });
-    tr.appendChild(el('td',{},[cb])); tr.appendChild(nameTd); tr.appendChild(cnt); tr.appendChild(el('td',{},[sel]));
-    return tr;
-  }
-  order.forEach(lsid => { const r = makeRow(lsid); if (r) tbody.appendChild(r); });
+  const sorts = ["date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
 
-  // drag & drop
+  ids.forEach(lsid => {
+    const L = lists[lsid];
+    const tr = document.createElement('tr');
+    tr.draggable = true;
+    tr.dataset.lsid = lsid;
+
+    const td0 = document.createElement('td');
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.checked = enabledSet.has(lsid);
+    cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
+    td0.appendChild(cb);
+
+    const td1 = document.createElement('td');
+    td1.innerHTML = '<div><b>'+ (L.name||lsid) +'</b></div><small>'+lsid+'</small>';
+
+    const td2 = document.createElement('td'); td2.textContent = String((L.ids||[]).length);
+
+    const td3 = document.createElement('td');
+    const sel = document.createElement('select');
+    sorts.forEach(s => {
+      const o=document.createElement('option'); o.value=s; o.textContent=s;
+      if ((prefs.perListSort && prefs.perListSort[lsid]) === s) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', ()=>{ prefs.perListSort = prefs.perListSort||{}; prefs.perListSort[lsid]=sel.value; });
+    td3.appendChild(sel);
+
+    tr.appendChild(td0); tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+    tbody.appendChild(tr);
+  });
+
+  // simple drag sort
   let dragEl=null;
-  tbody.addEventListener('dragstart', e=>{ const tr=e.target.closest('tr'); if(!tr) return; dragEl=tr; tr.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
-  tbody.addEventListener('dragend', e=>{ if(dragEl) dragEl.classList.remove('dragging'); dragEl=null; });
+  tbody.addEventListener('dragstart', e=>{ dragEl=e.target.closest('tr'); dragEl.classList.add('dragging'); });
+  tbody.addEventListener('dragend', ()=>{ if(dragEl) dragEl.classList.remove('dragging'); dragEl=null; });
   tbody.addEventListener('dragover', e=>{
     e.preventDefault();
-    const dragging = tbody.querySelector('.dragging'); if(!dragging) return;
-    const rows=[...tbody.querySelectorAll('tr:not(.dragging)')];
-    const after = rows.find(row => e.clientY <= row.getBoundingClientRect().top + row.offsetHeight/2);
-    if (!after) tbody.appendChild(dragging); else tbody.insertBefore(dragging, after);
+    const after = [...tbody.querySelectorAll('tr:not(.dragging)')].find(row => e.clientY <= row.getBoundingClientRect().top + row.offsetHeight/2);
+    if (!after) tbody.appendChild(dragEl); else tbody.insertBefore(dragEl, after);
   });
 
   document.getElementById('saveBtn').onclick = async ()=>{
-    const newOrder = Array.from(tbody.querySelectorAll('tr')).map(tr=>tr.getAttribute('data-id'));
-    const newEnabled = Array.from(tbody.querySelectorAll('tr')).filter(tr=>tr.querySelector('input.en').checked).map(tr=>tr.getAttribute('data-id'));
-    const newPerSort={}; tbody.querySelectorAll('tr').forEach(tr=>{ newPerSort[tr.getAttribute('data-id')] = tr.querySelector('select.sort').value; });
+    const order = [...tbody.querySelectorAll('tr')].map(tr=>tr.dataset.lsid);
+    const enabled = order.filter(lsid => {
+      const tr = tbody.querySelector('tr[data-lsid="'+lsid+'"]');
+      return tr && tr.querySelector('input[type=checkbox]').checked;
+    });
     const body = {
-      enabled: newEnabled,
-      order: newOrder,
-      defaultList: dl.value || "",
-      perListSort: newPerSort,
+      enabled, order,
+      defaultList: defSel.value || "",
+      perListSort: prefs.perListSort || {},
       upgradeEpisodes: document.getElementById('upgradeEp').checked
     };
-    document.getElementById('msg').textContent='Saving…';
-    const r = await fetch('/api/prefs?admin=${encodeURIComponent(ADMIN_PASSWORD)}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const t = await r.text();
-    document.getElementById('msg').textContent = t || 'Saved.';
-    setTimeout(()=>{ document.getElementById('msg').textContent=''; }, 2500);
+    const r = await fetch('/api/prefs?admin=${ADMIN_PASSWORD}', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const t = await r.text(); document.getElementById('saveMsg').textContent = t || 'Saved.';
+    setTimeout(()=>{ document.getElementById('saveMsg').textContent = ''; }, 2500);
   };
 }
 load();
@@ -616,11 +647,16 @@ load();
 </body></html>`);
 });
 
-// lists/prefs APIs for admin JS
-app.get("/api/lists", (req,res)=>{ if (!adminAllowed(req)) return res.status(403).send("Forbidden"); res.json(LISTS); });
-app.get("/api/prefs", (req,res)=>{ if (!adminAllowed(req)) return res.status(403).send("Forbidden"); res.json(PREFS); });
-
-app.post("/api/prefs", async (req,res)=>{
+// API for admin JS
+app.get("/api/lists", (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  res.json(LISTS);
+});
+app.get("/api/prefs", (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  res.json(PREFS);
+});
+app.post("/api/prefs", (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
     const body = req.body || {};
@@ -630,15 +666,14 @@ app.post("/api/prefs", async (req,res)=>{
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : {};
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
 
-    // bump manifest so Stremio refreshes without reinstall
+    // bump manifest so Stremio refreshes catalogs without reinstall
     const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
-
-    // optional: re-map episodes quickly without rediscovering
-    await fullSync({ rediscover: false });
-
+    if (key !== LAST_MANIFEST_KEY) {
+      LAST_MANIFEST_KEY = key;
+      MANIFEST_REV++;
+    }
     res.status(200).send("Saved. Manifest rev " + MANIFEST_REV);
-  }catch(e){ console.error("prefs:", e); res.status(500).send("Failed to save"); }
+  }catch(e){ console.error("prefs save:", e); res.status(500).send("Failed to save"); }
 });
 
 // manual sync
@@ -647,11 +682,11 @@ app.post("/api/sync", async (req,res)=>{
   try{
     await fullSync({ rediscover:true });
     scheduleNextSync();
-    res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}">Back</a>`);
+    res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
-// tiny debug helper: fetch first 2000 chars of IMDb lists page
+// tiny debug helper
 app.get("/api/debug-imdb", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -664,11 +699,11 @@ app.get("/api/debug-imdb", async (req,res)=>{
   }
 });
 
-// NEW: bind port immediately, sync in background
+// ─── BOOT ──────────────────────────────────────────────────────────────────────
 app.listen(PORT, HOST, () => {
   console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
   console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
-  // kick off background sync (don’t block port binding)
+  // non-blocking initial sync
   fullSync({ rediscover: true }).then(scheduleNextSync).catch(e => {
     console.warn("[BOOT] background sync failed:", e.message);
   });
