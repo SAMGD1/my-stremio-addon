@@ -513,11 +513,13 @@ app.get("/api/debug-imdb", async (req,res)=>{
 });
 
 // boot
-(async()=>{
-  await fullSync({ rediscover:true });
-  scheduleNextSync();
-  app.listen(PORT, HOST, ()=>{
-    console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
-    console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET?`?key=${SHARED_SECRET}`:""}`);
+// NEW: bind port immediately, sync in background
+app.listen(PORT, HOST, () => {
+  console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
+  console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
+  // kick off background sync (don’t block port binding)
+  fullSync({ rediscover: true }).then(scheduleNextSync).catch(e => {
+    console.warn("[BOOT] background sync failed:", e.message);
   });
-})();
+});
+
