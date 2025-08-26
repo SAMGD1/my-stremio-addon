@@ -600,7 +600,11 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:mi
       return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
     }).join("") || "<li>(none)</li>"
   }</ul>
-  <p><small>Last sync: ${LAST_SYNC_AT ? new Date(LAST_SYNC_AT).toLocaleString() + " (" + ${minutes(Date.now()-LAST_SYNC_AT)} + " min ago)" : "never"}</small></p>
+<p><small>Last sync: ${
+  LAST_SYNC_AT
+    ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + minutes(Date.now() - LAST_SYNC_AT) + " min ago)")
+    : "never"
+}</small></p>
   <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button>Sync IMDb Lists Now</button></form>
   <p class="badge">Auto-sync every ${IMDB_SYNC_MINUTES} min${IMDB_SYNC_MINUTES ? "" : " (disabled)"}</p>
 </div>
