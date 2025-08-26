@@ -248,9 +248,7 @@ async function getBestMeta(imdbId) {
 
 function toTs(dateStr, year) {
   if (dateStr) { const t = Date.parse(dateStr); if (!Number.isNaN(t)) return t; }
-  if (year)    { const t = Date.parse(`${year}-01-01`); if (!Number.isNaN(t)) return t; }
-  return null;
-}
+  
 function buildCard(imdbId) {
   const rec = BEST.get(imdbId) || { kind: null, meta: null };
   const meta = rec.meta || {};
