@@ -570,7 +570,8 @@ select{padding:6px 8px;border:1px solid #ddd;border-radius:6px}
   <ul>${rows}</ul>
   <p><small>Last sync: ${
     LAST_SYNC_AT
-      ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + ${minutes(Date.now()-LAST_SYNC_AT)} + " min ago)")
+     ? `${new Date(LAST_SYNC_AT).toLocaleString()} (${minutes(Date.now()-LAST_SYNC_AT)} min ago)`
+
       : "never"
   }</small></p>
   <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button>Sync IMDb Lists Now</button></form>
