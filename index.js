@@ -612,97 +612,161 @@ function el(tag, attrs={}, kids=[]) {
   return e;
 }
 
-function buildTable(lists, prefs){
-  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
-  const order = prefs.order && prefs.order.length ? prefs.order.slice() : Object.keys(lists);
-  const perSort = { ...(prefs.perListSort || {}) };
+function isCtrl(node){
+  const t = (node && node.tagName || "").toLowerCase();
+  return t === "input" || t === "select" || t === "button" || t === "a" || t === "label";
+}
 
+// Attach robust drag & drop to a <tbody> containing <tr data-lsid draggable="true">
+function attachDnD(tbody) {
+  let dragSrc = null;
+
+  tbody.addEventListener('dragstart', (e) => {
+    const tr = e.target.closest('tr[data-lsid]');
+    if (!tr || isCtrl(e.target)) return;
+    dragSrc = tr;
+    tr.classList.add('dragging');
+    // Some browsers require data to be set
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
+  });
+
+  tbody.addEventListener('dragend', () => {
+    if (dragSrc) dragSrc.classList.remove('dragging');
+    dragSrc = null;
+  });
+
+  tbody.addEventListener('dragover', (e) => {
+    // NECESSARY: allow drop
+    e.preventDefault();
+    if (!dragSrc) return;
+    const over = e.target.closest('tr[data-lsid]');
+    if (!over || over === dragSrc) return;
+    const rect = over.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
+  });
+
+  // Optional: handle drop explicitly (not strictly needed if we rearrange in dragover)
+  tbody.addEventListener('drop', (e) => {
+    e.preventDefault();
+  });
+}
+
+async function render() {
+  const prefs = await getPrefs();
+  const lists = await getLists();
+
+  const container = document.getElementById('prefs'); container.innerHTML = "";
+
+  // Enabled set defaults to "all discovered"
+  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
+
+  // Start with current order if provided, otherwise discovered order
+  const order = (prefs.order && prefs.order.length
+    ? prefs.order.filter(id => lists[id])
+    : Object.keys(lists));
+
+  // Build table
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:'⇅'}), el('th',{text:'Enabled'}), el('th',{text:'List (lsid)'}), el('th',{text:'Items'}), el('th',{text:'Default sort'})
+    el('th',{text:'Enabled'}), el('th',{text:'List (lsid)'}), el('th',{text:'Items'}),
+    el('th',{text:'Default sort'})
   ])]);
   table.appendChild(thead);
   const tbody = el('tbody');
 
-  function rowFor(lsid){
+  function makeRow(lsid) {
     const L = lists[lsid];
-    const tr = el('tr', { draggable: 'true' });
-    tr.addEventListener('dragstart', e => { tr.classList.add('dragging'); e.dataTransfer.setData('text/plain', lsid); });
-    tr.addEventListener('dragend',   () => tr.classList.remove('dragging'));
-    tr.addEventListener('dragover',  e => e.preventDefault());
-    tr.addEventListener('drop', e => {
-      e.preventDefault();
-      const src = e.dataTransfer.getData('text/plain');
-      const si = order.indexOf(src), di = order.indexOf(lsid);
-      if (si>=0 && di>=0 && si !== di){ order.splice(si,1); order.splice(di,0,src); render(); }
-    });
+    const tr = el('tr', {'data-lsid': lsid, draggable:'true'}); // <-- draggable row
 
-    const handle = el('td', { class:'handle', text:'⇅' });
-
+    // Enabled checkbox
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
+    // Name + lsid
+    const nameCell = el('td',{}); 
+    nameCell.appendChild(el('div',{text:(L.name||lsid)}));
+    nameCell.appendChild(el('small',{text:lsid}));
+
+    // Count
+    const count = el('td',{text:String((L.ids||[]).length)});
+
+    // Default sort selector
     const sortSel = el('select');
     const opts = ["date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
-    const def = perSort[lsid] || "name_asc";
-    opts.forEach(o => sortSel.appendChild(el('option',{value:o,text:o, ...(o===def?{selected:""}:{})})));
-    sortSel.addEventListener('change', ()=>{ perSort[lsid] = sortSel.value; });
+    const def = (prefs.perListSort && prefs.perListSort[lsid]) || "name_asc";
+    opts.forEach(o=> sortSel.appendChild(el('option',{value:o,text:o, ...(o===def?{selected:""}:{})})));
+    sortSel.addEventListener('change', ()=>{ prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = sortSel.value; });
 
-    const nameCell = el('td',{}); nameCell.appendChild(el('div',{text:(L.name||lsid)})); nameCell.appendChild(el('small',{text:lsid}));
-
-    tr.appendChild(handle);
     tr.appendChild(el('td',{},[cb]));
     tr.appendChild(nameCell);
-    tr.appendChild(el('td',{text:String((L.ids||[]).length)}));
+    tr.appendChild(count);
     tr.appendChild(el('td',{},[sortSel]));
-    tr.dataset.lsid = lsid;
+
     return tr;
   }
 
-  order.forEach(lsid => tbody.appendChild(rowFor(lsid)));
+  order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
+  attachDnD(tbody);             // <-- enable drag & drop
   table.appendChild(tbody);
 
-  const defLabel = el('label',{html:'<b>Default list:</b> '});
+  // Header controls
+  container.appendChild(el('div', {html:'<b>Default list:</b> '}));
   const defSel = el('select');
   order.forEach(lsid => defSel.appendChild(el('option',{value:lsid,text:(lists[lsid].name||lsid), ...(lsid===prefs.defaultList?{selected:""}:{})})));
+  container.appendChild(defSel);
 
-  const wrap = el('div');
-  wrap.appendChild(defLabel); wrap.appendChild(defSel);
-  wrap.appendChild(el('div',{style:'margin-top:8px'}));
-  const ep = el('input',{type:'checkbox'}); ep.checked = !!prefs.upgradeEpisodes;
-  wrap.appendChild(ep); wrap.appendChild(el('span',{text:' Upgrade episodes to parent series'}));
-  wrap.appendChild(el('div',{style:'margin-top:10px'}));
-  wrap.appendChild(table);
+  container.appendChild(el('div', {style:'margin-top:8px'}));
+  const epCb = el('input',{type:'checkbox'}); epCb.checked = !!prefs.upgradeEpisodes;
+  container.appendChild(epCb);
+  container.appendChild(el('span',{text:' Upgrade episodes to parent series'}));
 
-  return { wrap, collect(){
-    return {
-      enabled: Array.from(enabledSet),
-      order: order.slice(),
-      defaultList: defSel.value || "",
-      perListSort: perSort,
-      upgradeEpisodes: ep.checked
+  container.appendChild(el('div',{style:'margin-top:10px'}));
+  container.appendChild(table);
+
+  // Save
+  const saveBtn = document.getElementById('saveBtn') || (()=>{
+    const b = el('button',{id:'saveBtn', text:'Save'});
+    container.parentElement.querySelector('.row')?.appendChild?.(b);
+    return b;
+  })();
+  const saveMsg = document.getElementById('saveMsg') || (()=>{
+    const p = el('p',{id:'saveMsg', style:'color:#2d6cdf'});
+    container.parentElement.appendChild(p);
+    return p;
+  })();
+
+  saveBtn.onclick = async ()=>{
+    // Pull current visual order from DOM
+    const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+    const enabled = Array.from(enabledSet);
+
+    const body = {
+      enabled,
+      order: newOrder,
+      defaultList: defSel.value,
+      perListSort: prefs.perListSort || {},
+      upgradeEpisodes: epCb.checked
     };
-  }};
-}
-
-async function render(){
-  const prefs = await getPrefs();
-  const lists = await getLists();
-  const ui = document.getElementById('prefsUI'); ui.innerHTML = "";
-  const comp = buildTable(lists, prefs);
-  ui.appendChild(comp.wrap);
-  document.getElementById('saveBtn').onclick = async ()=>{
-    const body = comp.collect();
-    const msg = document.getElementById('msg');
-    msg.textContent = "Saving…";
-    const r = await fetch('/api/prefs?admin=${ADMIN_PASSWORD}', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    saveMsg.textContent = "Saving…";
+    const r = await fetch('/api/prefs?admin=${ADMIN_PASSWORD}', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
     const t = await r.text();
-    msg.textContent = t || "Saved.";
-    setTimeout(()=> msg.textContent = "", 2000);
+    saveMsg.textContent = t || "Saved.";
+    setTimeout(()=>{ saveMsg.textContent = ""; }, 2500);
   };
 }
+
 render();
 </script>
+<style>
+/* tiny visual cues for dragging */
+tbody tr[draggable="true"] { cursor: grab; }
+tbody tr.dragging { opacity: .5; }
+</style>
+
 </body></html>`);
 });
 
