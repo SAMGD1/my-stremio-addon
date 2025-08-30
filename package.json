@@ -1,15 +1,8 @@
 {
-  "name": "my-stremio-addon",
-  "version": "11.0.0",
+  "name": "stremio-my-lists-multi",
+  "version": "2.0.0",
   "main": "index.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "express": "^4.19.2"
-  },
-  "engines": {
-    "node": ">=18"
-  }
+  "scripts": { "start": "node index.js" },
+  "dependencies": { "express": "^4.19.2" },
+  "engines": { "node": ">=18" }
 }
