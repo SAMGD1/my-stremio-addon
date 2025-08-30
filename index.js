@@ -1,93 +1,78 @@
-/* My Lists – IMDb → Stremio (v11)
- * - CSV-first (fast & stable): /list/<lsid>/export for tconsts + types
- * - HTML fallback (detail/grid/compact) if CSV blocked
- * - Robust metadata: Cinemeta → IMDb JSON-LD
- * - Episode→Series upgrade (toggle)
- * - GitHub snapshot (lists + cards + prefs) so catalogs work while server warms
- * - Admin UI: drag to reorder, enable/disable, per-list default sort, default list
- * - No reinstall needed after save (manifest semver bumps)
+/* My Lists – IMDb → Stremio (refreshable, with UI + purge)
+ * v10.4
  */
 
 "use strict";
 const express = require("express");
 
-// ---------- ENV ----------
+// ====== ENV ======
 const PORT = Number(process.env.PORT || 7000);
 const HOST = "0.0.0.0";
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 
-// Your IMDb lists page (public): e.g. https://www.imdb.com/user/ur136127821/lists/
-const IMDB_USER_URL     = process.env.IMDB_USER_URL || "";
-const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60)); // set 2 for “every 2 minutes”
+const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/ur136127821/lists/
+const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
 
-// Optional fallback: comma-separated ls ids if discovery fails
+// Optional fallback: comma-separated ls ids (kept if discovery fails)
 const IMDB_LIST_IDS = (process.env.IMDB_LIST_IDS || "")
   .split(/[,\s]+/).map(s => s.trim()).filter(s => /^ls\d{6,}$/i.test(s));
 
-// GitHub persistence (recommended)
+// Optional GitHub persistence (snapshot + prefs)
 const GITHUB_TOKEN  = process.env.GITHUB_TOKEN  || "";
 const GITHUB_OWNER  = process.env.GITHUB_OWNER  || "";
 const GITHUB_REPO   = process.env.GITHUB_REPO   || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
-const SNAPSHOT_PATH = "data/snapshot.json";     // stored inside your data repo
+const SNAPSHOT_PATH = "data/snapshot.json";
 
 const GH_ENABLED = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 
-// ---------- CONST ----------
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/11 (CSV)";
-const HTML_HEADERS = {
-  "User-Agent": UA,
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Cache-Control": "no-cache"
-};
-const CSV_HEADERS = {
-  "User-Agent": UA,
-  "Accept": "text/csv,*/*;q=0.8"
-};
-const JSON_HEADERS = {
-  "User-Agent": UA,
-  "Accept": "application/json"
-};
+// ====== CONSTANTS ======
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyLists/10.4";
 const CINEMETA = "https://v3-cinemeta.strem.io";
 
-// ---------- STATE ----------
-/** LISTS = { lsid: { id, name, url, ids:[tt...] } } */
-let LISTS = Object.create(null);
+// ====== STATE ======
+let LISTS = Object.create(null);  // { lsid: { id, name, url, ids:[tt...] } }
+let PREFS = {
+  enabled: [],            // [] => all
+  order: [],              // explicit list order
+  defaultList: "",        // which list opens first in Stremio (optional)
+  perListSort: {},        // { lsid: "date_asc" | ... }
+  upgradeEpisodes: UPGRADE_EPISODES
+};
 
-const BEST     = new Map(); // tt -> {kind:'movie'|'series'|null, meta:Object|null}
-const FALLBACK = new Map(); // tt -> {name?,poster?,releaseDate?,year?,type?}
-const CARD     = new Map(); // tt -> catalog card
-const EP2SER   = new Map(); // episode tt -> parent series tt
+const BEST = new Map();     // Map<tt, {kind:"movie"|"series"|null, meta:object|null}>
+const FALLBACK = new Map(); // Map<tt, {name?,poster?,releaseDate?,year?,type?}>
+const EP2SER = new Map();   // Map<ep_tt, series_tt>
 
 let LAST_SYNC_AT = 0;
 let syncTimer = null;
 let syncInProgress = false;
+
 let MANIFEST_REV = 1;
 let LAST_MANIFEST_KEY = "";
 
-// ---------- HELPERS ----------
-const isImdb = v => /^tt\d{7,}$/i.test(String(v||""));
-const isListId = v => /^ls\d{6,}$/i.test(String(v||""));
+// ====== utils ======
+const isImdb  = v => /^tt\d{7,}$/i.test(String(v||""));
+const isList  = v => /^ls\d{6,}$/i.test(String(v||""));
+const sleep   = ms => new Promise(r => setTimeout(r, ms));
 const minutes = ms => Math.round(ms/60000);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function fetchText(url, headers = HTML_HEADERS) {
-  const r = await fetch(url, { headers, redirect: "follow" });
+async function fetchText(url, accept) {
+  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept": accept || "text/html,*/*" }, redirect:"follow" });
   if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
   return r.text();
 }
 async function fetchJson(url) {
-  const r = await fetch(url, { headers: JSON_HEADERS, redirect: "follow" });
+  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept":"application/json" }, redirect:"follow" });
   if (!r.ok) return null;
   try { return await r.json(); } catch { return null; }
 }
-function withParam(u,k,v){ const x = new URL(u); x.searchParams.set(k,v); return x.toString(); }
+const withParam = (u,k,v) => { const x = new URL(u); x.searchParams.set(k,v); return x.toString(); };
 
-// ---------- GitHub persistence ----------
+// ====== GitHub snapshot ======
 async function gh(method, path, bodyObj) {
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${path}`;
   const r = await fetch(url, {
@@ -116,7 +101,7 @@ async function ghWriteSnapshot(obj) {
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
   const sha = await ghGetSha(SNAPSHOT_PATH);
-  const body = { message: "update snapshot.json", content, branch: GITHUB_BRANCH };
+  const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
   if (sha) body.sha = sha;
   await gh("PUT", `/contents/${encodeURIComponent(SNAPSHOT_PATH)}`, body);
 }
@@ -129,29 +114,27 @@ async function ghReadSnapshot() {
   } catch { return null; }
 }
 
-// ---------- IMDb discovery ----------
+// ====== discovery ======
 async function discoverListsFromUser(userListsUrl) {
   if (!userListsUrl) return [];
-  const html = await fetchText(withParam(userListsUrl, "_", Date.now()));
+  const html = await fetchText(withParam(userListsUrl, "_", Date.now()), "text/html");
 
-  // tolerant: absolute/relative, single/double quotes
+  // absolute/relative, single/double quotes
+  const ids = new Set();
+  let m;
   const re = /href=['"](?:https?:\/\/(?:www\.)?imdb\.com)?\/list\/(ls\d{6,})\/['"]/gi;
-  const ids = new Set(); let m;
   while ((m = re.exec(html))) ids.add(m[1]);
-  if (!ids.size) {
+  if (!ids.size) { // parachute
     const re2 = /\/list\/(ls\d{6,})\//gi;
     while ((m = re2.exec(html))) ids.add(m[1]);
   }
-  const arr = Array.from(ids).map(id => ({ id, url: `https://www.imdb.com/list/${id}/` }));
 
-  // names
-  await Promise.all(arr.map(async L => {
-    try { L.name = await fetchListName(L.url); } catch { L.name = L.id; }
-  }));
+  const arr = Array.from(ids).map(id => ({ id, url: `https://www.imdb.com/list/${id}/` }));
+  await Promise.all(arr.map(async L => { try { L.name = await fetchListName(L.url); } catch { L.name = L.id; } }));
   return arr;
 }
 async function fetchListName(listUrl) {
-  const html = await fetchText(withParam(listUrl, "_", Date.now()));
+  const html = await fetchText(withParam(listUrl, "_", Date.now()), "text/html");
   const tries = [
     /<h1[^>]+data-testid=["']list-header-title["'][^>]*>(.*?)<\/h1>/i,
     /<h1[^>]*class=["'][^"']*header[^"']*["'][^>]*>(.*?)<\/h1>/i,
@@ -165,47 +148,6 @@ async function fetchListName(listUrl) {
   return listUrl;
 }
 
-// ---------- CSV helper ----------
-function parseCsvRow(line) {
-  const out=[]; let cur=""; let q=false;
-  for (let i=0;i<line.length;i++) {
-    const c=line[i];
-    if (c === '"') {
-      if (q && line[i+1] === '"') { cur+='"'; i++; }
-      else q = !q;
-    } else if (c === ',' && !q) {
-      out.push(cur); cur="";
-    } else cur += c;
-  }
-  out.push(cur);
-  return out;
-}
-function parseCsv(text) {
-  const rows = text.replace(/\r\n/g,"\n").split("\n").filter(l => l.trim().length);
-  if (!rows.length) return [];
-  const header = parseCsvRow(rows[0]);
-  const map = new Map(header.map((h,i)=>[h.trim(), i]));
-  const get = (arr, key) => arr[map.get(key) ?? -1] ?? "";
-  const out = [];
-  for (let i=1; i<rows.length; i++) {
-    const cols = parseCsvRow(rows[i]);
-    out.push({
-      const: get(cols, "const") || get(cols,"Const"),
-      titleType: (get(cols, "Title Type") || get(cols, "Title type") || "").trim(),
-      year: (get(cols,"Year") || "").trim(),
-      releaseDate: (get(cols, "Release Date") || "").trim()
-    });
-  }
-  return out.filter(r => r.const && /^tt\d+$/i.test(r.const));
-}
-async function fetchListCsv(lsid) {
-  const url = `https://www.imdb.com/list/${lsid}/export`;
-  const t = await fetchText(url, CSV_HEADERS);
-  const rows = parseCsv(t);
-  return rows;
-}
-
-// ---------- HTML fallback for ids ----------
 function tconstsFromHtml(html) {
   const out = []; const seen = new Set(); let m;
   const re1 = /data-tconst=["'](tt\d{7,})["']/gi;
@@ -221,6 +163,7 @@ function nextPageUrl(html) {
   if (!m) return null;
   try { return new URL(m[1], "https://www.imdb.com").toString(); } catch { return null; }
 }
+
 async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
   const modes = ["detail", "grid", "compact"];
   const seen = new Set(); const ids = [];
@@ -228,7 +171,9 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
     let url = withParam(listUrl, "mode", mode);
     let pages = 0;
     while (url && pages < maxPages) {
-      let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
+      let html;
+      try { html = await fetchText(withParam(url, "_", Date.now()), "text/html"); }
+      catch { break; }
       const found = tconstsFromHtml(html);
       let added = 0;
       for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); added++; }
@@ -236,14 +181,14 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
       const next = nextPageUrl(html);
       if (!next || !added) break;
       url = next;
-      await sleep(60);
+      await sleep(80);
     }
     if (ids.length) break;
   }
   return ids;
 }
 
-// ---------- metadata ----------
+// ====== metadata ======
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -252,7 +197,7 @@ async function fetchCinemeta(kind, imdbId) {
 }
 async function imdbJsonLd(imdbId) {
   try {
-    const html = await fetchText(`https://www.imdb.com/title/${imdbId}/`, HTML_HEADERS);
+    const html = await fetchText(`https://www.imdb.com/title/${imdbId}/`, "text/html");
     const m = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/i);
     if (m) { try { return JSON.parse(m[1]); } catch {} }
     const t = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
@@ -276,13 +221,13 @@ async function episodeParentSeries(imdbId) {
 async function getBestMeta(imdbId) {
   if (BEST.has(imdbId)) return BEST.get(imdbId);
 
-  // try series first (reduces mis-typed shows)
+  // Try series first (prevents many mislabels)
   let meta = await fetchCinemeta("series", imdbId);
   if (meta) { const rec = { kind:"series", meta }; BEST.set(imdbId, rec); return rec; }
   meta = await fetchCinemeta("movie", imdbId);
   if (meta) { const rec = { kind:"movie", meta }; BEST.set(imdbId, rec); return rec; }
 
-  // fallback to IMDb JSON-LD
+  // Fallback: IMDb JSON-LD + OG
   const ld = await imdbJsonLd(imdbId);
   let name, poster, released, year, type = "movie";
   try {
@@ -318,43 +263,44 @@ function cardFor(imdbId) {
     description: m.description || undefined
   };
 }
-function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
-function stableSort(list, sortKey) {
-  const s = String(sortKey || "name_asc").toLowerCase();
+
+function toTs(d,y){
+  if (d){ const t = Date.parse(d); if (!Number.isNaN(t)) return t; }
+  if (y){ const t = Date.parse(`${y}-01-01`); if (!Number.isNaN(t)) return t; }
+  return null;
+}
+
+// ====== sort ======
+function stableSort(items, sortKey) {
+  let s = String(sortKey || "name_asc").toLowerCase();
+  if (s === "sort") s = ""; // Stremio sometimes sends the literal placeholder
   const dir = s.endsWith("_asc") ? 1 : -1;
-  const key = s.split("_")[0];
-  const cmpNullBottom = (a,b)=> (a==null&&b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0))));
-  return list.map((m,i)=>({m,i})).sort((A,B)=>{
+  const key = s ? s.split("_")[0] : null;
+
+  const cmpNullBottom = (a,b) => (a==null && b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0))));
+
+  return items.map((m,i)=>({m,i})).sort((A,B)=>{
     const a=A.m,b=B.m; let c=0;
-    if (key==="date") c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
-    else if (key==="rating") c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    if (key==="date")      c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
+    else if (key==="rating")  c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
     else if (key==="runtime") c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
-    else c = (a.name||"").localeCompare(b.name||"");
+    else                       c = (a.name||"").localeCompare(b.name||"");
     if (c===0){ c=(a.name||"").localeCompare(b.name||""); if(c===0) c=(a.id||"").localeCompare(b.id||""); if(c===0) c=A.i-B.i; }
     return c*dir;
   }).map(x=>x.m);
 }
-async function mapLimit(arr, limit, fn) {
-  const out = new Array(arr.length);
-  let i = 0;
-  const runners = new Array(Math.min(limit, arr.length)).fill(0).map(async () => {
-    while (i < arr.length) {
-      const idx = i++;
-      out[idx] = await fn(arr[idx], idx);
-    }
-  });
-  await Promise.all(runners);
-  return out;
+
+// ====== sync ======
+function manifestKey(){
+  const order = PREFS.order.join(",");
+  const enabled = PREFS.enabled.join(",");
+  const def = PREFS.defaultList || "";
+  const sorts = JSON.stringify(PREFS.perListSort||{});
+  const names = Object.keys(LISTS).map(id => LISTS[id]?.name || id).sort().join("|");
+  return [order, enabled, def, PREFS.upgradeEpisodes?1:0, names, sorts].join("#");
 }
 
-// ---------- SYNC ----------
-function manifestKey() {
-  const enabled = PREFS.enabled && PREFS.enabled.length ? PREFS.enabled.slice() : Object.keys(LISTS);
-  const names = enabled.map(id => LISTS[id]?.name || id).sort().join("|");
-  return enabled.join(",") + "#" + (PREFS.order||[]).join(",") + "#" + (PREFS.defaultList||"") + "#" + names;
-}
-
-async function fullSync({ rediscover = true } = {}) {
+async function fullSync({ rediscover = true, purgeMissing = false } = {}) {
   if (syncInProgress) return;
   syncInProgress = true;
   const started = Date.now();
@@ -365,81 +311,65 @@ async function fullSync({ rediscover = true } = {}) {
       catch (e) { console.warn("[DISCOVER] failed:", e.message); }
     }
     if ((!discovered || !discovered.length) && IMDB_LIST_IDS.length) {
-      discovered = IMDB_LIST_IDS.map(id => ({ id, name:id, url:`https://www.imdb.com/list/${id}/` }));
+      discovered = IMDB_LIST_IDS.map(id => ({ id, name: id, url: `https://www.imdb.com/list/${id}/` }));
       console.log(`[DISCOVER] used IMDB_LIST_IDS fallback (${discovered.length})`);
     }
 
-    // build next lists object (preserve old if discovery hiccups)
     const next = Object.create(null);
     const seen = new Set();
-    for (const d of discovered) { next[d.id] = { id:d.id, name:d.name||d.id, url:d.url, ids:[] }; seen.add(d.id); }
-    for (const id of Object.keys(LISTS)) if (!seen.has(id)) next[id] = LISTS[id];
+    for (const d of discovered) {
+      next[d.id] = { id: d.id, name: d.name || d.id, url: d.url, ids: [] };
+      seen.add(d.id);
+    }
+    if (!purgeMissing) {
+      for (const id of Object.keys(LISTS)) if (!seen.has(id)) next[id] = LISTS[id];
+    }
 
-    // fetch ids for each list (CSV → HTML fallback)
-    const allIds = new Set();
+    // pull items per list
+    const uniques = new Set();
     for (const id of Object.keys(next)) {
       const url = next[id].url || `https://www.imdb.com/list/${id}/`;
       let ids = [];
-      try {
-        const csv = await fetchListCsv(id);                       // CSV first
-        if (csv && csv.length) {
-          ids = csv.map(r => r.const);
-          // store some quick fallbacks (type/year/date) to help sorting before meta arrives
-          for (const r of csv) {
-            const existing = FALLBACK.get(r.const) || {};
-            if (!existing.type) existing.type = /series/i.test(r.titleType) ? "series" : "movie";
-            if (!existing.year && r.year) existing.year = Number(String(r.year).slice(0,4)) || undefined;
-            if (!existing.releaseDate && r.releaseDate) existing.releaseDate = r.releaseDate;
-            FALLBACK.set(r.const, existing);
-          }
-        } else {
-          // fallback
-          const idsHtml = await fetchImdbListIdsAllPages(url);
-          ids = idsHtml;
-        }
-      } catch {
-        try { ids = await fetchImdbListIdsAllPages(url); } catch {}
-      }
+      try { ids = await fetchImdbListIdsAllPages(url); } catch {}
       next[id].ids = ids;
-      ids.forEach(tt => allIds.add(tt));
-      await sleep(40);
+      ids.forEach(tt => uniques.add(tt));
+      await sleep(80);
     }
 
-    // episode→series upgrade if enabled
-    let idsToPreload = Array.from(allIds);
+    // optional: upgrade ep → series
+    let idsToPreload = Array.from(uniques);
     if (PREFS.upgradeEpisodes) {
       const up = new Set();
       for (const tt of idsToPreload) {
         const rec = await getBestMeta(tt);
-        if (!rec.meta) { // ld check for episode
+        if (!rec.meta) {
           const s = await episodeParentSeries(tt);
           up.add(s && isImdb(s) ? s : tt);
         } else up.add(tt);
       }
       idsToPreload = Array.from(up);
 
-      // remap lists
+      // also remap per list
       for (const id of Object.keys(next)) {
-        const rem = []; const seen2 = new Set();
+        const remapped = []; const s = new Set();
         for (const tt of next[id].ids) {
           let fin = tt;
           const r = BEST.get(tt);
           if (!r || !r.meta) { const z = await episodeParentSeries(tt); if (z) fin = z; }
-          if (!seen2.has(fin)) { seen2.add(fin); rem.push(fin); }
+          if (!s.has(fin)) { s.add(fin); remapped.push(fin); }
         }
-        next[id].ids = rem;
+        next[id].ids = remapped;
       }
     }
 
-    // preload meta + cards
-    await mapLimit(idsToPreload, 8, getBestMeta);
-    CARD.clear();
-    for (const tt of idsToPreload) CARD.set(tt, cardFor(tt));
+    // preload minimal meta
+    for (let i=0;i<idsToPreload.length;i+=8) {
+      await Promise.all(idsToPreload.slice(i,i+8).map(getBestMeta));
+    }
 
     LISTS = next;
     LAST_SYNC_AT = Date.now();
 
-    // bump manifest if catalogs changed
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) {
       LAST_MANIFEST_KEY = key;
@@ -456,7 +386,7 @@ async function fullSync({ rediscover = true } = {}) {
           lists: LISTS,
           prefs: PREFS,
           fallback: Object.fromEntries(FALLBACK),
-          cards: Object.fromEntries(CARD),
+          cards: {},            // kept empty (rebuilt fast)
           ep2ser: Object.fromEntries(EP2SER)
         });
       } catch (e) { console.warn("[SYNC] snapshot save failed:", e.message); }
@@ -469,30 +399,39 @@ async function fullSync({ rediscover = true } = {}) {
     syncInProgress = false;
   }
 }
-
 function scheduleNextSync() {
   if (syncTimer) clearTimeout(syncTimer);
   if (IMDB_SYNC_MINUTES <= 0) return;
-  syncTimer = setTimeout(() => fullSync({ rediscover:true }).then(scheduleNextSync), IMDB_SYNC_MINUTES*60*1000);
+  syncTimer = setTimeout(() => fullSync({ rediscover: true }).then(scheduleNextSync), IMDB_SYNC_MINUTES*60*1000);
 }
 function maybeBackgroundSync() {
   if (IMDB_SYNC_MINUTES <= 0) return;
   const stale = Date.now() - LAST_SYNC_AT > IMDB_SYNC_MINUTES*60*1000;
-  if (stale && !syncInProgress) fullSync({ rediscover:true }).then(scheduleNextSync);
+  if (stale && !syncInProgress) fullSync({ rediscover: true }).then(scheduleNextSync);
+}
+async function bootFromSnapshot(){
+  if (!GH_ENABLED) return false;
+  const snap = await ghReadSnapshot();
+  if (!snap) return false;
+  try {
+    LISTS = snap.lists || LISTS;
+    PREFS = { ...PREFS, ...(snap.prefs || {}) };
+    FALLBACK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBACK.set(k,v);
+    EP2SER.clear();   if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k,v);
+    MANIFEST_REV = +snap.manifestRev || MANIFEST_REV;
+    LAST_SYNC_AT = +snap.lastSyncAt || 0;
+    LAST_MANIFEST_KEY = manifestKey();
+    console.log("[BOOT] loaded snapshot from GitHub");
+    return true;
+  } catch(e){
+    console.warn("[BOOT] invalid snapshot:", e.message);
+    return false;
+  }
 }
 
-// ---------- PREFS ----------
-let PREFS = {
-  enabled: [],           // [] => all discovered
-  order: [],             // explicit order of lsid
-  defaultList: "",       // if empty, first enabled list
-  perListSort: {},       // lsid -> sort key
-  upgradeEpisodes: UPGRADE_EPISODES
-};
-
-// ---------- SERVER ----------
+// ====== server ======
 const app = express();
-app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
+app.use((_,res,next)=>{ res.setHeader("Access-Control-Allow-Origin","*"); next(); });
 app.use(express.json());
 
 function addonAllowed(req){
@@ -512,18 +451,20 @@ const absoluteBase = req => {
 
 app.get("/health", (_,res)=>res.status(200).send("ok"));
 
-// Manifest
+// ====== manifest ======
+const BASE_VERSION_MAJOR = 10;
+const BASE_VERSION_MINOR = 4;
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "11.0.0",
+  version: `${BASE_VERSION_MAJOR}.${BASE_VERSION_MINOR}.0`,
   name: "My Lists",
-  description: "Your IMDb lists as catalogs (CSV-cached).",
+  description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
   types: ["my lists","movie","series"],
   idPrefixes: ["tt"]
 };
 
-function effectiveEnabledListIds() {
+function effectiveEnabledListIds(){
   const discovered = Object.keys(LISTS);
   if (!PREFS.enabled || !PREFS.enabled.length) return discovered;
   const set = new Set(discovered);
@@ -531,15 +472,16 @@ function effectiveEnabledListIds() {
 }
 function catalogs(){
   const enabled = effectiveEnabledListIds();
-  // order: prefs.order first, then name
-  const orderMap = new Map(enabled.map((id,i)=>[id, i+1000]));
-  (PREFS.order||[]).forEach((id,idx)=>{ if (orderMap.has(id)) orderMap.set(id, idx); });
+  // order by prefs.order; then by name
+  const ord = new Map(enabled.map((id, i) => [id, i + 1000]));
+  (PREFS.order || []).forEach((id, idx) => { if (ord.has(id)) ord.set(id, idx); });
   const sorted = enabled.slice().sort((a,b)=>{
-    const ia = orderMap.get(a) ?? 9999, ib = orderMap.get(b) ?? 9999;
-    if (ia!==ib) return ia-ib;
+    const ia = ord.get(a) ?? 9999, ib = ord.get(b) ?? 9999;
+    if (ia !== ib) return ia - ib;
     const na = LISTS[a]?.name || a, nb = LISTS[b]?.name || b;
     return na.localeCompare(nb);
   });
+
   return sorted.map(lsid => ({
     type: "My lists",
     id: `list:${lsid}`,
@@ -552,24 +494,30 @@ function catalogs(){
     posterShape: "poster"
   }));
 }
+
 app.get("/manifest.json", (req,res)=>{
   try{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
-    const version = `${baseManifest.version}-${MANIFEST_REV}`;  // semver + prerelease
+    const version = `${BASE_VERSION_MAJOR}.${BASE_VERSION_MINOR}.${MANIFEST_REV}`;
+    res.setHeader("Cache-Control","no-store");
     res.json({ ...baseManifest, version, catalogs: catalogs() });
   }catch(e){ console.error("manifest:", e); res.status(500).send("Internal Server Error");}
 });
 
-// Catalog
+// ====== catalog ======
 function parseExtra(extraStr, qObj){
   const p = new URLSearchParams(extraStr||"");
-  return { ...Object.fromEntries(p.entries()), ...(qObj||{}) };
+  const m = Object.fromEntries(p.entries());
+  const q = { ...m, ...(qObj||{}) };
+  if (q.sort === "sort") delete q.sort; // treat placeholder as unset
+  return q;
 }
 app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
   try{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
+    res.setHeader("Cache-Control","no-store");
 
     const { id } = req.params;
     if (!id || !id.startsWith("list:")) return res.json({ metas: [] });
@@ -579,11 +527,12 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     const extra = parseExtra(req.params.extra, req.query);
     const q = String(extra.search||"").toLowerCase().trim();
-    const sort = String(extra.sort || (PREFS.perListSort && PREFS.perListSort[lsid]) || "name_asc").toLowerCase();
+    const defaultSort = PREFS.perListSort?.[lsid] || "name_asc";
+    const sort = String(extra.sort || defaultSort).toLowerCase();
     const skip = Math.max(0, Number(extra.skip||0));
     const limit = Math.min(Number(extra.limit||100), 200);
 
-    let metas = (list.ids||[]).map(tt => CARD.get(tt) || cardFor(tt));
+    let metas = (list.ids||[]).map(cardFor);
     if (q) metas = metas.filter(m =>
       (m.name||"").toLowerCase().includes(q) ||
       (m.id||"").toLowerCase().includes(q) ||
@@ -594,11 +543,12 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
 });
 
-// Meta
+// ====== meta ======
 app.get("/meta/:type/:id.json", async (req,res)=>{
   try{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
+    res.setHeader("Cache-Control","no-store");
 
     const imdbId = req.params.id;
     if (!isImdb(imdbId)) return res.json({ meta:{ id: imdbId, type:"movie", name:"Unknown item" } });
@@ -613,7 +563,7 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
 });
 
-// Admin API (lists + prefs)
+// ====== Admin UI ======
 app.get("/api/lists", (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   res.json(LISTS);
@@ -626,18 +576,16 @@ app.post("/api/prefs", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
     const body = req.body || {};
-    PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
-    PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
-    PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
+    PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isList) : [];
+    PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isList)   : [];
+    PREFS.defaultList     = isList(body.defaultList) ? body.defaultList : "";
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : {};
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
 
     const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) {
-      LAST_MANIFEST_KEY = key;
-      MANIFEST_REV++;
-    }
+    if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
+    // persist
     if (GH_ENABLED) {
       try {
         await ghWriteSnapshot({
@@ -646,29 +594,28 @@ app.post("/api/prefs", async (req,res)=>{
           lists: LISTS,
           prefs: PREFS,
           fallback: Object.fromEntries(FALLBACK),
-          cards: Object.fromEntries(CARD),
+          cards: {},
           ep2ser: Object.fromEntries(EP2SER)
         });
-      } catch (e) { /* ignore */ }
+      } catch {}
     }
+
     res.status(200).send("Saved. Manifest rev " + MANIFEST_REV);
-  } catch (e) {
-    console.error("prefs save error:", e);
-    res.status(500).send("Failed to save");
-  }
+  }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
 });
 
-// Manual sync
+// manual sync + purge
 app.post("/api/sync", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
-    await fullSync({ rediscover:true });
+    const purge = String((req.query && req.query.purge) || "") === "1";
+    await fullSync({ rediscover:true, purgeMissing: purge });
     scheduleNextSync();
-    res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
+    res.status(200).send(`Synced${purge ? " (purged)" : ""} at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
-// IMDb debug (first 2k chars)
+// tiny debug (first bytes of IMDb user page)
 app.get("/api/debug-imdb", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -681,51 +628,43 @@ app.get("/api/debug-imdb", async (req,res)=>{
   }
 });
 
-// Admin UI (drag & drop)
-app.get("/admin", async (req, res) => {
+app.get("/admin", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   const base = absoluteBase(req);
-  const manifestUrl = `${base}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`;
+  const manifestUrl = `${base}/manifest.json${SHARED_SECRET?`?key=${SHARED_SECRET}`:""}`;
 
-  // pre-discover lists just for UI
   let discovered = [];
   try { if (IMDB_USER_URL) discovered = await discoverListsFromUser(IMDB_USER_URL); } catch {}
 
-  const lastSyncMsg = LAST_SYNC_AT
-    ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + minutes(Date.now() - LAST_SYNC_AT) + " min ago)")
-    : "never";
-
-  const rows = Object.keys(LISTS).map(id => {
-    const L = LISTS[id];
-    const count = (L.ids || []).length;
-    return `<li><b>${(L.name || id)}</b> <small>(${count} items)</small><br/><small>${L.url || ""}</small></li>`;
+  const rows = Object.keys(LISTS).map(id=>{
+    const L = LISTS[id]; const count=(L.ids||[]).length;
+    return `<li><b>${L.name || id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
   }).join("") || "<li>(none)</li>";
 
-  const disc = discovered.map(d =>
-    `<li><b>${d.name || d.id}</b><br/><small>${d.url}</small></li>`
-  ).join("") || "<li>(none found or IMDb unreachable right now).</li>";
+  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none found or IMDb unreachable right now).</li>";
 
   res.type("html").send(`<!doctype html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Admin</title>
 <style>
-:root{color-scheme:light dark}
-body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:960px}
-.card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
-button{padding:10px 16px;border:0;border-radius:8px;background:#2d6cdf;color:#fff;cursor:pointer}
-button:disabled{opacity:.6;cursor:not-allowed}
-small{color:#666}
-.code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f6f6;padding:4px 6px;border-radius:6px}
-table{width:100%;border-collapse:collapse;margin-top:8px}
-th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:middle}
-td small{display:block;color:#777}
-.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+:root{
+  --bg:#ffffff; --fg:#111; --muted:#666; --card:#f8f9fb; --line:#e8e8e8;
+  --accent:#2d6cdf; --danger:#d93636; --chip:#eef3ff;
+}
+*{box-sizing:border-box}
+body{font-family:system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--fg);margin:24px;max-width:980px}
+h1{margin:0 0 12px}
+.card{border:1px solid var(--line);border-radius:12px;background:#fff;padding:16px;margin:12px 0}
+button{padding:10px 16px;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
+.btn2{background:var(--accent)}
+small{color:var(--muted)}
+.code{font-family:ui-monospace,Menlo,Consolas,monospace;background:var(--card);padding:4px 6px;border-radius:6px}
+.badge{display:inline-block;background:var(--chip);border-radius:999px;padding:2px 8px;font-size:12px;margin-left:6px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
 tbody tr[draggable="true"]{cursor:grab}
 tbody tr.dragging{opacity:.55}
-tbody tr.drop-before{box-shadow:0 -2px 0 #2d6cdf inset}
-tbody tr.drop-after {box-shadow:0  2px 0 #2d6cdf inset}
+select,input[type="text"],input[type="number"]{padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
 </style>
 </head>
 <body>
@@ -734,21 +673,26 @@ tbody tr.drop-after {box-shadow:0  2px 0 #2d6cdf inset}
 <div class="card">
   <h3>Current Snapshot</h3>
   <ul>${rows}</ul>
-  <p><small>Last sync: ${lastSyncMsg}</small></p>
-  <div class="row">
-    <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
-      <button>Sync IMDb Lists Now</button>
-    </form>
-    <span class="code">Auto-sync every ${IMDB_SYNC_MINUTES} min</span>
-  </div>
+  <p><small>Last sync: ${
+    LAST_SYNC_AT
+      ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + minutes(Date.now()-LAST_SYNC_AT) + " min ago)")
+      : "never"
+  }</small></p>
+  <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}" style="display:inline-block">
+    <button class="btn2">Sync IMDb Lists Now</button>
+  </form>
+  <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}&purge=1" style="display:inline-block;margin-left:8px">
+    <button class="btn2" style="background:var(--danger)">Purge & Sync</button>
+  </form>
+  <span class="badge">Auto-sync every ${IMDB_SYNC_MINUTES} min${IMDB_SYNC_MINUTES ? "" : " (disabled)"}.</span>
 </div>
 
 <div class="card">
   <h3>Customize (enable/disable, order, defaults)</h3>
   <div id="prefs"></div>
-  <div class="row" style="margin-top:10px">
+  <div style="margin-top:10px">
     <button id="saveBtn">Save</button>
-    <span id="saveMsg" class="code"></span>
+    <span id="saveMsg" style="color:var(--accent);margin-left:10px"></span>
   </div>
 </div>
 
@@ -765,172 +709,148 @@ tbody tr.drop-after {box-shadow:0  2px 0 #2d6cdf inset}
 </div>
 
 <script>
-  const ADMIN_KEY = ${JSON.stringify(ADMIN_PASSWORD)};
+async function getPrefs(){ const r = await fetch('/api/prefs?admin=${ADMIN_PASSWORD}'); return r.json(); }
+async function getLists(){ const r = await fetch('/api/lists?admin=${ADMIN_PASSWORD}'); return r.json(); }
 
-  async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN_KEY); return r.json(); }
-  async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN_KEY); return r.json(); }
-
-  function el(tag, attrs={}, kids=[]) {
-    const e = document.createElement(tag);
-    for (const k in attrs) {
-      if (k === "text") e.textContent = attrs[k];
-      else if (k === "html") e.innerHTML = attrs[k];
-      else e.setAttribute(k, attrs[k]);
-    }
-    kids.forEach(ch => e.appendChild(ch));
-    return e;
+function el(tag, attrs={}, kids=[]) {
+  const e = document.createElement(tag);
+  for (const k in attrs) {
+    if (k === "text") e.textContent = attrs[k];
+    else if (k === "html") e.innerHTML = attrs[k];
+    else e.setAttribute(k, attrs[k]);
   }
-  function isCtrl(node){
-    const t = (node && node.tagName || "").toLowerCase();
-    return t === "input" || t === "select" || t === "button" || t === "a" || t === "label";
+  kids.forEach(ch => e.appendChild(ch));
+  return e;
+}
+function isCtrl(node){
+  const t = (node && node.tagName || "").toLowerCase();
+  return t === "input" || t === "select" || t === "button" || t === "a" || t === "label";
+}
+function attachDnD(tbody) {
+  let dragSrc = null;
+  tbody.addEventListener('dragstart', (e) => {
+    const tr = e.target.closest('tr[data-lsid]');
+    if (!tr || isCtrl(e.target)) return;
+    dragSrc = tr;
+    tr.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
+  });
+  tbody.addEventListener('dragend', () => {
+    if (dragSrc) dragSrc.classList.remove('dragging');
+    dragSrc = null;
+  });
+  tbody.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (!dragSrc) return;
+    const over = e.target.closest('tr[data-lsid]');
+    if (!over || over === dragSrc) return;
+    const rect = over.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
+  });
+  tbody.addEventListener('drop', (e) => { e.preventDefault(); });
+}
+
+async function render() {
+  const prefs = await getPrefs();
+  const lists = await getLists();
+
+  const container = document.getElementById('prefs'); container.innerHTML = "";
+
+  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
+  const order = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : Object.keys(lists));
+
+  const table = el('table');
+  const thead = el('thead', {}, [el('tr',{},[
+    el('th',{text:'Enabled'}), el('th',{text:'List (lsid)'}), el('th',{text:'Items'}), el('th',{text:'Default sort'})
+  ])]);
+  table.appendChild(thead);
+  const tbody = el('tbody');
+
+  function makeRow(lsid) {
+    const L = lists[lsid];
+    const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
+
+    const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
+    cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
+
+    const nameCell = el('td',{}); 
+    nameCell.appendChild(el('div',{text:(L.name||lsid)}));
+    nameCell.appendChild(el('small',{text:lsid}));
+
+    const count = el('td',{text:String((L.ids||[]).length)});
+
+    const sortSel = el('select');
+    const opts = ["date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
+    const def = (prefs.perListSort && prefs.perListSort[lsid]) || "name_asc";
+    opts.forEach(o=> sortSel.appendChild(el('option',{value:o,text:o, ...(o===def?{selected:""}:{})})));
+    sortSel.addEventListener('change', ()=>{ prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = sortSel.value; });
+
+    tr.appendChild(el('td',{},[cb]));
+    tr.appendChild(nameCell);
+    tr.appendChild(count);
+    tr.appendChild(el('td',{},[sortSel]));
+
+    return tr;
   }
-  function attachDnD(tbody) {
-    let dragSrc = null;
-    function clearCues(){ tbody.querySelectorAll('tr.drop-before, tr.drop-after').forEach(tr=>tr.classList.remove('drop-before','drop-after')); }
-    tbody.addEventListener('dragstart', (e) => {
-      const tr = e.target.closest('tr[data-lsid]');
-      if (!tr || isCtrl(e.target)) return;
-      dragSrc = tr; tr.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
-    });
-    tbody.addEventListener('dragend', () => { if (dragSrc) dragSrc.classList.remove('dragging'); dragSrc = null; clearCues(); });
-    tbody.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      if (!dragSrc) return;
-      const over = e.target.closest('tr[data-lsid]');
-      if (!over || over === dragSrc) return;
-      clearCues();
-      const rect = over.getBoundingClientRect();
-      const before = (e.clientY - rect.top) < rect.height/2;
-      over.classList.add(before ? 'drop-before' : 'drop-after');
-      over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
-    });
-    tbody.addEventListener('drop', (e)=>{ e.preventDefault(); clearCues(); });
-  }
 
-  async function render() {
-    const prefs = await getPrefs();
-    const lists = await getLists();
+  order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
+  attachDnD(tbody);
+  table.appendChild(tbody);
 
-    const container = document.getElementById('prefs'); container.innerHTML = "";
+  container.appendChild(el('div', {html:'<b>Default list:</b> '}));
+  const defSel = el('select');
+  order.forEach(lsid => defSel.appendChild(el('option',{value:lsid,text:(lists[lsid].name||lsid), ...(lsid===prefs.defaultList?{selected:""}:{})})));
+  container.appendChild(defSel);
 
-    const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
-    const order = (prefs.order && prefs.order.length
-      ? prefs.order.filter(id => lists[id])
-      : Object.keys(lists));
+  container.appendChild(el('div', {style:'margin-top:8px'}));
+  const epCb = el('input',{type:'checkbox'}); epCb.checked = !!prefs.upgradeEpisodes;
+  container.appendChild(epCb);
+  container.appendChild(el('span',{text:' Upgrade episodes to parent series'}));
 
-    const table = el('table');
-    const thead = el('thead', {}, [el('tr',{},[
-      el('th',{text:'Enabled'}), el('th',{text:'List (lsid)'}), el('th',{text:'Items'}),
-      el('th',{text:'Default sort'})
-    ])]);
-    table.appendChild(thead);
-    const tbody = el('tbody');
+  container.appendChild(el('div',{style:'margin-top:10px'}));
+  container.appendChild(table);
 
-    function makeRow(lsid) {
-      const L = lists[lsid];
-      const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
+  const saveBtn = document.getElementById('saveBtn');
+  const saveMsg = document.getElementById('saveMsg');
 
-      const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
-      cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
+  saveBtn.onclick = async ()=>{
+    const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+    const enabled = Array.from(enabledSet);
 
-      const nameCell = el('td',{}); 
-      nameCell.appendChild(el('div',{text:(L.name||lsid)}));
-      nameCell.appendChild(el('small',{text:lsid}));
-
-      const count = el('td',{text:String((L.ids||[]).length)});
-
-      const sortSel = el('select');
-      const opts = ["date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
-      const def = (prefs.perListSort && prefs.perListSort[lsid]) || "name_asc";
-      opts.forEach(o=> sortSel.appendChild(el('option',{value:o,text:o, ...(o===def?{selected:""}:{})})));
-      sortSel.addEventListener('change', ()=>{ prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = sortSel.value; });
-
-      tr.appendChild(el('td',{},[cb]));
-      tr.appendChild(nameCell);
-      tr.appendChild(count);
-      tr.appendChild(el('td',{},[sortSel]));
-
-      return tr;
-    }
-
-    order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
-    attachDnD(tbody);
-    table.appendChild(tbody);
-
-    const headerWrap = el('div');
-    headerWrap.appendChild(el('span',{html:'<b>Default list:</b> '}));
-    const defSel = el('select');
-    order.forEach(lsid => defSel.appendChild(el('option',{value:lsid,text:(lists[lsid].name||lsid), ...(lsid===prefs.defaultList?{selected:""}:{})})));
-    headerWrap.appendChild(defSel);
-    headerWrap.appendChild(el('span',{html:' &nbsp; '}));
-    const epCb = el('input',{type:'checkbox', id:'upg'}); epCb.checked = !!prefs.upgradeEpisodes;
-    headerWrap.appendChild(epCb);
-    headerWrap.appendChild(el('label',{for:'upg', text:' Upgrade episodes to parent series'}));
-    container.appendChild(headerWrap);
-    container.appendChild(table);
-
-    const saveBtn = document.getElementById('saveBtn');
-    const saveMsg = document.getElementById('saveMsg');
-    saveBtn.onclick = async ()=>{
-      const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
-      const enabled = Array.from(enabledSet);
-      const body = {
-        enabled,
-        order: newOrder,
-        defaultList: defSel.value || "",
-        perListSort: prefs.perListSort || {},
-        upgradeEpisodes: epCb.checked
-      };
-      saveMsg.textContent = "Saving…";
-      saveBtn.disabled = true;
-      try{
-        const r = await fetch('/api/prefs?admin='+ADMIN_KEY, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-        const t = await r.text();
-        saveMsg.textContent = t || "Saved.";
-      }catch(err){
-        saveMsg.textContent = "Save failed: " + (err && err.message || err);
-      }finally{
-        saveBtn.disabled = false;
-        setTimeout(()=>{ saveMsg.textContent = ""; }, 2500);
-      }
+    const body = {
+      enabled,
+      order: newOrder,
+      defaultList: defSel.value,
+      perListSort: prefs.perListSort || {},
+      upgradeEpisodes: epCb.checked
     };
-  }
-  render();
+    saveMsg.textContent = "Saving…";
+    const r = await fetch('/api/prefs?admin=${ADMIN_PASSWORD}', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const t = await r.text();
+    saveMsg.textContent = t || "Saved.";
+    setTimeout(()=>{ saveMsg.textContent = ""; }, 2500);
+  };
+}
+
+render();
 </script>
 </body></html>`);
 });
 
-// ---------- BOOT ----------
-(async () => {
-  // Try to boot from GitHub snapshot (so catalogs work immediately)
-  if (GH_ENABLED) {
-    const snap = await ghReadSnapshot();
-    if (snap) {
-      try {
-        LISTS = snap.lists || LISTS;
-        PREFS = { ...PREFS, ...(snap.prefs || {}) };
-        FALLBACK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBACK.set(k, v);
-        CARD.clear();     if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
-        EP2SER.clear();   if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
-        MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
-        LAST_SYNC_AT  = snap.lastSyncAt || 0;
-        LAST_MANIFEST_KEY = manifestKey();
-        console.log("[BOOT] snapshot loaded from GitHub");
-      } catch (e) {
-        console.warn("[BOOT] invalid snapshot:", e.message);
-      }
-    }
-  }
-
-  // Start server immediately; sync in background
+// ====== boot ======
+(async ()=>{
+  await bootFromSnapshot();
+  // bind first so Render detects the port immediately
   app.listen(PORT, HOST, () => {
     console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
     console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
   });
-
-  fullSync({ rediscover: true }).then(scheduleNextSync).catch(e => {
+  // kick off background sync (non-blocking)
+  fullSync({ rediscover:true }).then(scheduleNextSync).catch(e => {
     console.warn("[BOOT] background sync failed:", e.message);
   });
 })();
