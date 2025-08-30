@@ -1,191 +1,171 @@
-/*  My Lists – IMDb → Stremio (multi-user)
- *  v12.0.0
+/*  My Lists – IMDb → Stremio (multi-user, custom per-list ordering)
+ *  v12.1.0
  */
-"use strict";
 
+"use strict";
 const express = require("express");
 const fs = require("fs/promises");
+const path = require("path");
 
-// ---------- ENV ----------
+/* ---------------- ENV ---------------- */
 const PORT  = Number(process.env.PORT || 10000);
 const HOST  = "0.0.0.0";
 
-const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60)); // set to 2 for fast tests
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
+const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 
-// Optional GitHub persistence (recommended)
+// Optional global auto-sync minutes (per user)
+const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
+
+// Optional GitHub persistence
 const GITHUB_TOKEN  = process.env.GITHUB_TOKEN  || "";
 const GITHUB_OWNER  = process.env.GITHUB_OWNER  || "";
 const GITHUB_REPO   = process.env.GITHUB_REPO   || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 
-// Optional single-user bootstrap (leave blank for public landing page)
-const BOOT_IMDB_USER_URL = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/ur136127821/lists/
+// (Legacy single-user envs still work if you don’t create UIDs via the landing page)
+const LEGACY_IMDB_USER_URL = process.env.IMDB_USER_URL || "";
+const LEGACY_UPGRADE_EPISODES = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
 
-// Local fallback store (also used when GH is off)
-const USERS_DIR_LOCAL = "data/users";
-
-// ---------- CONSTANTS ----------
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.0";
-const GH_API = "https://api.github.com";
-const CINEMETA = "https://v3-cinemeta.strem.io";
-const REQ_HEADERS_HTML = {
+// UA / headers
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.1";
+const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
   "Cache-Control": "no-cache"
 };
+const CINEMETA = "https://v3-cinemeta.strem.io";
 
-// ---------- HELPERS ----------
+/* --------------- GLOBAL STATE --------------- */
+// Global metadata caches (shared across users)
+const BEST   = new Map(); // Map<tt, { kind, meta }>
+const FALLBK = new Map(); // Map<tt, { name?, poster?, releaseDate?, year?, type? }>
+const EP2SER = new Map(); // Map<episode_tt, parent_series_tt>
+const CARD   = new Map(); // Map<tt, card>
+
+// Per-user state in memory
+// USERS.get(uid) -> { uid, imdbUrl, lists, prefs, manifestRev, lastSyncAt, timers:{sync?:Timeout}, syncing:boolean }
+const USERS = new Map();
+
+/* --------------- UTILS --------------- */
+const isImdb = v => /^tt\d{7,}$/i.test(String(v||""));
+const isListId = v => /^ls\d{6,}$/i.test(String(v||""));
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const withParam = (u,k,v) => { const x = new URL(u); x.searchParams.set(k,v); return x.toString(); };
-const isImdb  = v => /^tt\d{7,}$/i.test(String(v||""));
-const isList  = v => /^ls\d{6,}$/i.test(String(v||""));
-const pick    = (obj, keys) => Object.fromEntries(keys.map(k => [k, obj[k]]));
+const b64 = s => Buffer.from(s, "utf8").toString("base64");
+const fromB64 = s => Buffer.from(s || "", "base64").toString("utf8");
 
+function uid() {
+  return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 4);
+}
+function defaultPrefs() {
+  return {
+    enabled: [],
+    order: [],
+    defaultList: "",
+    perListSort: {},         // { lsid: 'custom' | 'date_asc' | ... }
+    customOrder: {},         // { lsid: [ 'tt...', ... ] }
+    upgradeEpisodes: true
+  };
+}
+
+/* --------------- FETCH HELPERS --------------- */
 async function fetchText(url) {
-  const r = await fetch(url, { headers: REQ_HEADERS_HTML, redirect: "follow" });
+  const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
   if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
   return r.text();
 }
 async function fetchJson(url) {
-  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept":"application/json" }, redirect:"follow" });
+  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept": "application/json" }, redirect: "follow" });
   if (!r.ok) return null;
   try { return await r.json(); } catch { return null; }
 }
+const withParam = (u,k,v) => { const x = new URL(u); x.searchParams.set(k,v); return x.toString(); };
 
-// ---------- GitHub I/O (safe) ----------
-const GH_HEADERS = tok => ({
-  "Authorization": `Bearer ${tok}`,
-  "Accept": "application/vnd.github+json",
-  "Content-Type": "application/json",
-  "User-Agent": UA
-});
-
-async function ghRead(path) {
-  const url = `${GH_API}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`;
-  const r = await fetch(url, { headers: GH_HEADERS(GITHUB_TOKEN) });
-  if (!r.ok) return null;
+/* --------------- GITHUB PERSISTENCE --------------- */
+async function gh(method, relPath, bodyObj) {
+  const api = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${relPath}`;
+  const r = await fetch(api, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${GITHUB_TOKEN}`,
+      "Accept": "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "User-Agent": UA
+    },
+    body: bodyObj ? JSON.stringify(bodyObj) : undefined
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(()=> "");
+    throw new Error(`GitHub ${method} ${relPath} -> ${r.status}: ${t}`);
+  }
   return r.json();
 }
-async function ghReadJson(path) {
-  const data = await ghRead(path);
-  if (!data || !data.content) return null;
-  const txt = Buffer.from(data.content, "base64").toString("utf8");
-  const json = JSON.parse(txt);
-  return { json, sha: data.sha || null };
-}
-async function ghWriteJson(path, json, message) {
-  // retry once on 409/422 by refreshing sha
-  const put = async (sha) => {
-    const url = `${GH_API}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodeURIComponent(path)}`;
-    const body = {
-      message: message || `update ${path}`,
-      content: Buffer.from(JSON.stringify(json, null, 2), "utf8").toString("base64"),
-      branch: GITHUB_BRANCH,
-      ...(sha ? { sha } : {})
-    };
-    return fetch(url, { method:"PUT", headers: GH_HEADERS(GITHUB_TOKEN), body: JSON.stringify(body) });
-  };
-
-  let sha = null;
-  const existing = await ghRead(path);
-  if (existing && existing.sha) sha = existing.sha;
-
-  let r = await put(sha);
-  if (r.ok) return true;
-
-  if (r.status === 409 || r.status === 422) {
-    const again = await ghRead(path);
-    const freshSha = again && again.sha ? again.sha : null;
-    r = await put(freshSha);
-    if (r.ok) return true;
-  }
-  const txt = await r.text().catch(()=> "");
-  throw new Error(`GitHub PUT ${path} -> ${r.status}: ${txt}`);
-}
-
-// ---------- PERSISTENCE ----------
-async function localReadUser(uid) {
+async function ghGetSha(relPath) {
   try {
-    const p = `${USERS_DIR_LOCAL}/${uid}.json`;
-    const txt = await fs.readFile(p, "utf8");
+    const j = await gh("GET", `/contents/${encodeURIComponent(relPath)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+    return j && j.sha || null;
+  } catch { return null; }
+}
+async function saveUser(user) {
+  // local
+  try {
+    await fs.mkdir(path.join("data","users"), { recursive: true });
+    await fs.writeFile(path.join("data","users", `${user.uid}.json`), JSON.stringify(user, null, 2), "utf8");
+  } catch {/* ignore */}
+  // GitHub
+  if (!GH_ENABLED) return;
+  const rel = `users/${user.uid}.json`;
+  const content = b64(JSON.stringify(user, null, 2));
+  const sha = await ghGetSha(rel);
+  const body = { message: `Update ${rel}`, content, branch: GITHUB_BRANCH };
+  if (sha) body.sha = sha;
+  await gh("PUT", `/contents/${encodeURIComponent(rel)}`, body);
+}
+async function loadUser(uidStr) {
+  // GitHub first
+  if (GH_ENABLED) {
+    try {
+      const j = await gh("GET", `/contents/${encodeURIComponent(`users/${uidStr}.json`)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+      return JSON.parse(fromB64(j.content));
+    } catch {/* ignore */}
+  }
+  // Local
+  try {
+    const txt = await fs.readFile(path.join("data","users", `${uidStr}.json`), "utf8");
     return JSON.parse(txt);
   } catch { return null; }
 }
-async function localWriteUser(uid, json) {
-  try {
-    await fs.mkdir(USERS_DIR_LOCAL, { recursive: true });
-    await fs.writeFile(`${USERS_DIR_LOCAL}/${uid}.json`, JSON.stringify(json, null, 2), "utf8");
-    return true;
-  } catch { return false; }
-}
 
-// Returns a lightweight JSON object; caller rehydrates Maps
-async function storeUser(uid, json) {
-  if (GH_ENABLED) {
-    await ghWriteJson(`users/${uid}.json`, json, `save users/${uid}.json`);
-  } else {
-    await localWriteUser(uid, json);
-  }
-}
-async function loadUserJson(uid) {
-  if (GH_ENABLED) {
-    const got = await ghReadJson(`users/${uid}.json`);
-    if (got && got.json) return got.json;
-  } else {
-    const j = await localReadUser(uid);
-    if (j) return j;
-  }
-  return null;
-}
-
-// optional helper: find an existing user by imdbUrl (requires list directory on GH)
-async function findUserByImdb(imdbUrl) {
-  if (!GH_ENABLED) return null;
-  try {
-    const r = await fetch(`${GH_API}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodeURIComponent("users")}?ref=${encodeURIComponent(GITHUB_BRANCH)}`, { headers: GH_HEADERS(GITHUB_TOKEN) });
-    if (!r.ok) return null;
-    const arr = await r.json();
-    for (const it of arr) {
-      if (it.type === "file" && it.name.endsWith(".json")) {
-        const got = await ghReadJson(`users/${it.name}`);
-        if (got?.json?.imdbUrl === imdbUrl) {
-          const uid = it.name.replace(/\.json$/,"");
-          return { uid, json: got.json };
-        }
-      }
-    }
-  } catch {}
-  return null;
-}
-
-// ---------- SCRAPER / METADATA ----------
+/* --------------- IMDb SCRAPE --------------- */
 async function discoverListsFromUser(userListsUrl) {
   if (!userListsUrl) return [];
   const html = await fetchText(withParam(userListsUrl, "_", Date.now()));
+  const ids = new Set(); let m;
 
-  const ids = new Set();
-  let m;
-  const re = /href=['"](?:https?:\/\/(?:www\.)?imdb\.com)?\/list\/(ls\d{6,})\/['"]/gi;
+  // Robust parsing
+  let re = /href=['"](?:https?:\/\/(?:www\.)?imdb\.com)?\/list\/(ls\d{6,})\/['"]/gi;
   while ((m = re.exec(html))) ids.add(m[1]);
-  if (!ids.size) { // fallback scan
-    const re2 = /\/list\/(ls\d{6,})\//gi;
-    while ((m = re2.exec(html))) ids.add(m[1]);
+  if (!ids.size) {
+    re = /\/list\/(ls\d{6,})\//gi;
+    while ((m = re.exec(html))) ids.add(m[1]);
   }
-
   const arr = Array.from(ids).map(id => ({ id, url: `https://www.imdb.com/list/${id}/` }));
-  await Promise.all(arr.map(async L => { try { L.name = await fetchListName(L.url); } catch { L.name = L.id; } }));
+
+  // Try to resolve names quickly
+  await Promise.all(arr.map(async L => {
+    try {
+      const h = await fetchText(withParam(L.url, "_", Date.now()));
+      const t1 = h.match(/<h1[^>]+data-testid=["']list-header-title["'][^>]*>(.*?)<\/h1>/i);
+      const t2 = h.match(/<h1[^>]*class=["'][^"']*header[^"']*["'][^>]*>(.*?)<\/h1>/i);
+      const title = (t1 ? t1[1] : (t2 ? t2[1] : "")).replace(/<[^>]+>/g,"").replace(/\s+/g," ").trim();
+      L.name = title || L.id;
+    } catch { L.name = L.id; }
+  }));
+
   return arr;
-}
-async function fetchListName(listUrl) {
-  const html = await fetchText(withParam(listUrl, "_", Date.now()));
-  const one = html.match(/<h1[^>]+data-testid=["']list-header-title["'][^>]*>(.*?)<\/h1>/i)
-         || html.match(/<h1[^>]*class=["'][^"']*header[^"']*["'][^>]*>(.*?)<\/h1>/i);
-  if (one) return one[1].replace(/<[^>]+>/g,"").replace(/\s+/g," ").trim();
-  const t = html.match(/<title>(.*?)<\/title>/i);
-  return t ? t[1].replace(/\s+\-\s*IMDb.*$/i, "").trim() : listUrl;
 }
 function tconstsFromHtml(html) {
   const out = []; const seen = new Set(); let m;
@@ -202,8 +182,8 @@ function nextPageUrl(html) {
   if (!m) return null;
   try { return new URL(m[1], "https://www.imdb.com").toString(); } catch { return null; }
 }
-async function fetchImdbListIdsAllPages(listUrl, maxPages=80) {
-  const modes = ["detail","grid","compact"];
+async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
+  const modes = ["detail", "grid", "compact"];
   const seen = new Set(); const ids = [];
   for (const mode of modes) {
     let url = withParam(listUrl, "mode", mode);
@@ -217,13 +197,14 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages=80) {
       const next = nextPageUrl(html);
       if (!next || !added) break;
       url = next;
-      await sleep(60);
+      await sleep(80);
     }
     if (ids.length) break;
   }
   return ids;
 }
 
+/* --------------- METADATA --------------- */
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -241,73 +222,48 @@ async function imdbJsonLd(imdbId) {
   } catch { return null; }
 }
 async function episodeParentSeries(imdbId) {
+  if (EP2SER.has(imdbId)) return EP2SER.get(imdbId);
+  const ld = await imdbJsonLd(imdbId);
+  let seriesId = null;
   try {
-    const ld = await imdbJsonLd(imdbId);
-    let node = Array.isArray(ld && ld["@graph"]) ? ld["@graph"].find(x => /TVEpisode/i.test(x["@type"])) : ld;
+    const node = Array.isArray(ld && ld["@graph"]) ? ld["@graph"].find(x => /TVEpisode/i.test(x["@type"])) : ld;
     const part = node && (node.partOfSeries || node.partOfTVSeries || (node.partOfSeason && node.partOfSeason.partOfSeries));
     const url = typeof part === "string" ? part : (part && (part.url || part.sameAs || part["@id"]));
-    if (url) { const m = String(url).match(/tt\d{7,}/i); if (m) return m[0]; }
+    if (url) { const m = String(url).match(/tt\d{7,}/i); if (m) seriesId = m[0]; }
   } catch {}
-  return null;
+  if (seriesId) EP2SER.set(imdbId, seriesId);
+  return seriesId;
 }
+async function getBestMeta(imdbId) {
+  if (BEST.has(imdbId)) return BEST.get(imdbId);
+  // series first, then movie
+  let meta = await fetchCinemeta("series", imdbId);
+  if (meta) { const rec = { kind:"series", meta }; BEST.set(imdbId, rec); return rec; }
+  meta = await fetchCinemeta("movie", imdbId);
+  if (meta) { const rec = { kind:"movie", meta }; BEST.set(imdbId, rec); return rec; }
 
-function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
-function cmpNullBottom(a,b){ return (a==null && b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0)))); }
-
-function stableSort(items, sortKey) {
-  const s = String(sortKey || "name_asc").toLowerCase();
-  const dir = s.endsWith("_asc") ? 1 : -1;
-  const key = s.split("_")[0];
-  return items.map((m,i)=>({m,i})).sort((A,B)=>{
-    const a=A.m, b=B.m; let c=0;
-    if (key==="date")    c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
-    else if (key==="rating")  c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
-    else if (key==="runtime") c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
-    else c = (a.name||"").localeCompare(b.name||"");
-    if (c===0){ c=(a.name||"").localeCompare(b.name||""); if(c===0) c=(a.id||"").localeCompare(b.id||""); if(c===0) c=A.i-B.i; }
-    return c*dir;
-  }).map(x=>x.m);
+  const ld = await imdbJsonLd(imdbId);
+  let name, poster, released, year, type = "movie";
+  try {
+    const node = Array.isArray(ld && ld["@graph"])
+      ? ld["@graph"].find(x => x["@id"]?.includes(`/title/${imdbId}`)) || ld["@graph"][0]
+      : ld;
+    name = node?.name || node?.headline || ld?.name;
+    poster = typeof node?.image === "string" ? node.image : (node?.image?.url || ld?.image);
+    released = node?.datePublished || node?.startDate || node?.releaseDate || undefined;
+    year = released ? Number(String(released).slice(0,4)) : undefined;
+    const t = Array.isArray(node?.["@type"]) ? node["@type"].join(",") : (node?.["@type"] || "");
+    if (/Series/i.test(t)) type = "series";
+    else if (/TVEpisode/i.test(t)) type = "episode";
+  } catch {}
+  const rec = { kind: type === "series" ? "series" : "movie", meta: name ? { name, poster, released, year } : null };
+  BEST.set(imdbId, rec);
+  if (name || poster) FALLBK.set(imdbId, { name, poster, releaseDate: released, year, type: rec.kind });
+  return rec;
 }
-function applyCustomOrder(metas, orderArr) {
-  if (!orderArr || !orderArr.length) return metas.slice();
-  const pos = new Map(orderArr.map((id,i)=>[id,i]));
-  return metas.slice().sort((a,b)=>{
-    const pa = pos.has(a.id) ? pos.get(a.id) : 1e9;
-    const pb = pos.has(b.id) ? pos.get(b.id) : 1e9;
-    if (pa !== pb) return pa - pb;
-    return (a.name||"").localeCompare(b.name||"");
-  });
-}
-
-// ---------- USER RUNTIME ----------
-const USERS = new Map();        // uid -> runtime user object
-const TIMERS = new Map();       // uid -> timeout id
-
-function newUserRuntime(imdbUrl) {
-  return {
-    uid: (Math.random().toString(36).slice(2,10)),
-    key: (Math.random().toString(36).slice(2,8) + Math.random().toString(36).slice(2,6)),
-    imdbUrl,
-    createdAt: Date.now(),
-    lastSyncAt: 0,
-    rev: 1,
-    lists: Object.create(null), // { lsid: { id, name, url, ids:[] } }
-    prefs: {
-      enabled: [],
-      order: [],
-      defaultList: "",
-      perListSort: {},      // { lsid: 'date_asc' | ... | 'custom' }
-      customOrder: {},      // { lsid: [ 'tt..', ... ] }
-      upgradeEpisodes: true
-    },
-    cache: { BEST:new Map(), FALL:new Map(), EP2SER:new Map(), CARD:new Map() }
-  };
-}
-
-function cardFor(u, imdbId) {
-  const rec = u.cache.BEST.get(imdbId) || { kind:null, meta:null };
-  const m = rec.meta || {};
-  const fb = u.cache.FALL.get(imdbId) || {};
+function cardFor(imdbId) {
+  const rec = BEST.get(imdbId) || { kind:null, meta:null };
+  const m = rec.meta || {}; const fb = FALLBK.get(imdbId) || {};
   return {
     id: imdbId,
     type: rec.kind || fb.type || "movie",
@@ -320,79 +276,87 @@ function cardFor(u, imdbId) {
     description: m.description || undefined
   };
 }
-
-async function getBestMeta(u, imdbId) {
-  if (u.cache.BEST.has(imdbId)) return u.cache.BEST.get(imdbId);
-  let meta = await fetchCinemeta("series", imdbId);
-  if (meta) { const rec = { kind:"series", meta }; u.cache.BEST.set(imdbId, rec); return rec; }
-  meta = await fetchCinemeta("movie", imdbId);
-  if (meta) { const rec = { kind:"movie", meta }; u.cache.BEST.set(imdbId, rec); return rec; }
-  // fallback
-  const ld = await imdbJsonLd(imdbId);
-  let name, poster, released, year, type = "movie";
-  try {
-    const node = Array.isArray(ld && ld["@graph"]) ? ld["@graph"].find(x => x["@id"]?.includes(`/title/${imdbId}`)) || ld["@graph"][0] : ld;
-    name = node?.name || node?.headline || ld?.name;
-    poster = typeof node?.image === "string" ? node.image : (node?.image?.url || ld?.image);
-    released = node?.datePublished || node?.startDate || node?.releaseDate || undefined;
-    year = released ? Number(String(released).slice(0,4)) : undefined;
-    const t = Array.isArray(node?.["@type"]) ? node["@type"].join(",") : (node?.["@type"] || "");
-    if (/Series/i.test(t)) type = "series";
-    else if (/TVEpisode/i.test(t)) type = "episode";
-  } catch {}
-  const rec = { kind: type === "series" ? "series" : "movie", meta: name ? { name, poster, released, year } : null };
-  u.cache.BEST.set(imdbId, rec);
-  if (name || poster) u.cache.FALL.set(imdbId, { name, poster, releaseDate: released, year, type: rec.kind });
-  return rec;
+function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
+function stableSort(items, sortKey) {
+  const s = String(sortKey || "name_asc").toLowerCase();
+  const dir = s.endsWith("_asc") ? 1 : -1;
+  const key = s.split("_")[0];
+  const cmpNullBottom = (a,b) => (a==null && b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0))));
+  return items.map((m,i)=>({m,i})).sort((A,B)=>{
+    const a=A.m,b=B.m; let c=0;
+    if (key==="date") c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
+    else if (key==="rating") c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    else if (key==="runtime") c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
+    else c = (a.name||"").localeCompare(b.name||"");
+    if (c===0){ c=(a.name||"").localeCompare(b.name||""); if(c===0) c=(a.id||"").localeCompare(b.id||""); if(c===0) c=A.i-B.i; }
+    return c*dir;
+  }).map(x=>x.m);
+}
+function applyCustomOrder(metas, orderArr) {
+  if (!orderArr || !orderArr.length) return metas.slice();
+  const pos = new Map(orderArr.map((id,i)=>[id,i]));
+  return metas.slice().sort((a,b) => {
+    const pa = pos.has(a.id) ? pos.get(a.id) : 1e9;
+    const pb = pos.has(b.id) ? pos.get(b.id) : 1e9;
+    if (pa !== pb) return pa - pb;
+    return (a.name||"").localeCompare(b.name||"");
+  });
 }
 
-// ---------- SYNC ----------
-async function syncUser(u, { rediscover=true } = {}) {
+/* --------------- PER-USER SYNC --------------- */
+function manifestKey(user) {
+  const enabled = (user.prefs.enabled && user.prefs.enabled.length) ? user.prefs.enabled : Object.keys(user.lists || {});
+  const names = enabled.map(id => user.lists[id]?.name || id).sort().join("|");
+  const perSort = JSON.stringify(user.prefs.perListSort || {});
+  const custom = Object.keys(user.prefs.customOrder || {}).length;
+  return `${enabled.join(",")}#${(user.prefs.order||[]).join(",")}#${user.prefs.defaultList}#${names}#${perSort}#c${custom}`;
+}
+async function fullSync(user, { rediscover = true } = {}) {
+  if (user.syncing) return;
+  user.syncing = true;
   const started = Date.now();
-
   try {
     let discovered = [];
-    if (u.imdbUrl && rediscover) {
-      try { discovered = await discoverListsFromUser(u.imdbUrl); }
-      catch (e) { console.warn(`[${u.uid}] discover failed:`, e.message); }
+    if (user.imdbUrl && rediscover) {
+      try { discovered = await discoverListsFromUser(user.imdbUrl); }
+      catch(e){ console.warn(`[${user.uid}] DISCOVER failed:`, e.message); }
     }
 
-    // keep old lists if discovery is temporarily empty
     const next = Object.create(null);
     const seen = new Set();
     for (const d of discovered) { next[d.id] = { id:d.id, name:d.name||d.id, url:d.url, ids:[] }; seen.add(d.id); }
-    for (const id of Object.keys(u.lists)) if (!seen.has(id)) next[id] = u.lists[id];
+    // keep any existing lists not present in discovery (e.g., manually added)
+    for (const id of Object.keys(user.lists || {})) if (!seen.has(id)) next[id] = user.lists[id];
 
-    // pull items
-    const uniques = new Set();
+    // pull each list
+    const allIds = new Set();
     for (const id of Object.keys(next)) {
       const url = next[id].url || `https://www.imdb.com/list/${id}/`;
       let ids = [];
       try { ids = await fetchImdbListIdsAllPages(url); } catch {}
       next[id].ids = ids;
-      ids.forEach(tt => uniques.add(tt));
-      await sleep(50);
+      ids.forEach(tt => allIds.add(tt));
+      await sleep(60);
     }
 
-    // episode → series (optional)
-    let idsToPreload = Array.from(uniques);
-    if (u.prefs.upgradeEpisodes) {
+    // upgrade episodes (per-user preference)
+    let idsToPreload = Array.from(allIds);
+    if (user.prefs.upgradeEpisodes) {
       const up = new Set();
       for (const tt of idsToPreload) {
-        const rec = await getBestMeta(u, tt);
+        const rec = await getBestMeta(tt);
         if (!rec.meta) {
           const s = await episodeParentSeries(tt);
           up.add(s && isImdb(s) ? s : tt);
         } else up.add(tt);
       }
       idsToPreload = Array.from(up);
-
       // remap per list
       for (const id of Object.keys(next)) {
         const remapped = []; const s = new Set();
         for (const tt of next[id].ids) {
           let fin = tt;
-          const r = u.cache.BEST.get(tt);
+          const r = BEST.get(tt);
           if (!r || !r.meta) { const z = await episodeParentSeries(tt); if (z) fin = z; }
           if (!s.has(fin)) { s.add(fin); remapped.push(fin); }
         }
@@ -400,174 +364,146 @@ async function syncUser(u, { rediscover=true } = {}) {
       }
     }
 
-    // preload cards
-    for (const tt of idsToPreload) { await getBestMeta(u, tt); u.cache.CARD.set(tt, cardFor(u, tt)); }
+    // preload cards into global cache
+    for (const tt of idsToPreload) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
 
-    u.lists = next;
-    u.lastSyncAt = Date.now();
+    user.lists = next;
+    user.lastSyncAt = Date.now();
 
-    // drop stale custom orders for deleted lists
-    const valid = new Set(Object.keys(u.lists));
-    if (u.prefs.customOrder) for (const k of Object.keys(u.prefs.customOrder)) if (!valid.has(k)) delete u.prefs.customOrder[k];
+    // bump manifest rev if catalogs content changed
+    const key = manifestKey(user);
+    if (key !== user._lastManifestKey) {
+      user._lastManifestKey = key;
+      user.manifestRev = (user.manifestRev || 1) + 1;
+      console.log(`[${user.uid}] SYNC catalogs changed → rev ${user.manifestRev}`);
+    }
 
-    // bump rev if catalogs changed
-    const enabled = u.prefs.enabled?.length ? u.prefs.enabled : Object.keys(u.lists);
-    const keyNow = enabled.join(",") + "#" + (u.prefs.defaultList||"") + "#" + JSON.stringify(u.prefs.perListSort||{}) + "#" + Object.keys(u.prefs.customOrder||{}).length;
-    u._manifestKey = keyNow;
-    if (u._manifestKey !== u._manifestKey_last) { u._manifestKey_last = keyNow; u.rev++; }
+    await saveUser(user);
 
-    // persist
-    await storeUser(u.uid, toUserJson(u));
-
-    console.log(`[${u.uid}] synced ${idsToPreload.length} ids / ${Object.keys(u.lists).length} lists in ${minutes(Date.now()-started)} min`);
+    console.log(`[${user.uid}] SYNC ok – ${idsToPreload.length} ids across ${Object.keys(user.lists).length} lists in ${minutes(Date.now()-started)} min`);
   } catch (e) {
-    console.error(`[${u.uid}] sync failed:`, e);
+    console.error(`[${user.uid}] SYNC failed:`, e);
+  } finally {
+    user.syncing = false;
   }
 }
-function scheduleNextSync(u) {
-  if (TIMERS.has(u.uid)) clearTimeout(TIMERS.get(u.uid));
+function scheduleNextSync(user) {
+  if (user.timers && user.timers.sync) clearTimeout(user.timers.sync);
   if (IMDB_SYNC_MINUTES <= 0) return;
-  const t = setTimeout(() => syncUser(u, { rediscover:true }).then(()=>scheduleNextSync(u)), IMDB_SYNC_MINUTES*60*1000);
-  TIMERS.set(u.uid, t);
+  user.timers = user.timers || {};
+  user.timers.sync = setTimeout(() => fullSync(user, { rediscover:true }).then(()=>scheduleNextSync(user)), IMDB_SYNC_MINUTES*60*1000);
 }
-function maybeBackgroundSync(u) {
+function maybeBackgroundSync(user) {
   if (IMDB_SYNC_MINUTES <= 0) return;
-  const stale = Date.now() - (u.lastSyncAt||0) > IMDB_SYNC_MINUTES*60*1000;
-  if (stale) syncUser(u, { rediscover:true }).then(()=>scheduleNextSync(u));
+  const stale = !user.lastSyncAt || (Date.now() - user.lastSyncAt > IMDB_SYNC_MINUTES*60*1000);
+  if (stale && !user.syncing) fullSync(user, { rediscover:true }).then(()=>scheduleNextSync(user));
 }
 
-// ---------- USER LOAD / SAVE ----------
-function toUserJson(u) {
-  // convert Maps to plain objects for persistence
-  const BEST = Object.fromEntries(u.cache.BEST);
-  const FALL = Object.fromEntries(u.cache.FALL);
-  const EP2  = Object.fromEntries(u.cache.EP2SER);
-  const CARD = Object.fromEntries(u.cache.CARD);
-  return {
-    uid: u.uid, key: u.key, imdbUrl: u.imdbUrl, createdAt: u.createdAt, lastSyncAt: u.lastSyncAt, rev: u.rev,
-    lists: u.lists, prefs: u.prefs, cache: { BEST, FALL, EP2, CARD }
-  };
-}
-function fromUserJson(j) {
-  const u = {
-    uid: j.uid, key: j.key, imdbUrl: j.imdbUrl, createdAt: j.createdAt, lastSyncAt: j.lastSyncAt||0, rev: j.rev||1,
-    lists: j.lists || Object.create(null),
-    prefs: j.prefs || { enabled:[], order:[], defaultList:"", perListSort:{}, customOrder:{}, upgradeEpisodes:true },
-    cache: { BEST:new Map(), FALL:new Map(), EP2SER:new Map(), CARD:new Map() }
-  };
-  if (j.cache?.BEST) for (const [k,v] of Object.entries(j.cache.BEST)) u.cache.BEST.set(k,v);
-  if (j.cache?.FALL) for (const [k,v] of Object.entries(j.cache.FALL)) u.cache.FALL.set(k,v);
-  if (j.cache?.EP2)  for (const [k,v] of Object.entries(j.cache.EP2))  u.cache.EP2SER.set(k,v);
-  if (j.cache?.CARD) for (const [k,v] of Object.entries(j.cache.CARD)) u.cache.CARD.set(k,v);
-  return u;
-}
-async function loadUser(uid) {
-  if (USERS.has(uid)) return USERS.get(uid);
-  const j = await loadUserJson(uid);
-  if (!j) return null;
-  const u = fromUserJson(j);
-  USERS.set(uid, u);
-  return u;
-}
-async function createUser(imdbUrl) {
-  const u = newUserRuntime(imdbUrl);
-  USERS.set(u.uid, u);
-  await storeUser(u.uid, toUserJson(u));
-  // kick off first sync in background
-  syncUser(u, { rediscover:true }).then(()=>scheduleNextSync(u));
-  return u;
-}
-
-// ---------- SERVER ----------
+/* --------------- SERVER --------------- */
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use((_,res,next)=>{ res.setHeader("Access-Control-Allow-Origin","*"); next(); });
+app.use(express.json({ limit:"2mb" }));
 
-// Landing page (create user)
+/* --- allow checks --- */
+function addonAllowed(req){
+  if (!SHARED_SECRET) return true;
+  const u = new URL(req.originalUrl, `http://${req.headers.host}`);
+  return u.searchParams.get("key") === SHARED_SECRET;
+}
+function adminAllowed(req){
+  const u = new URL(req.originalUrl, `http://${req.headers.host}`);
+  return (u.searchParams.get("admin") || req.headers["x-admin-key"]) === ADMIN_PASSWORD;
+}
+const absoluteBase = req => {
+  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const host = req.headers["x-forwarded-host"] || req.get("host");
+  return `${proto}://${host}`;
+};
+
+app.get("/health", (_,res)=>res.status(200).send("ok"));
+
+/* -------- Landing: create a UID -------- */
 app.get("/", async (req,res)=>{
-  // If BOOT_IMDB_USER_URL is set, create/reuse and redirect to admin
-  if (BOOT_IMDB_USER_URL) {
-    let u;
-    const found = await findUserByImdb(BOOT_IMDB_USER_URL);
-    if (found) u = fromUserJson(found.json);
-    else u = await createUser(BOOT_IMDB_USER_URL);
-    const adminUrl = `/u/${u.uid}/admin?key=${u.key}`;
-    res.redirect(adminUrl);
-    return;
-  }
-
+  const base = absoluteBase(req);
   res.type("html").send(`<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Create</title>
 <style>
-  body{font-family:system-ui,Segoe UI,Roboto,Arial;display:grid;place-items:center;min-height:100vh;margin:0;background:linear-gradient(135deg,#1f1144,#0c0f2b);color:#fff}
-  .box{width:min(720px,92%);background:rgba(255,255,255,.06);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.15);border-radius:16px;padding:24px}
-  h1{margin:0 0 12px;font-weight:700}
-  input[type=url]{width:100%;padding:12px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.25);background:#0f1032;color:#fff}
-  button{margin-top:12px;padding:12px 18px;border:0;border-radius:10px;background:#7c4dff;color:#fff;cursor:pointer}
-  small{color:#cfd2ff}
+body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:760px}
+.card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
+input,button{font-size:16px}
+input[type=text]{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px}
+button{padding:10px 16px;border:0;border-radius:8px;background:#6c5ce7;color:#fff;cursor:pointer}
+small{color:#666}
 </style></head><body>
-<div class="box">
-  <h1>My Lists – IMDb ➜ Stremio</h1>
-  <p>Paste your IMDb <b>Lists</b> URL (e.g. <code>https://www.imdb.com/user/urXXXX/lists/</code>) and click Create.</p>
+<h1>My Lists – IMDb ➜ Stremio</h1>
+<div class="card">
+  <p>Paste your IMDb <b>user lists URL</b> (e.g. <code>https://www.imdb.com/user/ur12345678/lists/</code>)</p>
   <form method="POST" action="/create">
-    <input type="url" name="imdb" placeholder="https://www.imdb.com/user/urXXXX/lists/" required />
-    <button>Create my addon</button>
+    <input type="text" name="u" placeholder="https://www.imdb.com/user/urXXXXXXX/lists/" required />
+    <div style="margin-top:12px"><button>Create my admin page</button></div>
   </form>
-  <p><small>After creation you’ll get your personal Admin & Manifest links. You can add extra lists in Admin later.</small></p>
+  <p><small>Already have a UID? Go to <code>${base}/u/&lt;your-uid&gt;/admin?admin=YOUR_PASSWORD</code></small></p>
 </div>
 </body></html>`);
 });
-
-app.post("/create", express.urlencoded({ extended: true }), async (req,res)=>{
+app.post("/create", express.urlencoded({extended:false}), async (req,res)=>{
   try {
-    const url = String(req.body.imdb || "").trim();
-    if (!/^https?:\/\/(www\.)?imdb\.com\/user\/[^/]+\/lists\/?$/i.test(url)) {
-      res.status(400).type("text").send("Invalid IMDb Lists URL.");
-      return;
+    const imdbUrl = String(req.body.u || "").trim();
+    if (!/^https?:\/\/(www\.)?imdb\.com\/user\/ur\d+\/lists\/?/i.test(imdbUrl)) {
+      return res.status(400).send("Invalid IMDb user lists URL.");
     }
-    // try reuse if exists
-    let u;
-    const found = await findUserByImdb(url);
-    if (found) {
-      u = fromUserJson(found.json);
-      USERS.set(u.uid, u);
-    } else {
-      u = await createUser(url);
-    }
-    res.type("html").send(`<!doctype html>
-<html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Created</title>
-<style>
-  body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px}
-  code{background:#f6f6f6;border-radius:6px;padding:4px 6px}
-  a.button{display:inline-block;margin-top:8px;padding:10px 14px;border-radius:10px;background:#2d6cdf;color:#fff;text-decoration:none}
-</style></head><body>
-  <h2>All set 🎉</h2>
-  <p><b>Admin:</b> <code>/u/${u.uid}/admin?key=${u.key}</code></p>
-  <p><b>Manifest:</b> <code>/u/${u.uid}/manifest.json</code></p>
-  <p><a class="button" href="/u/${u.uid}/admin?key=${u.key}">Open Admin</a></p>
-</body></html>`);
+    const id = uid();
+    const user = {
+      uid: id,
+      imdbUrl,
+      lists: {},
+      prefs: { ...defaultPrefs(), upgradeEpisodes: true },
+      manifestRev: 1,
+      lastSyncAt: 0,
+      _lastManifestKey: ""
+    };
+    USERS.set(id, user);
+    await saveUser(user);
+    // Start first sync in background and redirect to admin right away
+    fullSync(user, { rediscover:true }).then(()=>scheduleNextSync(user));
+    return res.redirect(303, `/u/${id}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`);
   } catch (e) {
-    console.error("create error:", e);
-    res.status(500).send("Failed to create.");
+    console.error("CREATE failed:", e);
+    res.status(500).send("Failed to create user.");
   }
 });
 
-// ---------- USER ROUTES ----------
-function requireUserKey(u, req, res) {
-  const key = String(req.query.key || "");
-  if (key !== u.key) { res.status(403).send("Forbidden"); return false; }
-  return true;
+/* ----- helpers to ensure user loaded ----- */
+async function ensureUser(uidStr) {
+  let u = USERS.get(uidStr);
+  if (!u) {
+    u = await loadUser(uidStr);
+    if (!u) return null;
+    USERS.set(uidStr, u);
+  }
+  return u;
 }
 
-function manifestForUser(u, baseUrl) {
-  const catalogs = Object.keys(u.lists).sort((a,b)=>{
-    const na=u.lists[a]?.name||a, nb=u.lists[b]?.name||b;
+/* -------- Manifest & Catalogs per-user -------- */
+const baseManifest = {
+  id: "org.mylists.snapshot",
+  version: "12.1.0",
+  name: "My Lists",
+  description: "Your IMDb lists as catalogs (cached).",
+  resources: ["catalog","meta"],
+  types: ["my lists","movie","series"],
+  idPrefixes: ["tt"]
+};
+function catalogsForUser(user){
+  const ids = Object.keys(user.lists || {}).sort((a,b)=>{
+    const na=user.lists[a]?.name||a, nb=user.lists[b]?.name||b;
     return na.localeCompare(nb);
-  }).map(lsid => ({
+  });
+  return ids.map(lsid => ({
     type: "My lists",
     id: `list:${lsid}`,
-    name: `🗂 ${u.lists[lsid]?.name || lsid}`,
+    name: `🗂 ${user.lists[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
@@ -575,224 +511,256 @@ function manifestForUser(u, baseUrl) {
     ],
     posterShape: "poster"
   }));
-
-  return {
-    id: `org.mylists.${u.uid}`,
-    version: `12.0.0-${u.rev}`,
-    name: `My Lists (${u.uid})`,
-    description: "Your IMDb lists as Stremio catalogs.",
-    resources: ["catalog","meta"],
-    types: ["my lists","movie","series"],
-    idPrefixes: ["tt"],
-    behaviorHints: {
-      configurable: true,
-      configurationRequired: false,
-      configurationUrl: `${baseUrl}/u/${u.uid}/admin?key=${u.key}`
-    },
-    catalogs
-  };
 }
-
 app.get("/u/:uid/manifest.json", async (req,res)=>{
-  const uid = req.params.uid;
-  const u = await loadUser(uid);
-  if (!u) return res.status(404).send("Not found.");
-  maybeBackgroundSync(u);
-  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
-  const host  = req.headers["x-forwarded-host"] || req.get("host");
-  const base  = `${proto}://${host}`;
-  res.json(manifestForUser(u, base));
+  try{
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const u = await ensureUser(req.params.uid);
+    if (!u) return res.status(404).send("Unknown user");
+    maybeBackgroundSync(u);
+    const version = `${baseManifest.version}-${u.manifestRev || 1}`;
+    return res.json({ ...baseManifest, version, catalogs: catalogsForUser(u) });
+  } catch (e) { console.error("manifest:", e); res.status(500).send("Internal Server Error");}
 });
 
 function parseExtra(extraStr, qObj){
   const p = new URLSearchParams(extraStr||"");
   return { ...Object.fromEntries(p.entries()), ...(qObj||{}) };
 }
-
 app.get("/u/:uid/catalog/:type/:id/:extra?.json", async (req,res)=>{
-  const uid = req.params.uid;
-  const u = await loadUser(uid);
-  if (!u) return res.json({ metas: [] });
-  maybeBackgroundSync(u);
+  try{
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const user = await ensureUser(req.params.uid);
+    if (!user) return res.json({ metas: [] });
+    maybeBackgroundSync(user);
 
-  const { id } = req.params;
-  if (!id || !id.startsWith("list:")) return res.json({ metas: [] });
-  const lsid = id.slice(5);
-  const list = u.lists[lsid];
-  if (!list) return res.json({ metas: [] });
+    const id = req.params.id || "";
+    if (!id.startsWith("list:")) return res.json({ metas: [] });
+    const lsid = id.slice(5);
+    const list = user.lists[lsid];
+    if (!list) return res.json({ metas: [] });
 
-  const extra = parseExtra(req.params.extra, req.query);
-  const q = String(extra.search||"").toLowerCase().trim();
-  const sortReq = String(extra.sort||"").toLowerCase();
-  const defSort = (u.prefs.perListSort && u.prefs.perListSort[lsid]) || "name_asc";
-  const sort = sortReq || defSort;
-  const skip = Math.max(0, Number(extra.skip||0));
-  const limit = Math.min(Number(extra.limit||100), 200);
+    const extra = parseExtra(req.params.extra, req.query);
+    const q = String(extra.search||"").toLowerCase().trim();
+    const sortReq = String(extra.sort||"").toLowerCase();
+    const defaultSort = (user.prefs.perListSort && user.prefs.perListSort[lsid]) || "name_asc";
+    const sort = sortReq || defaultSort;
+    const skip = Math.max(0, Number(extra.skip||0));
+    const limit = Math.min(Number(extra.limit||100), 200);
 
-  let metas = (list.ids||[]).map(tt => u.cache.CARD.get(tt) || cardFor(u, tt));
-
-  if (q) {
-    metas = metas.filter(m =>
-      (m.name||"").toLowerCase().includes(q) ||
-      (m.id||"").toLowerCase().includes(q) ||
-      (m.description||"").toLowerCase().includes(q)
-    );
-  }
-
-  if (sort === "custom") metas = applyCustomOrder(metas, u.prefs.customOrder?.[lsid] || []);
-  else metas = stableSort(metas, sort);
-
-  res.json({ metas: metas.slice(skip, skip+limit) });
+    let metas = (list.ids||[]).map(tt => CARD.get(tt) || cardFor(tt));
+    if (q) {
+      metas = metas.filter(m =>
+        (m.name||"").toLowerCase().includes(q) ||
+        (m.id||"").toLowerCase().includes(q) ||
+        (m.description||"").toLowerCase().includes(q)
+      );
+    }
+    if (sort === "custom") {
+      const order = user.prefs.customOrder && user.prefs.customOrder[lsid];
+      metas = applyCustomOrder(metas, order);
+    } else {
+      metas = stableSort(metas, sort);
+    }
+    res.json({ metas: metas.slice(skip, skip+limit) });
+  } catch (e) { console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
 });
 
 app.get("/u/:uid/meta/:type/:id.json", async (req,res)=>{
-  const uid = req.params.uid;
-  const u = await loadUser(uid);
-  if (!u) return res.json({ meta:{ id: req.params.id, type:"movie", name:"Unknown item" } });
-
-  const imdbId = req.params.id;
-  if (!isImdb(imdbId)) return res.json({ meta:{ id: imdbId, type:"movie", name:"Unknown item" } });
-
-  let rec = u.cache.BEST.get(imdbId);
-  if (!rec) rec = await getBestMeta(u, imdbId);
-  if (!rec || !rec.meta) {
-    const fb = u.cache.FALL.get(imdbId) || {};
-    return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
-  }
-  res.json({ meta: { ...rec.meta, id: imdbId, type: rec.kind } });
+  try{
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const imdbId = req.params.id;
+    if (!isImdb(imdbId)) return res.json({ meta:{ id: imdbId, type:"movie", name:"Unknown item" } });
+    let rec = BEST.get(imdbId);
+    if (!rec) rec = await getBestMeta(imdbId);
+    if (!rec || !rec.meta) {
+      const fb = FALLBK.get(imdbId) || {};
+      return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
+    }
+    res.json({ meta: { ...rec.meta, id: imdbId, type: rec.kind } });
+  } catch (e) { console.error("meta:", e); res.status(500).send("Internal Server Error"); }
 });
 
-// ----- Admin APIs -----
-app.get("/u/:uid/api/state", async (req,res)=>{
-  const u = await loadUser(req.params.uid);
-  if (!u) return res.status(404).send("Not found");
-  if (!requireUserKey(u, req, res)) return;
-  res.json({
-    uid: u.uid,
-    imdbUrl: u.imdbUrl,
-    lastSyncAt: u.lastSyncAt,
-    rev: u.rev,
-    lists: u.lists,
-    prefs: u.prefs
-  });
+/* -------- Admin APIs -------- */
+app.get("/u/:uid/api/lists", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const user = await ensureUser(req.params.uid);
+  if (!user) return res.status(404).send("Unknown user");
+  res.json(user.lists || {});
 });
-
-app.post("/u/:uid/api/sync", async (req,res)=>{
-  const u = await loadUser(req.params.uid);
-  if (!u) return res.status(404).send("Not found");
-  if (!requireUserKey(u, req, res)) return;
-  await syncUser(u, { rediscover:true });
-  scheduleNextSync(u);
-  res.type("text").send("Synced.");
+app.get("/u/:uid/api/prefs", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const user = await ensureUser(req.params.uid);
+  if (!user) return res.status(404).send("Unknown user");
+  res.json(user.prefs || defaultPrefs());
 });
+app.post("/u/:uid/api/prefs", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const user = await ensureUser(req.params.uid);
+    if (!user) return res.status(404).send("Unknown user");
+    const body = req.body || {};
+    const p = user.prefs || defaultPrefs();
 
-app.post("/u/:uid/api/purge-sync", async (req,res)=>{
-  const u = await loadUser(req.params.uid);
-  if (!u) return res.status(404).send("Not found");
-  if (!requireUserKey(u, req, res)) return;
-  u.lists = Object.create(null);
-  u.cache.BEST.clear(); u.cache.FALL.clear(); u.cache.EP2SER.clear(); u.cache.CARD.clear();
-  await syncUser(u, { rediscover:true });
-  scheduleNextSync(u);
-  res.type("text").send("Purged & synced.");
+    p.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
+    p.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
+    p.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
+    p.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : (p.perListSort || {});
+    p.upgradeEpisodes = !!body.upgradeEpisodes;
+
+    user.prefs = p;
+
+    // bump manifest when prefs affect catalogs
+    const key = manifestKey(user);
+    if (key !== user._lastManifestKey) { user._lastManifestKey = key; user.manifestRev = (user.manifestRev||1)+1; }
+
+    await saveUser(user);
+    res.status(200).send("Saved. Manifest rev " + user.manifestRev);
+  }catch(e){ console.error("prefs save:", e); res.status(500).send("Failed to save"); }
 });
-
-app.get("/u/:uid/api/list-items", async (req,res)=>{
-  const u = await loadUser(req.params.uid);
-  if (!u) return res.status(404).send("Not found");
-  if (!requireUserKey(u, req, res)) return;
-  const lsid = String(req.query.lsid||"");
-  const list = u.lists[lsid];
+app.get("/u/:uid/api/list-items", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const user = await ensureUser(req.params.uid);
+  if (!user) return res.status(404).send("Unknown user");
+  const lsid = String(req.query.lsid || "");
+  const list = user.lists && user.lists[lsid];
   if (!list) return res.json({ items: [] });
-  const items = (list.ids||[]).map(tt => u.cache.CARD.get(tt) || cardFor(u, tt));
+  const items = (list.ids||[]).map(tt => CARD.get(tt) || cardFor(tt));
   res.json({ items });
 });
+app.post("/u/:uid/api/custom-order", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const user = await ensureUser(req.params.uid);
+    if (!user) return res.status(404).send("Unknown user");
+    const lsid = String(req.body.lsid || "");
+    const order = Array.isArray(req.body.order) ? req.body.order.filter(isImdb) : [];
+    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+    const list = user.lists && user.lists[lsid];
+    if (!list) return res.status(404).send("List not found");
 
-app.post("/u/:uid/api/save-prefs", async (req,res)=>{
-  const u = await loadUser(req.params.uid);
-  if (!u) return res.status(404).send("Not found");
-  if (!requireUserKey(u, req, res)) return;
+    const set = new Set(list.ids);
+    const clean = order.filter(id => set.has(id));
 
-  const body = req.body || {};
-  u.prefs.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isList) : [];
-  u.prefs.order           = Array.isArray(body.order)   ? body.order.filter(isList)   : [];
-  u.prefs.defaultList     = isList(body.defaultList) ? body.defaultList : "";
-  u.prefs.perListSort     = (body.perListSort && typeof body.perListSort==="object") ? body.perListSort : (u.prefs.perListSort || {});
-  u.prefs.upgradeEpisodes = !!body.upgradeEpisodes;
+    user.prefs.customOrder = user.prefs.customOrder || {};
+    user.prefs.customOrder[lsid] = clean;
+    user.prefs.perListSort = user.prefs.perListSort || {};
+    user.prefs.perListSort[lsid] = "custom";
 
-  // bump rev and persist
-  u.rev++;
-  await storeUser(u.uid, toUserJson(u));
+    const key = manifestKey(user);
+    if (key !== user._lastManifestKey) { user._lastManifestKey = key; user.manifestRev = (user.manifestRev||1)+1; }
 
-  res.type("text").send("Saved. Manifest rev " + u.rev);
+    await saveUser(user);
+    res.status(200).json({ ok:true, manifestRev: user.manifestRev });
+  }catch(e){ console.error("custom-order:", e); res.status(500).send("Failed"); }
 });
+// Add list manually by URL or lsXXXX
+app.post("/u/:uid/api/add-list", express.urlencoded({extended:false}), async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const user = await ensureUser(req.params.uid);
+  if (!user) return res.status(404).send("Unknown user");
+  let inp = String(req.body.l || "").trim();
 
-app.post("/u/:uid/api/custom-order", async (req,res)=>{
-  const u = await loadUser(req.params.uid);
-  if (!u) return res.status(404).send("Not found");
-  if (!requireUserKey(u, req, res)) return;
-  const lsid = String(req.body.lsid || "");
-  const order = Array.isArray(req.body.order) ? req.body.order.filter(isImdb) : [];
-  if (!isList(lsid) || !u.lists[lsid]) return res.status(400).send("Bad list");
-
-  const set = new Set(u.lists[lsid].ids);
-  const clean = order.filter(id => set.has(id));
-  u.prefs.customOrder = u.prefs.customOrder || {};
-  u.prefs.customOrder[lsid] = clean;
-  u.prefs.perListSort = u.prefs.perListSort || {};
-  u.prefs.perListSort[lsid] = "custom";
-
-  u.rev++;
-  await storeUser(u.uid, toUserJson(u));
-  res.json({ ok:true, rev:u.rev });
-});
-
-// add a list by URL or ID
-app.post("/u/:uid/api/add-list", async (req,res)=>{
-  const u = await loadUser(req.params.uid);
-  if (!u) return res.status(404).send("Not found");
-  if (!requireUserKey(u, req, res)) return;
-
-  let input = String(req.body.src || "").trim();
+  // Accept raw lsid, or full URL to a list
   let lsid = "";
-  const m = input.match(/ls\d{6,}/i);
-  if (m) lsid = m[0];
-  if (!lsid) return res.status(400).send("No list id found.");
+  if (isListId(inp)) lsid = inp;
+  else {
+    const m = inp.match(/\/list\/(ls\d{6,})/i);
+    if (m) lsid = m[1];
+  }
+  if (!lsid) return res.redirect(303, `/u/${user.uid}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}#add_error`);
 
   const url = `https://www.imdb.com/list/${lsid}/`;
-  let name = lsid;
-  try { name = await fetchListName(url); } catch {}
+  const name = lsid;
+  user.lists = user.lists || {};
+  if (!user.lists[lsid]) user.lists[lsid] = { id: lsid, name, url, ids: [] };
 
-  // fetch items
-  let ids = [];
-  try { ids = await fetchImdbListIdsAllPages(url); } catch {}
-
-  u.lists[lsid] = { id: lsid, name, url, ids };
-  // enable by default and push into order if not present
-  if (!u.prefs.enabled.includes(lsid)) u.prefs.enabled.push(lsid);
-  if (!u.prefs.order.includes(lsid)) u.prefs.order.push(lsid);
-
-  u.rev++;
-  await storeUser(u.uid, toUserJson(u));
-  res.type("text").send("Added.");
+  await saveUser(user);
+  // run a quick sync (just this list)
+  try {
+    const ids = await fetchImdbListIdsAllPages(url);
+    user.lists[lsid].ids = ids;
+    for (const tt of ids) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
+    user.lastSyncAt = Date.now();
+    const key = manifestKey(user);
+    if (key !== user._lastManifestKey) { user._lastManifestKey = key; user.manifestRev = (user.manifestRev||1)+1; }
+    await saveUser(user);
+  } catch(e) { console.warn("add-list sync fail", e.message); }
+  return res.redirect(303, `/u/${user.uid}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}#added`);
 });
 
-// Admin page (per user)
-app.get("/u/:uid/admin", async (req,res)=>{
-  const u = await loadUser(req.params.uid);
-  if (!u) return res.status(404).send("Not found");
-  if (!requireUserKey(u, req, res)) return;
+/* ---- Sync & Purge+Sync with AUTO-REDIRECT ---- */
+app.post("/u/:uid/api/sync", async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const user = await ensureUser(req.params.uid);
+    if (!user) return res.status(404).send("Unknown user");
+    await fullSync(user, { rediscover:true });
+    scheduleNextSync(user);
+    // Auto-redirect back to Admin (fallback text includes Back link)
+    const back = `/u/${user.uid}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}#synced`;
+    res.redirect(303, back);
+  }catch(e){ console.error(e); res.status(500).send(String(e) + ` <br><a href="/u/${req.params.uid}/admin?admin=${ADMIN_PASSWORD}">Back</a>`); }
+});
+app.post("/u/:uid/api/purge-sync", async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const user = await ensureUser(req.params.uid);
+    if (!user) return res.status(404).send("Unknown user");
+    user.lists = {};
+    user.prefs.customOrder = user.prefs.customOrder || {};
+    await fullSync(user, { rediscover:true });
+    scheduleNextSync(user);
+    const back = `/u/${user.uid}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}#purged`;
+    res.redirect(303, back);
+  }catch(e){ console.error(e); res.status(500).send(String(e) + ` <br><a href="/u/${req.params.uid}/admin?admin=${ADMIN_PASSWORD}">Back</a>`); }
+});
 
-  const lastTxt = u.lastSyncAt ? (new Date(u.lastSyncAt).toLocaleString() + " (" + Math.round((Date.now()-u.lastSyncAt)/60000) + " min ago)") : "never";
+/* ---- Tiny debug ---- */
+app.get("/u/:uid/api/debug-imdb", async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const user = await ensureUser(req.params.uid);
+    if (!user) return res.status(404).send("Unknown user");
+    const html = await fetchText(withParam(user.imdbUrl,"_","dbg"));
+    res.type("text").send(html.slice(0,2000));
+  }catch(e){ res.type("text").status(500).send("Fetch failed: "+e.message); }
+});
+
+/* -------- Admin page (per user) -------- */
+app.get("/u/:uid/admin", async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
+  const user = await ensureUser(req.params.uid);
+  if (!user) return res.status(404).send("Unknown user");
+  const base = absoluteBase(req);
+  const manifestUrl = `${base}/u/${user.uid}/manifest.json${SHARED_SECRET?`?key=${encodeURIComponent(SHARED_SECRET)}`:""}`;
+  const installHref = `stremio://addon-install?url=${encodeURIComponent(manifestUrl)}`;
+
+  // discovered preview
+  let discovered = [];
+  try { if (user.imdbUrl) discovered = await discoverListsFromUser(user.imdbUrl); } catch {}
+
+  const rows = Object.keys(user.lists||{}).map(id=>{
+    const L = user.lists[id]; const count=(L.ids||[]).length;
+    return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
+  }).join("") || "<li>(none)</li>";
+
+  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none found or IMDb unreachable right now).</li>";
+
+  const lastSyncText = user.lastSyncAt
+    ? (new Date(user.lastSyncAt).toLocaleString() + " (" + minutes(Date.now()-user.lastSyncAt) + " min ago)")
+    : "never";
 
   res.type("html").send(`<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>My Lists – Admin (${u.uid})</title>
+<title>My Lists – Admin (${user.uid})</title>
 <style>
+  :root{color-scheme:light}
   body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:1100px}
   .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0;background:#fff}
   button{padding:10px 16px;border:0;border-radius:8px;background:#2d6cdf;color:#fff;cursor:pointer}
   .btn2{background:#6c5ce7}
+  .btn-outline{background:#fff;color:#2d6cdf;border:1px solid #2d6cdf}
   small{color:#666}
   .code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f6f6;padding:4px 6px;border-radius:6px}
   table{width:100%;border-collapse:collapse}
@@ -809,45 +777,52 @@ app.get("/u/:uid/admin", async (req,res)=>{
   .thumb.dragging{opacity:.5}
   .rowtools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .inline-note{font-size:12px;color:#666;margin-left:8px}
-  input[type=text]{padding:8px 10px;border:1px solid #ccc;border-radius:8px}
 </style>
 </head><body>
-<h1>My Lists – Admin <small class="muted">(${u.uid})</small></h1>
+<h1>My Lists – Admin <small>(${user.uid})</small></h1>
 
 <div class="card">
   <h3>Current Snapshot</h3>
-  <ul id="snap"></ul>
-  <p><small>Last sync: ${lastTxt}. Rev ${u.rev}. Auto-sync every ${IMDB_SYNC_MINUTES} min.</small></p>
+  <ul>${rows}</ul>
+  <p><small>Last sync: ${lastSyncText}. Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</small></p>
   <div class="rowtools">
-    <form method="POST" action="/u/${u.uid}/api/sync?key=${u.key}"><button class="btn2">Sync IMDb Lists Now</button></form>
-    <form method="POST" action="/u/${u.uid}/api/purge-sync?key=${u.key}" onsubmit="return confirm('Purge caches & re-sync?')"><button>🧹 Purge & Sync</button></form>
-    <span class="inline-note">Manifest: <span class="code">/u/${u.uid}/manifest.json</span></span>
+    <form method="POST" action="/u/${user.uid}/api/sync?admin=${encodeURIComponent(ADMIN_PASSWORD)}"><button class="btn2">Sync IMDb Lists Now</button></form>
+    <form method="POST" action="/u/${user.uid}/api/purge-sync?admin=${encodeURIComponent(ADMIN_PASSWORD)}" onsubmit="return confirm('Purge caches & re-sync?')"><button>🧹 Purge & Sync</button></form>
+    <a href="${installHref}" class="btn-outline" style="text-decoration:none;padding:10px 16px;border-radius:8px">Install in Stremio</a>
+    <span class="inline-note">Manifest: <span class="code">${manifestUrl}</span></span>
   </div>
 </div>
 
 <div class="card">
   <h3>Customize (enable/disable, order, defaults)</h3>
   <p class="muted">Drag rows to change order. Click ▾ to open a list and drag posters to set a <b>custom</b> order (saved per list).</p>
-  <div class="rowtools" style="margin-bottom:8px">
-    <form id="addListForm">
-      <input type="text" id="addListInput" placeholder="Add list by URL or lsXXXX (optional)" />
-      <button>Add list</button>
+  <div class="rowtools" style="margin:8px 0">
+    <form method="POST" action="/u/${user.uid}/api/add-list?admin=${encodeURIComponent(ADMIN_PASSWORD)}">
+      <input type="text" name="l" placeholder="Add list by URL or lsXXXX (0)" style="padding:8px;border:1px solid #ccc;border-radius:8px;min-width:300px" />
+      <button class="btn-outline" style="margin-left:8px">Add list</button>
     </form>
-    <span class="inline-note">You can merge lists from any IMDb user.</span>
+    <small class="muted">You can merge lists from any IMDb user.</small>
   </div>
   <div id="prefs"></div>
 </div>
 
-<script>
-const UID=${JSON.stringify(u.uid)};
-const KEY=${JSON.stringify(u.key)};
+<div class="card">
+  <h3>Discovered at <span class="code">${user.imdbUrl || "(missing IMDb URL)"}</span></h3>
+  <ul>${disc}</ul>
+  <p><small>Debug: <a href="/u/${user.uid}/api/debug-imdb?admin=${encodeURIComponent(ADMIN_PASSWORD)}">open</a> (first part of HTML we receive)</small></p>
+</div>
 
-async function api(path, opts){
-  const r = await fetch('/u/'+UID+path+(path.includes('?')?'&':'?')+'key='+encodeURIComponent(KEY), opts);
-  if (!r.ok) throw new Error('request failed');
-  const ct = r.headers.get('content-type')||'';
-  if (ct.includes('application/json')) return r.json();
-  return r.text();
+<script>
+const ADMIN="${ADMIN_PASSWORD}";
+const UID="${user.uid}";
+
+async function getPrefs(){ const r = await fetch('/u/'+UID+'/api/prefs?admin='+ADMIN); return r.json(); }
+async function getLists(){ const r = await fetch('/u/'+UID+'/api/lists?admin='+ADMIN); return r.json(); }
+async function getListItems(lsid){ const r = await fetch('/u/'+UID+'/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
+async function saveCustomOrder(lsid, order){
+  const r = await fetch('/u/'+UID+'/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
+  if (!r.ok) throw new Error('save failed');
+  return r.json();
 }
 
 function el(tag, attrs={}, kids=[]) {
@@ -870,18 +845,19 @@ function attachRowDnD(tbody) {
   tbody.addEventListener('dragstart', (e) => {
     const tr = e.target.closest('tr[data-lsid]');
     if (!tr || isCtrl(e.target)) return;
-    dragSrc = tr; tr.classList.add('dragging');
+    dragSrc = tr;
+    tr.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
   });
-  tbody.addEventListener('dragend', () => { if (dragSrc) dragSrc.classList.remove('dragging'); dragSrc=null; });
+  tbody.addEventListener('dragend', () => { if (dragSrc) dragSrc.classList.remove('dragging'); dragSrc = null; });
   tbody.addEventListener('dragover', (e) => {
     e.preventDefault();
     if (!dragSrc) return;
     const over = e.target.closest('tr[data-lsid]');
-    if (!over || over===dragSrc) return;
+    if (!over || over === dragSrc) return;
     const rect = over.getBoundingClientRect();
-    const before = (e.clientY - rect.top) < rect.height/2;
+    const before = (e.clientY - rect.top) < rect.height / 2;
     over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
   });
 }
@@ -905,18 +881,9 @@ function attachThumbDnD(ul) {
 }
 
 async function render() {
-  const state = await api('/api/state');
-  // snapshot list
-  const UL = document.getElementById('snap'); UL.innerHTML='';
-  const names = Object.keys(state.lists).map(k=>({k, n:state.lists[k]?.name||k, c:(state.lists[k]?.ids||[]).length, u:state.lists[k]?.url||""}))
-    .sort((a,b)=>a.n.localeCompare(b.n));
-  names.forEach(x=>{
-    UL.appendChild(el('li',{},[el('b',{text:x.n}), el('span',{html:' <small>('+(x.c||0)+' items)</small><br/>'}), el('small',{text:x.u})]));
-  });
+  const prefs = await getPrefs();
+  const lists = await getLists();
 
-  // prefs table
-  const prefs = state.prefs;
-  const lists = state.lists;
   const container = document.getElementById('prefs'); container.innerHTML = "";
 
   const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
@@ -935,23 +902,25 @@ async function render() {
     const td = el('td',{colspan:'5'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
-    api('/api/list-items?lsid='+encodeURIComponent(lsid)).then(({items})=>{
+    getListItems(lsid).then(({items})=>{
       td.innerHTML = '';
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
-      const resetBtn = el('button',{text:'Reset'});
+      const resetBtn = el('button',{text:'Reset (list order)'});
       tools.appendChild(saveBtn); tools.appendChild(resetBtn);
       td.appendChild(tools);
 
-      const co = (prefs.customOrder && prefs.customOrder[lsid]) || [];
-      const pos = new Map(co.map((id,i)=>[id,i]));
-      const ordered = items.slice().sort((a,b)=>{
-        const pa = pos.has(a.id)?pos.get(a.id):1e9;
-        const pb = pos.has(b.id)?pos.get(b.id):1e9;
-        return pa-pb;
-      });
-
       const ul = el('ul',{class:'thumbs'});
+      let ordered = items.slice();
+      const co = (prefs.customOrder && prefs.customOrder[lsid]) || [];
+      if (co && co.length) {
+        const pos = new Map(co.map((id,i)=>[id,i]));
+        ordered.sort((a,b)=>{
+          const pa = pos.has(a.id) ? pos.get(a.id) : 1e9;
+          const pb = pos.has(b.id) ? pos.get(b.id) : 1e9;
+          return pa - pb;
+        });
+      }
       for (const it of ordered) {
         const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
         const img = el('img',{src: it.poster || '', alt:''});
@@ -969,7 +938,7 @@ async function render() {
         const ids = Array.from(ul.querySelectorAll('li.thumb')).map(li=>li.getAttribute('data-id'));
         saveBtn.disabled = true; resetBtn.disabled = true;
         try {
-          await api('/api/custom-order', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order: ids }) });
+          await saveCustomOrder(lsid, ids);
           saveBtn.textContent = "Saved ✓";
           setTimeout(()=> saveBtn.textContent = "Save order", 1500);
         } catch(e) {
@@ -978,7 +947,20 @@ async function render() {
           saveBtn.disabled = false; resetBtn.disabled = false;
         }
       };
-      resetBtn.onclick = ()=>{ ul.innerHTML=''; for(const it of items){ const li=el('li',{class:'thumb','data-id':it.id,draggable:'true'}); li.appendChild(el('img',{src:it.poster||'',alt:''})); const wrap=el('div',{},[el('div',{class:'title',text:it.name||it.id}), el('div',{class:'id',text:it.id})]); li.appendChild(wrap); ul.appendChild(li);} attachThumbDnD(ul); };
+      resetBtn.onclick = ()=>{
+        ul.innerHTML = '';
+        for (const it of items) {
+          const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
+          li.appendChild(el('img',{src: it.poster || '', alt:''}));
+          const wrap = el('div',{},[
+            el('div',{class:'title',text: it.name || it.id}),
+            el('div',{class:'id',text: it.id})
+          ]);
+          li.appendChild(wrap);
+          ul.appendChild(li);
+        }
+        attachThumbDnD(ul);
+      };
     }).catch(()=>{ td.textContent = "Failed to load items."; });
     return tr;
   }
@@ -993,7 +975,7 @@ async function render() {
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
-    const nameCell = el('td',{}); 
+    const nameCell = el('td',{});
     nameCell.appendChild(el('div',{text:(L.name||lsid)}));
     nameCell.appendChild(el('small',{text:lsid}));
 
@@ -1030,12 +1012,12 @@ async function render() {
     return tr;
   }
 
+  const tbody = el('tbody');
   order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
   table.appendChild(tbody);
   attachRowDnD(tbody);
   container.appendChild(table);
 
-  // Save prefs
   const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center'});
   const saveBtn = el('button',{text:'Save'});
   const msg = el('span',{class:'inline-note'});
@@ -1048,26 +1030,15 @@ async function render() {
     const body = {
       enabled,
       order: newOrder,
-      defaultList: (prefs.defaultList || enabled[0] || ""),
+      defaultList: prefs.defaultList || (enabled[0] || ""),
       perListSort: prefs.perListSort || {},
       upgradeEpisodes: prefs.upgradeEpisodes || false
     };
     msg.textContent = "Saving…";
-    const t = await api('/api/save-prefs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const r = await fetch('/u/'+UID+'/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const t = await r.text();
     msg.textContent = t || "Saved.";
-    setTimeout(()=>{ msg.textContent = ""; }, 2200);
-  };
-
-  // Add list
-  const addForm = document.getElementById('addListForm');
-  addForm.onsubmit = async (e)=>{
-    e.preventDefault();
-    const src = document.getElementById('addListInput').value.trim();
-    if (!src) return;
-    try{
-      await api('/api/add-list', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ src }) });
-      location.reload();
-    }catch(e){ alert('Failed to add list'); }
+    setTimeout(()=>{ msg.textContent = ""; }, 2500);
   };
 }
 render();
@@ -1075,26 +1046,29 @@ render();
 </body></html>`);
 });
 
-// Health
-app.get("/health", (_,res)=>res.status(200).send("ok"));
+/* ----- Legacy single-user (optional) ----- */
+if (LEGACY_IMDB_USER_URL && !process.env.DISABLE_LEGACY) {
+  (async () => {
+    const id = "legacy";
+    let u = await loadUser(id);
+    if (!u) {
+      u = {
+        uid: id,
+        imdbUrl: LEGACY_IMDB_USER_URL,
+        lists: {},
+        prefs: { ...defaultPrefs(), upgradeEpisodes: LEGACY_UPGRADE_EPISODES },
+        manifestRev: 1,
+        lastSyncAt: 0,
+        _lastManifestKey: ""
+      };
+      USERS.set(id, u);
+      await saveUser(u);
+    } else USERS.set(id, u);
+    fullSync(u, { rediscover:true }).then(()=>scheduleNextSync(u));
+  })();
+}
 
-// ---------- BOOT ----------
-(async () => {
-  // optional: precreate bootstrap user
-  if (BOOT_IMDB_USER_URL) {
-    try {
-      const found = await findUserByImdb(BOOT_IMDB_USER_URL);
-      if (found) {
-        const u = fromUserJson(found.json);
-        USERS.set(u.uid, u);
-        maybeBackgroundSync(u);
-      } else {
-        await createUser(BOOT_IMDB_USER_URL);
-      }
-    } catch (e) { console.warn("boot user:", e.message); }
-  }
-
-  app.listen(PORT, HOST, () => {
-    console.log(`My Lists running on http://localhost:${PORT}`);
-  });
-})();
+/* ----- BOOT ----- */
+app.listen(PORT, HOST, () => {
+  console.log(`My Lists running on http://localhost:${PORT}`);
+});
