@@ -656,6 +656,20 @@ app.post("/api/prefs", async (req,res) => {
   }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
 });
 
+// unblock a previously removed list
+app.post("/api/unblock-list", async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const lsid = String(req.body.lsid||"");
+    if (!/^ls\d{6,}$/i.test(lsid)) return res.status(400).send("Invalid lsid");
+    PREFS.blocked = (PREFS.blocked || []).filter(id => id !== lsid);
+    await fullSync({ rediscover:true });
+    scheduleNextSync();
+    res.status(200).send("Unblocked & synced");
+  }catch(e){ console.error(e); res.status(500).send("Failed"); }
+});
+
+
 // return cards for one list (for the drawer)
 app.get("/api/list-items", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -851,6 +865,11 @@ app.get("/admin", async (req,res)=>{
 
     <div class="card">
       <h3>Discovered & Sources</h3>
+      <div style="margin-top:8px">
+  <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+  <div id="blockedPills"></div>
+</div>
+
       <p class="mini muted">We merge your main user (+ extras) and explicit list URLs/IDs. Remove will also block the list (no re-add on next sync).</p>
 
       <div class="row">
@@ -985,6 +1004,30 @@ async function render() {
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
   });
+  
+// >>> INSERTED BLOCK: Blocked pills with Unblock action
+{
+const blockedWrap = document.getElementById('blockedPills');
+blockedWrap.innerHTML = '';
+const blocked = prefs.blocked || [];
+if (!blocked.length) blockedWrap.textContent = '(none)';
+blocked.forEach(lsid=>{
+const pill = el('span',{class:'pill'},[
+el('span',{text:lsid}),
+el('span',{class:'x',text:' Unblock'})
+]);
+pill.querySelector('.x').onclick = async ()=>{
+await fetch('/api/unblock-list?admin='+ADMIN, {
+method:'POST', headers:{'Content-Type':'application/json'},
+body: JSON.stringify({ lsid })
+});
+location.reload();
+};
+blockedWrap.appendChild(pill);
+blockedWrap.appendChild(document.createTextNode(' '));
+});
+}
+// <<< END INSERTED BLOCK
 
   document.getElementById('addUser').onclick = async (e)=>{
     e.preventDefault();
