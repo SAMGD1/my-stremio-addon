@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, sources & UI)
- *  v12.0.0
+ *  v12.0.1
  */
 "use strict";
 const express = require("express");
@@ -112,24 +112,27 @@ async function gh(method, path, bodyObj) {
 }
 async function ghGetSha(path) {
   try {
-    const data = await gh("GET", `/contents/${path}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+    const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
     return data && data.sha || null;
   } catch { return null; }
 }
 async function saveSnapshot(obj) {
+  // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
     await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
+  // GitHub (if enabled)
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
   const path = "data/snapshot.json";
-  const sha = await ghGetSha(encodeURIComponent(path)); // GH accepts %2F
+  const sha = await ghGetSha(path);
   const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
   if (sha) body.sha = sha;
   await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
 }
 async function loadSnapshot() {
+  // try GitHub first
   if (GH_ENABLED) {
     try {
       const data = await gh("GET", `/contents/${encodeURIComponent("data/snapshot.json")}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
@@ -137,6 +140,7 @@ async function loadSnapshot() {
       return JSON.parse(buf);
     } catch {/* ignore */}
   }
+  // local
   try {
     const txt = await fs.readFile(SNAP_LOCAL, "utf8");
     return JSON.parse(txt);
@@ -425,6 +429,17 @@ async function fullSync({ rediscover = true } = {}) {
     LISTS = next;
     LAST_SYNC_AT = Date.now();
 
+    // ---- Ensure prefs.order includes newly discovered lists; keep existing order ----
+    const allIds   = Object.keys(LISTS);
+    const keep     = Array.isArray(PREFS.order) ? PREFS.order.filter(id => LISTS[id]) : [];
+    const missingO = allIds.filter(id => !keep.includes(id));
+    PREFS.order    = keep.concat(missingO);
+
+    // If enabled set exists, prune removed lists (do not auto-enable new ones here)
+    if (Array.isArray(PREFS.enabled) && PREFS.enabled.length) {
+      PREFS.enabled = PREFS.enabled.filter(id => LISTS[id]);
+    }
+
     // drop customOrder entries for deleted lists
     const valid = new Set(Object.keys(LISTS));
     if (PREFS.customOrder) {
@@ -491,7 +506,7 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.0.0",
+  version: "12.0.1",
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
@@ -499,9 +514,12 @@ const baseManifest = {
   idPrefixes: ["tt"]
 };
 function getEnabledOrderedIds() {
-  const allIds = Object.keys(LISTS);
+  const allIds  = Object.keys(LISTS);
   const enabled = new Set(PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds);
-  const ordered = (PREFS.order && PREFS.order.length ? PREFS.order : allIds.slice().sort((a,b)=>(LISTS[a]?.name||a).localeCompare(LISTS[b]?.name||b)));
+  const base    = (PREFS.order && PREFS.order.length ? PREFS.order.filter(id => LISTS[id]) : []);
+  const missing = allIds.filter(id => !base.includes(id))
+    .sort((a,b)=>( (LISTS[a]?.name||a).localeCompare(LISTS[b]?.name||b) ));
+  const ordered = base.concat(missing);
   return ordered.filter(id => enabled.has(id));
 }
 function catalogs(){
@@ -990,7 +1008,10 @@ async function render() {
   const container = document.getElementById('prefs'); container.innerHTML = "";
 
   const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
-  const order = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : Object.keys(lists));
+  const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
+  const missing   = Object.keys(lists).filter(id => !baseOrder.includes(id))
+    .sort((a,b)=>( (lists[a]?.name||a).localeCompare(lists[b]?.name||b) ));
+  const order = baseOrder.concat(missing);
 
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
