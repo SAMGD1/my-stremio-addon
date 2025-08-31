@@ -1,7 +1,6 @@
-/*  My Lists – IMDb → Stremio (with custom per-list ordering)
- *  v11.0.0
+/*  My Lists – IMDb → Stremio (custom per-list ordering, sources & UI)
+ *  v12.0.0
  */
-
 "use strict";
 const express = require("express");
 const fs = require("fs/promises");
@@ -29,7 +28,7 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/11.0";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.0";
 const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -38,18 +37,27 @@ const REQ_HEADERS = {
 };
 const CINEMETA = "https://v3-cinemeta.strem.io";
 
+const SORT_OPTIONS = ["custom","date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
+const VALID_SORT = new Set(SORT_OPTIONS);
+
 // ----------------- STATE -----------------
 /** LISTS = { lsid: { id, name, url, ids:[tt...] } } */
 let LISTS = Object.create(null);
 
 /** PREFS saved to snapshot */
 let PREFS = {
-  enabled: [],
-  order: [],
+  enabled: [],            // lsids shown in Stremio
+  order: [],              // lsids order in manifest
   defaultList: "",
-  perListSort: {},          // { lsid: 'date_asc' | ... | 'custom' }
-  customOrder: {},          // { lsid: [ 'tt...', 'tt...' ] }
-  upgradeEpisodes: UPGRADE_EPISODES
+  perListSort: {},        // { lsid: 'date_asc' | ... | 'custom' }
+  sortOptions: {},        // { lsid: ['custom', 'date_desc', ...] } -> controls Stremio dropdown
+  customOrder: {},        // { lsid: [ 'tt...', 'tt...' ] }
+  upgradeEpisodes: UPGRADE_EPISODES,
+  sources: {              // extra sources you add in the UI
+    users: [],            // array of user /lists URLs
+    lists: []             // array of list URLs or lsids
+  },
+  blocked: []             // lsids you removed/blocked
 };
 
 const BEST   = new Map(); // Map<tt, { kind, meta }>
@@ -69,6 +77,7 @@ const isImdb = v => /^tt\d{7,}$/i.test(String(v||""));
 const isListId = v => /^ls\d{6,}$/i.test(String(v||""));
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
 
 async function fetchText(url) {
   const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
@@ -103,27 +112,24 @@ async function gh(method, path, bodyObj) {
 }
 async function ghGetSha(path) {
   try {
-    const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+    const data = await gh("GET", `/contents/${path}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
     return data && data.sha || null;
   } catch { return null; }
 }
 async function saveSnapshot(obj) {
-  // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
     await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
-  // GitHub (if enabled)
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
   const path = "data/snapshot.json";
-  const sha = await ghGetSha(path);
+  const sha = await ghGetSha(encodeURIComponent(path)); // GH accepts %2F
   const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
   if (sha) body.sha = sha;
   await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
 }
 async function loadSnapshot() {
-  // try GitHub first
   if (GH_ENABLED) {
     try {
       const data = await gh("GET", `/contents/${encodeURIComponent("data/snapshot.json")}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
@@ -131,7 +137,6 @@ async function loadSnapshot() {
       return JSON.parse(buf);
     } catch {/* ignore */}
   }
-  // local
   try {
     const txt = await fs.readFile(SNAP_LOCAL, "utf8");
     return JSON.parse(txt);
@@ -139,11 +144,19 @@ async function loadSnapshot() {
 }
 
 // ----------------- IMDb DISCOVERY -----------------
-async function discoverListsFromUser(userListsUrl) {
+function normalizeListIdOrUrl(s) {
+  if (!s) return null;
+  s = String(s).trim();
+  const m = s.match(/ls\d{6,}/i);
+  if (m) return { id: m[0], url: `https://www.imdb.com/list/${m[0]}/` };
+  if (/imdb\.com\/list\//i.test(s)) {
+    return { id: null, url: s };
+  }
+  return null;
+}
+async function discoverFromUserLists(userListsUrl) {
   if (!userListsUrl) return [];
   const html = await fetchText(withParam(userListsUrl, "_", Date.now()));
-
-  // tolerant selector
   const re = /href=['"](?:https?:\/\/(?:www\.)?imdb\.com)?\/list\/(ls\d{6,})\/['"]/gi;
   const ids = new Set(); let m;
   while ((m = re.exec(html))) ids.add(m[1]);
@@ -234,12 +247,10 @@ async function episodeParentSeries(imdbId) {
 }
 async function getBestMeta(imdbId) {
   if (BEST.has(imdbId)) return BEST.get(imdbId);
-  // try series then movie (reduces show mis-typing)
   let meta = await fetchCinemeta("series", imdbId);
   if (meta) { const rec = { kind: "series", meta }; BEST.set(imdbId, rec); return rec; }
   meta = await fetchCinemeta("movie", imdbId);
   if (meta) { const rec = { kind: "movie", meta }; BEST.set(imdbId, rec); return rec; }
-  // fallback to JSON-LD
   const ld = await imdbJsonLd(imdbId);
   let name, poster, released, year, type = "movie";
   try {
@@ -307,19 +318,59 @@ function manifestKey() {
   const enabled = (PREFS.enabled && PREFS.enabled.length) ? PREFS.enabled : Object.keys(LISTS);
   const names = enabled.map(id => LISTS[id]?.name || id).sort().join("|");
   const perSort = JSON.stringify(PREFS.perListSort || {});
+  const perOpts = JSON.stringify(PREFS.sortOptions || {});
   const custom = Object.keys(PREFS.customOrder || {}).length;
-  return `${enabled.join(",")}#${PREFS.order.join(",")}#${PREFS.defaultList}#${names}#${perSort}#c${custom}`;
+  const order = (PREFS.order || []).join(",");
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}`;
 }
+
+async function harvestSources() {
+  // 1) your primary IMDB_USER_URL
+  const discovered = [];
+  if (IMDB_USER_URL) {
+    try { discovered.push(...await discoverFromUserLists(IMDB_USER_URL)); } catch(e){ console.warn("[DISCOVER] main failed:", e.message); }
+  }
+  // 2) extra users from PREFS.sources.users
+  const users = Array.from(new Set((PREFS.sources?.users || []).map(s => String(s).trim()).filter(Boolean)));
+  for (const u of users) {
+    try { discovered.push(...await discoverFromUserLists(u)); }
+    catch(e){ console.warn("[DISCOVER] user", u, "failed:", e.message); }
+    await sleep(80);
+  }
+  // 3) explicit lists from PREFS.sources.lists + env fallback
+  const addlRaw = (PREFS.sources?.lists || []).concat(IMDB_LIST_IDS || []);
+  for (const raw of addlRaw) {
+    const norm = normalizeListIdOrUrl(raw);
+    if (!norm) continue;
+    let id = norm.id;
+    let url = norm.url;
+    if (!id) {
+      const m = String(url).match(/ls\d{6,}/i);
+      if (m) id = m[0];
+    }
+    if (!id) continue;
+    let name = id;
+    try { name = await fetchListName(url); } catch {}
+    discovered.push({ id, url, name });
+    await sleep(60);
+  }
+  // dedupe & blocklist
+  const blocked = new Set(PREFS.blocked || []);
+  const map = new Map();
+  for (const d of discovered) if (!blocked.has(d.id)) map.set(d.id, d);
+  return Array.from(map.values());
+}
+
 async function fullSync({ rediscover = true } = {}) {
   if (syncInProgress) return;
   syncInProgress = true;
   const started = Date.now();
   try {
     let discovered = [];
-    if (IMDB_USER_URL && rediscover) {
-      try { discovered = await discoverListsFromUser(IMDB_USER_URL); }
-      catch(e){ console.warn("[DISCOVER] failed:", e.message); }
+    if (rediscover) {
+      discovered = await harvestSources();
     }
+
     if ((!discovered || !discovered.length) && IMDB_LIST_IDS.length) {
       discovered = IMDB_LIST_IDS.map(id => ({ id, name: id, url: `https://www.imdb.com/list/${id}/` }));
       console.log(`[DISCOVER] used IMDB_LIST_IDS fallback (${discovered.length})`);
@@ -328,7 +379,9 @@ async function fullSync({ rediscover = true } = {}) {
     const next = Object.create(null);
     const seen = new Set();
     for (const d of discovered) { next[d.id] = { id: d.id, name: d.name || d.id, url: d.url, ids: [] }; seen.add(d.id); }
-    for (const id of Object.keys(LISTS)) if (!seen.has(id)) next[id] = LISTS[id];
+    // keep previous ones that were not rediscovered *and* not blocked
+    const blocked = new Set(PREFS.blocked || []);
+    for (const id of Object.keys(LISTS)) if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
 
     // pull items
     const uniques = new Set();
@@ -372,7 +425,7 @@ async function fullSync({ rediscover = true } = {}) {
     LISTS = next;
     LAST_SYNC_AT = Date.now();
 
-    // if any list was deleted, drop its customOrder
+    // drop customOrder entries for deleted lists
     const valid = new Set(Object.keys(LISTS));
     if (PREFS.customOrder) {
       for (const k of Object.keys(PREFS.customOrder)) if (!valid.has(k)) delete PREFS.customOrder[k];
@@ -438,18 +491,21 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "11.0.0",
+  version: "12.0.0",
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
   types: ["my lists","movie","series"],
   idPrefixes: ["tt"]
 };
+function getEnabledOrderedIds() {
+  const allIds = Object.keys(LISTS);
+  const enabled = new Set(PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds);
+  const ordered = (PREFS.order && PREFS.order.length ? PREFS.order : allIds.slice().sort((a,b)=>(LISTS[a]?.name||a).localeCompare(LISTS[b]?.name||b)));
+  return ordered.filter(id => enabled.has(id));
+}
 function catalogs(){
-  const ids = Object.keys(LISTS).sort((a,b)=>{
-    const na=LISTS[a]?.name||a, nb=LISTS[b]?.name||b;
-    return na.localeCompare(nb);
-  });
+  const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
     type: "My lists",
     id: `list:${lsid}`,
@@ -457,7 +513,7 @@ function catalogs(){
     extraSupported: ["search","skip","limit","sort"],
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
-      { name:"sort", options:["custom","date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"] }
+      { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
     ],
     posterShape: "poster"
   }));
@@ -531,7 +587,7 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
 });
 
-// ------- Admin + debug -------
+// ------- Admin + debug & new endpoints -------
 app.get("/api/lists", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   res.json(LISTS);
@@ -548,10 +604,22 @@ app.post("/api/prefs", async (req,res) => {
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : (PREFS.perListSort || {});
+    PREFS.sortOptions     = body.sortOptions && typeof body.sortOptions === "object" ? Object.fromEntries(Object.entries(body.sortOptions).map(([k,v])=>[k,clampSortOptions(v)])) : (PREFS.sortOptions || {});
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
+
     if (body.customOrder && typeof body.customOrder === "object") {
       PREFS.customOrder = body.customOrder;
     }
+
+    // sources
+    const src = body.sources || {};
+    PREFS.sources = {
+      users: Array.isArray(src.users) ? src.users.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.users || []),
+      lists: Array.isArray(src.lists) ? src.lists.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.lists || [])
+    };
+
+    // blocked
+    PREFS.blocked = Array.isArray(body.blocked) ? body.blocked.filter(isListId) : (PREFS.blocked || []);
 
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
@@ -615,7 +683,46 @@ app.post("/api/custom-order", async (req,res) => {
   }catch(e){ console.error("custom-order:", e); res.status(500).send("Failed"); }
 });
 
-// manual sync & purge+sync
+// add sources quickly then sync
+app.post("/api/add-sources", async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const users = Array.isArray(req.body.users) ? req.body.users.map(s=>String(s).trim()).filter(Boolean) : [];
+    const lists = Array.isArray(req.body.lists) ? req.body.lists.map(s=>String(s).trim()).filter(Boolean) : [];
+    PREFS.sources = PREFS.sources || { users:[], lists:[] };
+    PREFS.sources.users = Array.from(new Set([ ...(PREFS.sources.users||[]), ...users ]));
+    PREFS.sources.lists = Array.from(new Set([ ...(PREFS.sources.lists||[]), ...lists ]));
+    await fullSync({ rediscover:true });
+    scheduleNextSync();
+    res.status(200).send("Sources added & synced");
+  }catch(e){ console.error(e); res.status(500).send(String(e)); }
+});
+
+// remove/block a list
+app.post("/api/remove-list", async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const lsid = String(req.body.lsid||"");
+    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+    delete LISTS[lsid];
+    PREFS.enabled = (PREFS.enabled||[]).filter(id => id!==lsid);
+    PREFS.order   = (PREFS.order||[]).filter(id => id!==lsid);
+    PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
+
+    LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
+    res.status(200).send("Removed & blocked");
+  }catch(e){ console.error(e); res.status(500).send(String(e)); }
+});
+
 app.post("/api/sync", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -636,7 +743,6 @@ app.post("/api/purge-sync", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
-// tiny debug helper
 app.get("/api/debug-imdb", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -647,20 +753,20 @@ app.get("/api/debug-imdb", async (req,res)=>{
   }catch(e){ res.type("text").status(500).send("Fetch failed: "+e.message); }
 });
 
-// ------- Admin page -------
+// ------- Admin page (UI refresh + sources & sort-options) -------
 app.get("/admin", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   const base = absoluteBase(req);
   const manifestUrl = `${base}/manifest.json${SHARED_SECRET?`?key=${SHARED_SECRET}`:""}`;
   let discovered = [];
-  try { if (IMDB_USER_URL) discovered = await discoverListsFromUser(IMDB_USER_URL); } catch {}
+  try { discovered = await harvestSources(); } catch {}
 
   const rows = Object.keys(LISTS).map(id => {
     const L = LISTS[id]; const count=(L.ids||[]).length;
     return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
   }).join("") || "<li>(none)</li>";
 
-  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none found or IMDb unreachable right now).</li>";
+  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
 
   const lastSyncText = LAST_SYNC_AT
     ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
@@ -670,62 +776,103 @@ app.get("/admin", async (req,res)=>{
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Admin</title>
 <style>
-  :root{color-scheme:light}
-  body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;max-width:1100px}
-  .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0;background:#fff}
-  button{padding:10px 16px;border:0;border-radius:8px;background:#2d6cdf;color:#fff;cursor:pointer}
-  .btn2{background:#6c5ce7}
-  small{color:#666}
-  .code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f6f6;padding:4px 6px;border-radius:6px}
+  :root{color-scheme:light; --bg:#0f0d1a; --card:#15122b; --muted:#9aa0b4; --text:#f7f7fb; --accent:#6c5ce7; --accent2:#8b7cf7; --border:#2a2650}
+  body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:linear-gradient(180deg,#141126 0%,#0f0d1a 100%);color:var(--text)}
+  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+  .hero{padding:20px 0 8px}
+  h1{margin:0 0 4px;font-weight:700}
+  .subtitle{color:var(--muted)}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr}
+  @media(min-width:980px){ .grid{grid-template-columns:1fr 1fr} }
+  .card{border:1px solid var(--border);border-radius:14px;padding:16px;background:var(--card);box-shadow:0 8px 24px rgba(0,0,0,.28)}
+  button{padding:10px 16px;border:0;border-radius:10px;background:var(--accent);color:#fff;cursor:pointer}
+  .btn2{background:var(--accent2)}
+  small{color:var(--muted)}
+  .code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#1c1837;color:#d6d3ff;padding:4px 6px;border-radius:6px}
   table{width:100%;border-collapse:collapse}
-  th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}
-  .muted{color:#888}
+  th,td{padding:10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+  .muted{color:var(--muted)}
   .chev{cursor:pointer;font-size:18px;line-height:1;user-select:none}
-  .drawer{background:#fafafa}
-  .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin:10px 0;padding:0;list-style:none}
-  .thumb{display:flex;gap:10px;align-items:center;border:1px solid #e6e6e6;background:#fff;border-radius:10px;padding:6px 8px}
-  .thumb img{width:52px;height:78px;object-fit:cover;border-radius:6px;background:#eee}
+  .drawer{background:#120f25}
+  .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin:12px 0;padding:0;list-style:none}
+  .thumb{display:flex;gap:10px;align-items:center;border:1px solid var(--border);background:#1a1636;border-radius:12px;padding:6px 8px}
+  .thumb img{width:52px;height:78px;object-fit:cover;border-radius:6px;background:#2a244e}
   .thumb .title{font-size:14px}
-  .thumb .id{font-size:11px;color:#888}
+  .thumb .id{font-size:11px;color:var(--muted)}
   .thumb[draggable="true"]{cursor:grab}
   .thumb.dragging{opacity:.5}
-  .rowtools{display:flex;gap:8px;align-items:center}
-  .inline-note{font-size:12px;color:#666;margin-left:8px}
+  .rowtools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+  .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
+  .pill{display:inline-flex;align-items:center;gap:8px;background:#1c1837;border:1px solid var(--border);border-radius:999px;padding:6px 10px;color:#dcd8ff}
+  .pill input{margin-right:4px}
+  .pill .x{cursor:pointer;color:#ffb4b4}
+  input[type="text"]{background:#1c1837;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px;width:100%}
+  .row{display:grid;gap:10px;grid-template-columns:1fr 100px}
+  .mini{font-size:12px}
 </style>
 </head><body>
-<h1>My Lists – Admin</h1>
-
-<div class="card">
-  <h3>Current Snapshot</h3>
-  <ul>${rows}</ul>
-  <p><small>Last sync: ${lastSyncText}</small></p>
-  <div class="rowtools">
-    <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button class="btn2">Sync IMDb Lists Now</button></form>
-    <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge caches & re-sync?')"><button>🧹 Purge & Sync</button></form>
-    <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
+<div class="wrap">
+  <div class="hero">
+    <h1>My Lists – Admin</h1>
+    <div class="subtitle">Last sync: ${lastSyncText}</div>
   </div>
-</div>
 
-<div class="card">
-  <h3>Customize (enable/disable, order, defaults)</h3>
-  <p class="muted">Drag the rows to change order. Click the ▾ arrow to open a list and drag posters to set a <b>custom</b> order (saved per list).</p>
-  <div id="prefs"></div>
-</div>
+  <div class="grid">
+    <div class="card">
+      <h3>Current Snapshot</h3>
+      <ul>${rows}</ul>
+      <div class="rowtools">
+        <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button class="btn2">Sync IMDb Lists Now</button></form>
+        <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge caches & re-sync?')"><button>🧹 Purge & Sync</button></form>
+        <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
+      </div>
+      <h4>Manifest URL</h4>
+      <p class="code">${manifestUrl}</p>
+      <p class="mini muted">Version bumps automatically when catalogs change.</p>
+    </div>
 
-<div class="card">
-  <h3>Discovered at <span class="code">${IMDB_USER_URL || "(IMDB_USER_URL not set)"}</span></h3>
-  <ul>${disc}</ul>
-  <p><small>Debug: <a href="/api/debug-imdb?admin=${ADMIN_PASSWORD}">open</a> (shows the first part of HTML we receive)</small></p>
-</div>
+    <div class="card">
+      <h3>Discovered & Sources</h3>
+      <p class="mini muted">We merge your main user (+ extras) and explicit list URLs/IDs. Remove will also block the list (no re-add on next sync).</p>
 
-<div class="card">
-  <h3>Manifest URL</h3>
-  <p class="code">${manifestUrl}</p>
-  <p><small>Version bumps automatically when catalogs change.</small></p>
+      <div class="row">
+        <div><label>Add IMDb <b>User /lists</b> URL</label>
+          <input id="userInput" placeholder="https://www.imdb.com/user/urXXXXXXX/lists/" />
+        </div>
+        <div><button id="addUser">Add</button></div>
+      </div>
+      <div class="row">
+        <div><label>Add IMDb <b>List</b> URL or ID (ls…)</label>
+          <input id="listInput" placeholder="https://www.imdb.com/list/ls123456789/ or ls123456789" />
+        </div>
+        <div><button id="addList">Add</button></div>
+      </div>
+
+      <div style="margin-top:10px">
+        <div class="mini muted">Your extra users:</div>
+        <div id="userPills"></div>
+      </div>
+      <div style="margin-top:8px">
+        <div class="mini muted">Your extra lists:</div>
+        <div id="listPills"></div>
+      </div>
+
+      <h4 style="margin-top:14px">Discovered</h4>
+      <ul>${disc}</ul>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>Customize (enable/disable, order, defaults)</h3>
+    <p class="muted">Drag rows to change list order. Click ▾ to open a list: drag posters for a <b>custom</b> order, and pick which <b>sort options</b> appear in Stremio.</p>
+    <div id="prefs"></div>
+  </div>
+
 </div>
 
 <script>
 const ADMIN="${ADMIN_PASSWORD}";
+const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 
 async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
@@ -748,7 +895,7 @@ function el(tag, attrs={}, kids=[]) {
 }
 function isCtrl(node){
   const t = (node && node.tagName || "").toLowerCase();
-  return t === "input" || t === "select" || t === "button" || t === "a" || t === "label";
+  return t === "input" || t === "select" || t === "button" || t === "a" || t === "label" || t === "textarea";
 }
 
 // Row drag (table tbody)
@@ -798,6 +945,48 @@ async function render() {
   const prefs = await getPrefs();
   const lists = await getLists();
 
+  // sources pills
+  function renderPills(id, arr, onRemove){
+    const wrap = document.getElementById(id); wrap.innerHTML = '';
+    (arr||[]).forEach((txt, idx)=>{
+      const pill = el('span', {class:'pill'}, [
+        el('span',{text:txt}),
+        el('span',{class:'x',text:'✕'})
+      ]);
+      pill.querySelector('.x').onclick = ()=> onRemove(idx);
+      wrap.appendChild(pill);
+      wrap.appendChild(document.createTextNode(' '));
+    });
+    if (!arr || !arr.length) wrap.textContent = '(none)';
+  }
+  renderPills('userPills', prefs.sources?.users || [], (i)=>{
+    prefs.sources.users.splice(i,1);
+    saveAll('Saved'); // silent save
+  });
+  renderPills('listPills', prefs.sources?.lists || [], (i)=>{
+    prefs.sources.lists.splice(i,1);
+    saveAll('Saved');
+  });
+
+  document.getElementById('addUser').onclick = async (e)=>{
+    e.preventDefault();
+    const v = document.getElementById('userInput').value.trim();
+    if (!v) return;
+    prefs.sources = prefs.sources || {users:[],lists:[]};
+    if (!prefs.sources.users.includes(v)) prefs.sources.users.push(v);
+    document.getElementById('userInput').value = '';
+    await saveAll('Added user');
+  };
+  document.getElementById('addList').onclick = async (e)=>{
+    e.preventDefault();
+    const v = document.getElementById('listInput').value.trim();
+    if (!v) return;
+    prefs.sources = prefs.sources || {users:[],lists:[]};
+    if (!prefs.sources.lists.includes(v)) prefs.sources.lists.push(v);
+    document.getElementById('listInput').value = '';
+    await saveAll('Added list');
+  };
+
   const container = document.getElementById('prefs'); container.innerHTML = "";
 
   const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
@@ -806,27 +995,46 @@ async function render() {
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
     el('th',{text:''}), el('th',{text:'Enabled'}), el('th',{text:'List (lsid)'}), el('th',{text:'Items'}),
-    el('th',{text:'Default sort'})
+    el('th',{text:'Default sort'}), el('th',{text:'Remove'})
   ])]);
   table.appendChild(thead);
   const tbody = el('tbody');
 
   function makeDrawer(lsid) {
     const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
-    const td = el('td',{colspan:'5'});
+    const td = el('td',{colspan:'6'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
-    // load items
     getListItems(lsid).then(({items})=>{
       td.innerHTML = '';
+
+      // tools line: save/reset + sort options checkboxes
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
-      const resetBtn = el('button',{text:'Reset (list order)'});
+      const resetBtn = el('button',{text:'Reset order'});
       tools.appendChild(saveBtn); tools.appendChild(resetBtn);
+
+      // sort options visible
+      const optsWrap = el('div',{class:'rowtools'});
+      optsWrap.appendChild(el('span',{class:'mini muted', text:'Sort options shown in Stremio:'}));
+      const current = (prefs.sortOptions && prefs.sortOptions[lsid] && prefs.sortOptions[lsid].length) ? new Set(prefs.sortOptions[lsid]) : new Set(SORT_OPTIONS);
+      SORT_OPTIONS.forEach(opt=>{
+        const lab = el('label',{class:'pill'});
+        const cb = el('input',{type:'checkbox'}); cb.checked = current.has(opt);
+        cb.onchange = ()=>{
+          const arr = Array.from(optsWrap.querySelectorAll('input')).map((c,i)=>c.checked?SORT_OPTIONS[i]:null).filter(Boolean);
+          prefs.sortOptions = prefs.sortOptions || {};
+          prefs.sortOptions[lsid] = arr.length ? arr : SORT_OPTIONS.slice();
+        };
+        lab.appendChild(cb);
+        lab.appendChild(el('span',{text:opt}));
+        optsWrap.appendChild(lab);
+      });
+
       td.appendChild(tools);
+      td.appendChild(optsWrap);
 
       const ul = el('ul',{class:'thumbs'});
-      // if we already have a custom order, apply it visually first
       let ordered = items.slice();
       const co = (prefs.customOrder && prefs.customOrder[lsid]) || [];
       if (co && co.length) {
@@ -864,7 +1072,6 @@ async function render() {
         }
       };
       resetBtn.onclick = ()=>{
-        // reset to list order
         ul.innerHTML = '';
         for (const it of items) {
           const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
@@ -882,38 +1089,47 @@ async function render() {
     return tr;
   }
 
+  function removeList(lsid){
+    if (!confirm('Remove this list and block it from reappearing?')) return;
+    fetch('/api/remove-list?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })})
+      .then(()=> location.reload())
+      .catch(()=> alert('Remove failed'));
+  }
+
   function makeRow(lsid) {
     const L = lists[lsid];
     const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
 
-    // chevron
-    const chev = el('span',{class:'chev',text:'▾', title:'Open custom order'});
+    const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
     const chevTd = el('td',{},[chev]);
 
-    // enabled
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
-    // name
     const nameCell = el('td',{}); 
     nameCell.appendChild(el('div',{text:(L.name||lsid)}));
     nameCell.appendChild(el('small',{text:lsid}));
 
-    // count
     const count = el('td',{text:String((L.ids||[]).length)});
 
-    // default sort
     const sortSel = el('select');
-    const opts = ["custom","date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
-    const def = (prefs.perListSort && prefs.perListSort[lsid]) || "name_asc";
-    opts.forEach(o=> sortSel.appendChild(el('option',{value:o,text:o, ...(o===def?{selected:""}:{})})));
+    SORT_OPTIONS.forEach(o=>{
+      const opt = el('option',{value:o,text:o});
+      const def = (prefs.perListSort && prefs.perListSort[lsid]) || "name_asc";
+      if (o===def) opt.setAttribute('selected','');
+      sortSel.appendChild(opt);
+    });
     sortSel.addEventListener('change', ()=>{ prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = sortSel.value; });
+
+    const rmBtn = el('button',{text:'Remove'});
+    rmBtn.onclick = ()=> removeList(lsid);
 
     tr.appendChild(chevTd);
     tr.appendChild(el('td',{},[cb]));
     tr.appendChild(nameCell);
     tr.appendChild(count);
     tr.appendChild(el('td',{},[sortSel]));
+    tr.appendChild(el('td',{},[rmBtn]));
 
     // drawer handling
     let drawer = null; let open = false;
@@ -942,14 +1158,13 @@ async function render() {
 
   container.appendChild(table);
 
-  // Save button
-  const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center'});
+  const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'});
   const saveBtn = el('button',{text:'Save'});
   const msg = el('span',{class:'inline-note'});
   saveWrap.appendChild(saveBtn); saveWrap.appendChild(msg);
   container.appendChild(saveWrap);
 
-  saveBtn.onclick = async ()=>{
+  async function saveAll(text){
     const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
     const enabled = Array.from(enabledSet);
     const body = {
@@ -957,15 +1172,19 @@ async function render() {
       order: newOrder,
       defaultList: prefs.defaultList || (enabled[0] || ""),
       perListSort: prefs.perListSort || {},
-      upgradeEpisodes: prefs.upgradeEpisodes || false
-      // customOrder is saved via /api/custom-order
+      sortOptions: prefs.sortOptions || {},
+      upgradeEpisodes: prefs.upgradeEpisodes || false,
+      sources: prefs.sources || {},
+      blocked: prefs.blocked || []
     };
     msg.textContent = "Saving…";
     const r = await fetch('/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     const t = await r.text();
-    msg.textContent = t || "Saved.";
-    setTimeout(()=>{ msg.textContent = ""; }, 2500);
-  };
+    msg.textContent = text || t || "Saved.";
+    setTimeout(()=>{ msg.textContent = ""; }, 1800);
+  }
+
+  saveBtn.onclick = ()=> saveAll();
 }
 
 render();
@@ -975,7 +1194,6 @@ render();
 
 // ----------------- BOOT -----------------
 (async () => {
-  // try boot from snapshot
   try {
     const snap = await loadSnapshot();
     if (snap) {
