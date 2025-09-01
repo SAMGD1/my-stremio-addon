@@ -1252,103 +1252,107 @@ async function render() {
       renderUl(working);
       td.appendChild(ul);
       attachThumbDnD(ul);
+// react to sort select changes live
+sortSel.onchange = ()=>{
+  prefs.perListSort = prefs.perListSort || {};
+  prefs.perListSort[lsid] = sortSel.value;
+  const mode = sortSel.value || 'imdb';
 
-      // react to sort select changes live
-      sortSel.onchange = ()=>{
-        prefs.perListSort = prefs.perListSort || {};
-        prefs.perListSort[lsid] = sortSel.value;
-        const mode = sortSel.value || 'imdb';
-        const idsNow = Array.from(ul.querySelectorAll('li.thumb')).filter(li=>!li.classList.contains('add')).map(li=>li.dataset.id);
-        // build current cards from DOM ids (preserve any new additions)
-        const map = new Map(items.map(x=>[x.id,x]));
-        const domCards = idsNow.map(id => map.get(id) || {id, name:id, poster:''});
-        const reordered = (mode==='imdb') ? domCards : sortClient(domCards, mode);
-        renderUl(reordered);
-        attachThumbDnD(ul);
-      };
+  const idsNow = Array.from(ul.querySelectorAll('li.thumb'))
+    .filter(li => !li.classList.contains('add'))
+    .map(li => li.dataset.id);
 
-      saveBtn.onclick = async ()=>{
-        const ids = Array.from(ul.querySelectorAll('li.thumb')).filter(li=>!li.classList.contains('add')).map(li=>li.getAttribute('data-id'));
+  // build current cards from DOM ids (preserve any new additions)
+  const map = new Map(items.map(x => [x.id, x]));
+  const domCards = idsNow.map(id => map.get(id) || { id, name:id, poster:'' });
 
-        const origSet = new Set(items.map(x=>x.id));
-        const nowSet  = new Set(ids);
-        const adds    = ids.filter(id
-      saveBtn.onclick = async ()=>{
-        const ids = Array.from(ul.querySelectorAll('li.thumb'))
-          .filter(li => !li.classList.contains('add'))
-          .map(li => li.getAttribute('data-id'));
+  const reordered = (mode === 'imdb') ? domCards : sortClient(domCards, mode);
+  renderUl(reordered);
+  attachThumbDnD(ul);
+};
 
-        const origSet = new Set(items.map(x => x.id));
-        const nowSet  = new Set(ids);
+// SAVE: add/remove + persist custom order and flip default sort to custom
+saveBtn.onclick = async () => {
+  const ids = Array.from(ul.querySelectorAll('li.thumb'))
+    .filter(li => !li.classList.contains('add'))
+    .map(li => li.getAttribute('data-id'));
 
-        const adds    = ids.filter(id => !origSet.has(id));
-        const removes = Array.from(origSet).filter(id => !nowSet.has(id));
+  const origSet = new Set(items.map(x => x.id));
+  const nowSet  = new Set(ids);
 
-        saveBtn.disabled = true;
-        resetBtn.disabled = true;
-        restoreBtn.disabled = true;
+  const adds    = ids.filter(id => !origSet.has(id));
+  const removes = Array.from(origSet).filter(id => !nowSet.has(id));
 
-        try {
-          // 1) apply adds first so the items exist server-side
-          if (adds.length) {
-            await fetch('/api/list-add-items?admin='+ADMIN, {
-              method:'POST',
-              headers:{'Content-Type':'application/json'},
-              body: JSON.stringify({ lsid, items: adds })
-            });
-          }
+  saveBtn.disabled = true;
+  resetBtn.disabled = true;
+  restoreBtn.disabled = true;
 
-          // 2) apply removals
-          if (removes.length) {
-            await fetch('/api/list-remove-items?admin='+ADMIN, {
-              method:'POST',
-              headers:{'Content-Type':'application/json'},
-              body: JSON.stringify({ lsid, items: removes })
-            });
-          }
+  try {
+    // 1) apply adds first so the items exist server-side
+    if (adds.length) {
+      await fetch('/api/list-add-items?admin=' + ADMIN, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ lsid, items: adds })
+      });
+    }
 
-          // 3) save the final explicit order → switches to custom on server
-          await saveCustomOrder(lsid, ids);
+    // 2) apply removals
+    if (removes.length) {
+      await fetch('/api/list-remove-items?admin=' + ADMIN, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ lsid, items: removes })
+      });
+    }
 
-          // reflect in UI immediately
-          sortSel.value = 'custom';
-          prefs.perListSort = prefs.perListSort || {};
-          prefs.perListSort[lsid] = 'custom';
+    // 3) save the final explicit order → switches to custom on server
+    await saveCustomOrder(lsid, ids);
 
-          // Also update our local `items` snapshot so repeated saves diff correctly
-          items.length = 0;
-          ids.forEach(id => items.push({ id, name: id, poster: '' })); // names/posters will be refreshed next open
+    // reflect in UI immediately
+    sortSel.value = 'custom';
+    prefs.perListSort = prefs.perListSort || {};
+    prefs.perListSort[lsid] = 'custom';
 
-          saveBtn.textContent = 'Saved ✓';
-          setTimeout(()=> saveBtn.textContent = 'Save order', 1200);
-        } catch (e) {
-          console.error(e);
-          alert('Save failed');
-        } finally {
-          saveBtn.disabled = false;
-          resetBtn.disabled = false;
-          restoreBtn.disabled = false;
-        }
-      };
+    // update our local `items` snapshot so repeated saves diff correctly
+    items.length = 0;
+    ids.forEach(id => items.push({ id, name: id, poster: '' })); // posters refresh on reopen
 
-      // Reset visual order to *current sort selection*
-      resetBtn.onclick = ()=>{
-        const mode = (sortSel.value || 'imdb').toLowerCase();
+    saveBtn.textContent = 'Saved ✓';
+    setTimeout(() => { saveBtn.textContent = 'Save order'; }, 1200);
+  } catch (e) {
+    console.error(e);
+    alert('Save failed');
+  } finally {
+    saveBtn.disabled = false;
+    resetBtn.disabled = false;
+    restoreBtn.disabled = false;
+  }
+};
 
-        // collect current DOM items (so new unsaved adds stay visible)
-        const domIds = Array.from(ul.querySelectorAll('li.thumb'))
-          .filter(li => !li.classList.contains('add'))
-          .map(li => li.dataset.id);
+// RESET: reorder visually to *current* sort selection (does not save)
+resetBtn.onclick = ()=>{
+  const mode = (sortSel.value || 'imdb').toLowerCase();
 
-        // map to card-like objects using original data when possible
-        const map = new Map(items.map(x => [x.id, x]));
-        const domCards = domIds.map(id => map.get(id) || { id, name:id, poster:'' });
+  // collect current DOM items (so new unsaved adds stay visible)
+  const domIds = Array.from(ul.querySelectorAll('li.thumb'))
+    .filter(li => !li.classList.contains('add'))
+    .map(li => li.dataset.id);
 
-        const reordered = (mode === 'imdb') ? domCards : (mode === 'custom' ? domCards : sortClient(domCards, mode));
-        renderUl(reordered);
-        attachThumbDnD(ul);
-      };
+  // map to card-like objects using original data when possible
+  const map = new Map(items.map(x => [x.id, x]));
+  const domCards = domIds.map(id => map.get(id) || { id, name:id, poster:'' });
 
+  const reordered =
+    (mode === 'imdb') ? domCards :
+    (mode === 'custom') ? domCards :
+    sortClient(domCards, mode);
+
+  renderUl(reordered);
+  attachThumbDnD(ul);
+};
+
+     
       // Restore from IMDb = drop local adds/removes/custom and set sort→imdb
       restoreBtn.onclick = async ()=>{
         if (!confirm('This will remove local additions, un-hide removed items, and clear custom order for this list. Continue?')) return;
