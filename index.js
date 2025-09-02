@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, sources & UI)
- *  v12.2.0
+ *  v12.0.1
  */
 "use strict";
 const express = require("express");
@@ -28,7 +28,7 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.2";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.0";
 const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -37,8 +37,7 @@ const REQ_HEADERS = {
 };
 const CINEMETA = "https://v3-cinemeta.strem.io";
 
-// NEW: include "imdb" (keep IMDb order)
-const SORT_OPTIONS = ["custom","imdb","date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
+const SORT_OPTIONS = ["custom","date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
 const VALID_SORT = new Set(SORT_OPTIONS);
 
 // ----------------- STATE -----------------
@@ -50,13 +49,10 @@ let PREFS = {
   enabled: [],            // lsids shown in Stremio
   order: [],              // lsids order in manifest
   defaultList: "",
-  perListSort: {},        // { lsid: 'imdb' | 'date_asc' | ... | 'custom' }
+  perListSort: {},        // { lsid: 'date_asc' | ... | 'custom' }
   sortOptions: {},        // { lsid: ['custom', 'date_desc', ...] } -> controls Stremio dropdown
   customOrder: {},        // { lsid: [ 'tt...', 'tt...' ] }
   upgradeEpisodes: UPGRADE_EPISODES,
-  // NEW: local per-list tweaks
-  extras: {},             // { lsid: ['tt...','tt...'] }  (locally added items)
-  removed: {},            // { lsid: ['tt...','tt...'] }  (locally hidden items)
   sources: {              // extra sources you add in the UI
     users: [],            // array of user /lists URLs
     lists: []             // array of list URLs or lsids
@@ -296,7 +292,6 @@ function cardFor(imdbId) {
 function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
 function stableSort(items, sortKey) {
   const s = String(sortKey || "name_asc").toLowerCase();
-  if (s === "imdb") return items.slice(); // NEW: keep original IMDb order
   const dir = s.endsWith("_asc") ? 1 : -1;
   const key = s.split("_")[0];
   const cmpNullBottom = (a,b) => (a==null && b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0))));
@@ -329,10 +324,8 @@ function manifestKey() {
   const perSort = JSON.stringify(PREFS.perListSort || {});
   const perOpts = JSON.stringify(PREFS.sortOptions || {});
   const custom = Object.keys(PREFS.customOrder || {}).length;
-  const localA = JSON.stringify(PREFS.extras || {});
-  const localR = JSON.stringify(PREFS.removed || {});
   const order = (PREFS.order || []).join(",");
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}#a${localA.length}#r${localR.length}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}`;
 }
 
 async function harvestSources() {
@@ -400,12 +393,6 @@ async function fullSync({ rediscover = true } = {}) {
       const url = next[id].url || `https://www.imdb.com/list/${id}/`;
       let ids = [];
       try { ids = await fetchImdbListIdsAllPages(url); } catch {}
-      // apply removed + extras (local)
-      const rem = new Set((PREFS.removed && PREFS.removed[id]) || []);
-      const ex  = ((PREFS.extras && PREFS.extras[id]) || []).filter(isImdb);
-      ids = ids.filter(tt => !rem.has(tt));
-      for (const tt of ex) if (!ids.includes(tt)) ids.push(tt);
-
       next[id].ids = ids;
       ids.forEach(tt => uniques.add(tt));
       await sleep(60);
@@ -442,13 +429,13 @@ async function fullSync({ rediscover = true } = {}) {
     LISTS = next;
     LAST_SYNC_AT = Date.now();
 
-    // Ensure prefs.order includes newly discovered lists; keep existing order
+    // ---- Ensure prefs.order includes newly discovered lists; keep existing order ----
     const allIds   = Object.keys(LISTS);
     const keep     = Array.isArray(PREFS.order) ? PREFS.order.filter(id => LISTS[id]) : [];
     const missingO = allIds.filter(id => !keep.includes(id));
     PREFS.order    = keep.concat(missingO);
 
-    // If enabled set exists, prune removed lists
+    // If enabled set exists, prune removed lists (do not auto-enable new ones here)
     if (Array.isArray(PREFS.enabled) && PREFS.enabled.length) {
       PREFS.enabled = PREFS.enabled.filter(id => LISTS[id]);
     }
@@ -519,7 +506,7 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.2.0",
+  version: "12.0.1",
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
@@ -576,9 +563,8 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     const extra = parseExtra(req.params.extra, req.query);
     const q = String(extra.search||"").toLowerCase().trim();
-    // NEW default to imdb order if nothing set
     const sortReq = String(extra.sort||"").toLowerCase();
-    const defaultSort = (PREFS.perListSort && PREFS.perListSort[lsid]) || "imdb";
+    const defaultSort = (PREFS.perListSort && PREFS.perListSort[lsid]) || "name_asc";
     const sort = sortReq || defaultSort;
     const skip = Math.max(0, Number(extra.skip||0));
     const limit = Math.min(Number(extra.limit||100), 200);
@@ -594,7 +580,6 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     }
 
     if (sort === "custom") metas = applyCustomOrder(metas, lsid);
-    else if (sort === "imdb") metas = metas.slice(); // keep as fetched
     else metas = stableSort(metas, sort);
 
     res.json({ metas: metas.slice(skip, skip+limit) });
@@ -684,6 +669,7 @@ app.post("/api/unblock-list", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send("Failed"); }
 });
 
+
 // return cards for one list (for the drawer)
 app.get("/api/list-items", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -727,70 +713,6 @@ app.post("/api/custom-order", async (req,res) => {
 
     res.status(200).json({ ok:true, manifestRev: MANIFEST_REV });
   }catch(e){ console.error("custom-order:", e); res.status(500).send("Failed"); }
-});
-
-// NEW: add items locally to a list
-app.post("/api/list-add-items", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const lsid = String(req.body.lsid || "");
-    const items = Array.isArray(req.body.items) ? req.body.items.map(String).filter(isImdb) : [];
-    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    if (!LISTS[lsid]) return res.status(404).send("List not found");
-    PREFS.extras = PREFS.extras || {};
-    const prev = new Set(PREFS.extras[lsid] || []);
-    items.forEach(tt => prev.add(tt));
-    PREFS.extras[lsid] = Array.from(prev);
-    // reflect in current LISTS (end)
-    const set = new Set(LISTS[lsid].ids);
-    for (const tt of items) if (!set.has(tt)) LISTS[lsid].ids.push(tt);
-    // preload cards
-    for (const tt of items) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT, manifestRev: MANIFEST_REV, lists: LISTS, prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK), cards: Object.fromEntries(CARD), ep2ser: Object.fromEntries(EP2SER)
-    });
-    res.status(200).send("Added");
-  } catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
-// NEW: remove/hide items locally
-app.post("/api/list-remove-items", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const lsid = String(req.body.lsid || "");
-    const items = Array.isArray(req.body.items) ? req.body.items.map(String).filter(isImdb) : [];
-    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    if (!LISTS[lsid]) return res.status(404).send("List not found");
-    PREFS.removed = PREFS.removed || {};
-    const prev = new Set(PREFS.removed[lsid] || []);
-    items.forEach(tt => prev.add(tt));
-    PREFS.removed[lsid] = Array.from(prev);
-    // reflect in current LISTS
-    LISTS[lsid].ids = (LISTS[lsid].ids || []).filter(tt => !prev.has(tt));
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT, manifestRev: MANIFEST_REV, lists: LISTS, prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK), cards: Object.fromEntries(CARD), ep2ser: Object.fromEntries(EP2SER)
-    });
-    res.status(200).send("Removed");
-  } catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
-// NEW: reset all local changes for a list (extras, removed, custom order)
-app.post("/api/list-reset-local", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const lsid = String(req.body.lsid || "");
-    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    if (PREFS.extras)  delete PREFS.extras[lsid];
-    if (PREFS.removed) delete PREFS.removed[lsid];
-    if (PREFS.customOrder) delete PREFS.customOrder[lsid];
-    PREFS.perListSort = PREFS.perListSort || {};
-    PREFS.perListSort[lsid] = "imdb";
-    await fullSync({ rediscover:true });
-    scheduleNextSync();
-    res.status(200).send("Local changes cleared & synced");
-  } catch(e){ console.error(e); res.status(500).send("Failed"); }
 });
 
 // add sources quickly then sync
@@ -886,7 +808,7 @@ app.get("/admin", async (req,res)=>{
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Admin</title>
 <style>
-  :root{color-scheme:light; --bg:#0f0d1a; --card:#15122b; --muted:#9aa0b4; --text:#f7f7fb; --accent:#6c5ce7; --accent2:#8b7cf7; --border:#2a2650; --danger:#ff5f73}
+  :root{color-scheme:light; --bg:#0f0d1a; --card:#15122b; --muted:#9aa0b4; --text:#f7f7fb; --accent:#6c5ce7; --accent2:#8b7cf7; --border:#2a2650}
   body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:linear-gradient(180deg,#141126 0%,#0f0d1a 100%);color:var(--text)}
   .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
   .hero{padding:20px 0 8px}
@@ -905,14 +827,12 @@ app.get("/admin", async (req,res)=>{
   .chev{cursor:pointer;font-size:18px;line-height:1;user-select:none}
   .drawer{background:#120f25}
   .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin:12px 0;padding:0;list-style:none}
-  .thumb{position:relative;display:flex;gap:10px;align-items:center;border:1px solid var(--border);background:#1a1636;border-radius:12px;padding:6px 8px}
+  .thumb{display:flex;gap:10px;align-items:center;border:1px solid var(--border);background:#1a1636;border-radius:12px;padding:6px 8px}
   .thumb img{width:52px;height:78px;object-fit:cover;border-radius:6px;background:#2a244e}
   .thumb .title{font-size:14px}
   .thumb .id{font-size:11px;color:var(--muted)}
   .thumb[draggable="true"]{cursor:grab}
   .thumb.dragging{opacity:.5}
-  .thumb.add{justify-content:center; border-style:dashed; opacity:.9}
-  .thumb .del{position:absolute;right:6px;top:6px;background:var(--danger);border-radius:999px;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-weight:700;cursor:pointer}
   .rowtools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
   .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
   .pill{display:inline-flex;align-items:center;gap:8px;background:#1c1837;border:1px solid var(--border);border-radius:999px;padding:6px 10px;color:#dcd8ff}
@@ -946,9 +866,9 @@ app.get("/admin", async (req,res)=>{
     <div class="card">
       <h3>Discovered & Sources</h3>
       <div style="margin-top:8px">
-        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
-        <div id="blockedPills"></div>
-      </div>
+  <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+  <div id="blockedPills"></div>
+</div>
 
       <p class="mini muted">We merge your main user (+ extras) and explicit list URLs/IDs. Remove will also block the list (no re-add on next sync).</p>
 
@@ -981,7 +901,7 @@ app.get("/admin", async (req,res)=>{
 
   <div class="card" style="margin-top:16px">
     <h3>Customize (enable/disable, order, defaults)</h3>
-    <p class="muted">Drag rows to change list order. Click ▾ to open a list: drag posters for a <b>custom</b> order; change <b>Default sort</b> to preview; use <b>Restore from IMDb</b> to clear local add/remove/custom order.</p>
+    <p class="muted">Drag rows to change list order. Click ▾ to open a list: drag posters for a <b>custom</b> order, and pick which <b>sort options</b> appear in Stremio.</p>
     <div id="prefs"></div>
   </div>
 
@@ -1043,7 +963,6 @@ function attachThumbDnD(ul) {
   let src = null;
   ul.addEventListener('dragstart', (e)=>{
     const li = e.target.closest('li.thumb'); if (!li) return;
-    if (li.classList.contains('add')) return; // don't drag the add tile
     src = li; li.classList.add('dragging');
     e.dataTransfer.effectAllowed='move';
     e.dataTransfer.setData('text/plain', li.dataset.id || '');
@@ -1052,30 +971,11 @@ function attachThumbDnD(ul) {
   ul.addEventListener('dragover', (e)=>{
     e.preventDefault();
     if (!src) return;
-    const over = e.target.closest('li.thumb'); if (!over || over===src || over.classList.contains('add')) return;
+    const over = e.target.closest('li.thumb'); if (!over || over===src) return;
     const rect = over.getBoundingClientRect();
     const before = (e.clientY - rect.top) < rect.height/2;
     over.parentNode.insertBefore(src, before ? over : over.nextSibling);
   });
-}
-
-function sortClient(arr, sortKey){
-  const s = String(sortKey||'imdb').toLowerCase();
-  if (s==='imdb') return arr.slice();
-  if (s==='custom') return arr.slice(); // handled by server/save
-  const dir = s.endsWith('_asc') ? 1 : -1;
-  const key = s.split('_')[0];
-  const cmpNull = (a,b)=> (a==null && b==null)?0 : (a==null?1:(b==null?-1:(a<b?-1:(a>b?1:0))));
-  const toTs=(d,y)=>{ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(String(y)+'-01-01'); if(!Number.isNaN(t)) return t;} return null; };
-  return arr.map((m,i)=>({m,i})).sort((A,B)=>{
-    const a=A.m,b=B.m; let c=0;
-    if (key==='date') c = cmpNull(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
-    else if (key==='rating') c = cmpNull(a.imdbRating ?? null, b.imdbRating ?? null);
-    else if (key==='runtime') c = cmpNull(a.runtime ?? null, b.runtime ?? null);
-    else c = (a.name||'').localeCompare(b.name||'');
-    if (c===0){ c=(a.name||'').localeCompare(b.name||''); if(c===0) c=(a.id||'').localeCompare(b.id||''); if(c===0) c=A.i-B.i; }
-    return c*dir;
-  }).map(x=>x.m);
 }
 
 async function render() {
@@ -1104,26 +1004,30 @@ async function render() {
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
   });
-
-  // Blocked pills with Unblock action
-  {
-    const blockedWrap = document.getElementById('blockedPills');
-    blockedWrap.innerHTML = '';
-    const blocked = prefs.blocked || [];
-    if (!blocked.length) blockedWrap.textContent = '(none)';
-    blocked.forEach(lsid=>{
-      const pill = el('span',{class:'pill'},[
-        el('span',{text:lsid}),
-        el('span',{class:'x',text:' Unblock'})
-      ]);
-      pill.querySelector('.x').onclick = async ()=>{
-        await fetch('/api/unblock-list?admin='+ADMIN, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid }) });
-        location.reload();
-      };
-      blockedWrap.appendChild(pill);
-      blockedWrap.appendChild(document.createTextNode(' '));
-    });
-  }
+  
+// >>> INSERTED BLOCK: Blocked pills with Unblock action
+{
+const blockedWrap = document.getElementById('blockedPills');
+blockedWrap.innerHTML = '';
+const blocked = prefs.blocked || [];
+if (!blocked.length) blockedWrap.textContent = '(none)';
+blocked.forEach(lsid=>{
+const pill = el('span',{class:'pill'},[
+el('span',{text:lsid}),
+el('span',{class:'x',text:' Unblock'})
+]);
+pill.querySelector('.x').onclick = async ()=>{
+await fetch('/api/unblock-list?admin='+ADMIN, {
+method:'POST', headers:{'Content-Type':'application/json'},
+body: JSON.stringify({ lsid })
+});
+location.reload();
+};
+blockedWrap.appendChild(pill);
+blockedWrap.appendChild(document.createTextNode(' '));
+});
+}
+// <<< END INSERTED BLOCK
 
   document.getElementById('addUser').onclick = async (e)=>{
     e.preventDefault();
@@ -1160,37 +1064,19 @@ async function render() {
   table.appendChild(thead);
   const tbody = el('tbody');
 
-  function makeDrawer(lsid, sortSel, parentRow) {
+  function makeDrawer(lsid) {
     const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
     const td = el('td',{colspan:'6'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
-
-    // helpers to build li
-    const makeLi = (it)=>{
-      const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
-      li.appendChild(el('img',{src: it.poster || '', alt:''}));
-      const wrap = el('div',{},[
-        el('div',{class:'title',text: it.name || it.id}),
-        el('div',{class:'id',text: it.id})
-      ]);
-      li.appendChild(wrap);
-      // delete
-      const del = el('div',{class:'del',text:'×',title:'Remove'});
-      del.onclick = (e)=>{ e.stopPropagation(); li.remove(); };
-      li.appendChild(del);
-      return li;
-    };
-
     getListItems(lsid).then(({items})=>{
       td.innerHTML = '';
 
-      // tools line
+      // tools line: save/reset + sort options checkboxes
       const tools = el('div', {class:'rowtools'});
-      const saveBtn   = el('button',{text:'Save order'});
-      const resetBtn  = el('button',{text:'Reset order (to current sort)'});
-      const restoreBtn= el('button',{text:'Restore from IMDb'});
-      tools.appendChild(saveBtn); tools.appendChild(resetBtn); tools.appendChild(restoreBtn);
+      const saveBtn = el('button',{text:'Save order'});
+      const resetBtn = el('button',{text:'Reset order'});
+      tools.appendChild(saveBtn); tools.appendChild(resetBtn);
 
       // sort options visible
       const optsWrap = el('div',{class:'rowtools'});
@@ -1212,182 +1098,64 @@ async function render() {
       td.appendChild(tools);
       td.appendChild(optsWrap);
 
-      const ul = el('ul',{class:'thumbs', id: 'ul-'+lsid});
-
-      // initial render according to default/custom
+      const ul = el('ul',{class:'thumbs'});
+      let ordered = items.slice();
       const co = (prefs.customOrder && prefs.customOrder[lsid]) || [];
-      let working = items.slice();
       if (co && co.length) {
         const pos = new Map(co.map((id,i)=>[id,i]));
-        working.sort((a,b)=>{
+        ordered.sort((a,b)=>{
           const pa = pos.has(a.id) ? pos.get(a.id) : 1e9;
           const pb = pos.has(b.id) ? pos.get(b.id) : 1e9;
           return pa - pb;
         });
-      } else {
-        const def = (prefs.perListSort && prefs.perListSort[lsid]) || 'imdb';
-        working = (def==='imdb') ? items.slice() : sortClient(items, def);
       }
-
-      function renderUl(arr){
-        ul.innerHTML = '';
-        arr.forEach(it => ul.appendChild(makeLi(it)));
-        // add tile
-        const addLi = el('li',{class:'thumb add',draggable:'false'});
-        const box = el('div',{},[
-          el('div',{class:'title',text:'Add item (tt...)'}),
+      for (const it of ordered) {
+        const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
+        const img = el('img',{src: it.poster || '', alt:''});
+        const wrap = el('div',{},[
+          el('div',{class:'title',text: it.name || it.id}),
+          el('div',{class:'id',text: it.id})
         ]);
-        addLi.appendChild(box);
-        addLi.onclick = ()=>{
-          const t = prompt('Enter IMDb tconst (ttXXXXXXXX):');
-          if (!t) return;
-          const tt = String(t).trim();
-          if (!/^tt\\d{7,}$/i.test(tt)) { alert('Invalid tconst'); return; }
-          // Append placeholder now; server will fetch poster on save
-          ul.insertBefore(makeLi({id:tt,name:tt,poster:''}), addLi);
-        };
-        ul.appendChild(addLi);
+        li.appendChild(img); li.appendChild(wrap);
+        ul.appendChild(li);
       }
-
-      renderUl(working);
       td.appendChild(ul);
       attachThumbDnD(ul);
-// react to sort select changes live
-sortSel.onchange = ()=>{
-  prefs.perListSort = prefs.perListSort || {};
-  prefs.perListSort[lsid] = sortSel.value;
-  const mode = sortSel.value || 'imdb';
 
-  const idsNow = Array.from(ul.querySelectorAll('li.thumb'))
-    .filter(li => !li.classList.contains('add'))
-    .map(li => li.dataset.id);
-
-  // build current cards from DOM ids (preserve any new additions)
-  const map = new Map(items.map(x => [x.id, x]));
-  const domCards = idsNow.map(id => map.get(id) || { id, name:id, poster:'' });
-
-  const reordered = (mode === 'imdb') ? domCards : sortClient(domCards, mode);
-  renderUl(reordered);
-  attachThumbDnD(ul);
-};
-
-// SAVE: add/remove + persist custom order and flip default sort to custom
-saveBtn.onclick = async () => {
-  const ids = Array.from(ul.querySelectorAll('li.thumb'))
-    .filter(li => !li.classList.contains('add'))
-    .map(li => li.getAttribute('data-id'));
-
-  const origSet = new Set(items.map(x => x.id));
-  const nowSet  = new Set(ids);
-
-  const adds    = ids.filter(id => !origSet.has(id));
-  const removes = Array.from(origSet).filter(id => !nowSet.has(id));
-
-  saveBtn.disabled = true;
-  resetBtn.disabled = true;
-  restoreBtn.disabled = true;
-
-  try {
-    // 1) apply adds first so the items exist server-side
-    if (adds.length) {
-      await fetch('/api/list-add-items?admin=' + ADMIN, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ lsid, items: adds })
-      });
-    }
-
-    // 2) apply removals
-    if (removes.length) {
-      await fetch('/api/list-remove-items?admin=' + ADMIN, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ lsid, items: removes })
-      });
-    }
-
-    // 3) save the final explicit order → switches to custom on server
-    await saveCustomOrder(lsid, ids);
-
-    // reflect in UI immediately
-    sortSel.value = 'custom';
-    prefs.perListSort = prefs.perListSort || {};
-    prefs.perListSort[lsid] = 'custom';
-
-    // update our local `items` snapshot so repeated saves diff correctly
-    items.length = 0;
-    ids.forEach(id => items.push({ id, name: id, poster: '' })); // posters refresh on reopen
-
-    saveBtn.textContent = 'Saved ✓';
-    setTimeout(() => { saveBtn.textContent = 'Save order'; }, 1200);
-  } catch (e) {
-    console.error(e);
-    alert('Save failed');
-  } finally {
-    saveBtn.disabled = false;
-    resetBtn.disabled = false;
-    restoreBtn.disabled = false;
-  }
-};
-
-// RESET: reorder visually to *current* sort selection (does not save)
-resetBtn.onclick = ()=>{
-  const mode = (sortSel.value || 'imdb').toLowerCase();
-
-  // collect current DOM items (so new unsaved adds stay visible)
-  const domIds = Array.from(ul.querySelectorAll('li.thumb'))
-    .filter(li => !li.classList.contains('add'))
-    .map(li => li.dataset.id);
-
-  // map to card-like objects using original data when possible
-  const map = new Map(items.map(x => [x.id, x]));
-  const domCards = domIds.map(id => map.get(id) || { id, name:id, poster:'' });
-
-  const reordered =
-    (mode === 'imdb') ? domCards :
-    (mode === 'custom') ? domCards :
-    sortClient(domCards, mode);
-
-  renderUl(reordered);
-  attachThumbDnD(ul);
-};
-
-     
-      // Restore from IMDb = drop local adds/removes/custom and set sort→imdb
-      restoreBtn.onclick = async ()=>{
-        if (!confirm('This will remove local additions, un-hide removed items, and clear custom order for this list. Continue?')) return;
-        restoreBtn.disabled = true;
+      saveBtn.onclick = async ()=>{
+        const ids = Array.from(ul.querySelectorAll('li.thumb')).map(li=>li.getAttribute('data-id'));
+        saveBtn.disabled = true; resetBtn.disabled = true;
         try {
-          await fetch('/api/list-reset-local?admin='+ADMIN, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ lsid })
-          });
-          // reflect in row select
-          sortSel.value = 'imdb';
-          prefs.perListSort = prefs.perListSort || {};
-          prefs.perListSort[lsid] = 'imdb';
-          // reload the page so counts & items refresh from server
-          location.reload();
-        } catch(e){
-          console.error(e);
-          alert('Failed to restore');
+          await saveCustomOrder(lsid, ids);
+          saveBtn.textContent = "Saved ✓";
+          setTimeout(()=> saveBtn.textContent = "Save order", 1500);
+        } catch(e) {
+          alert("Failed to save custom order");
         } finally {
-          restoreBtn.disabled = false;
+          saveBtn.disabled = false; resetBtn.disabled = false;
         }
       };
-
+      resetBtn.onclick = ()=>{
+        ul.innerHTML = '';
+        for (const it of items) {
+          const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
+          li.appendChild(el('img',{src: it.poster || '', alt:''}));
+          const wrap = el('div',{},[
+            el('div',{class:'title',text: it.name || it.id}),
+            el('div',{class:'id',text: it.id})
+          ]);
+          li.appendChild(wrap);
+          ul.appendChild(li);
+        }
+        attachThumbDnD(ul);
+      };
     }).catch(()=>{ td.textContent = "Failed to load items."; });
     return tr;
   }
 
   function removeList(lsid){
     if (!confirm('Remove this list and block it from reappearing?')) return;
-    fetch('/api/remove-list?admin='+ADMIN, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ lsid })
-    })
+    fetch('/api/remove-list?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })})
       .then(()=> location.reload())
       .catch(()=> alert('Remove failed'));
   }
@@ -1396,32 +1164,26 @@ resetBtn.onclick = ()=>{
     const L = lists[lsid];
     const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
 
-    const chev = el('span',{class:'chev',text:'▾', title:'Open items & sort options'});
+    const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
     const chevTd = el('td',{},[chev]);
 
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
-    const nameCell = el('td',{});
+    const nameCell = el('td',{}); 
     nameCell.appendChild(el('div',{text:(L.name||lsid)}));
     nameCell.appendChild(el('small',{text:lsid}));
 
     const count = el('td',{text:String((L.ids||[]).length)});
 
     const sortSel = el('select');
-    // default value reflects prefs (imdb if not set)
-    const def = (prefs.perListSort && prefs.perListSort[lsid]) || 'imdb';
     SORT_OPTIONS.forEach(o=>{
       const opt = el('option',{value:o,text:o});
+      const def = (prefs.perListSort && prefs.perListSort[lsid]) || "name_asc";
       if (o===def) opt.setAttribute('selected','');
       sortSel.appendChild(opt);
     });
-
-    // Changing this should reshuffle items in the open drawer immediately (handled in drawer)
-    sortSel.addEventListener('change', ()=>{
-      prefs.perListSort = prefs.perListSort || {};
-      prefs.perListSort[lsid] = sortSel.value;
-    });
+    sortSel.addEventListener('change', ()=>{ prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = sortSel.value; });
 
     const rmBtn = el('button',{text:'Remove'});
     rmBtn.onclick = ()=> removeList(lsid);
@@ -1429,7 +1191,7 @@ resetBtn.onclick = ()=>{
     tr.appendChild(chevTd);
     tr.appendChild(el('td',{},[cb]));
     tr.appendChild(nameCell);
-    tr.appendChild(count));
+    tr.appendChild(count);
     tr.appendChild(el('td',{},[sortSel]));
     tr.appendChild(el('td',{},[rmBtn]));
 
@@ -1440,7 +1202,7 @@ resetBtn.onclick = ()=>{
       if (open) {
         chev.textContent = "▴";
         if (!drawer) {
-          drawer = makeDrawer(lsid, sortSel, tr);
+          drawer = makeDrawer(lsid);
           tr.parentNode.insertBefore(drawer, tr.nextSibling);
         } else {
           drawer.style.display = "";
@@ -1496,7 +1258,6 @@ render();
 
 // ----------------- BOOT -----------------
 (async () => {
-  // try boot from snapshot
   try {
     const snap = await loadSnapshot();
     if (snap) {
@@ -1512,7 +1273,6 @@ render();
     }
   } catch(e){ console.warn("[BOOT] load snapshot failed:", e.message); }
 
-  // initial sync
   fullSync({ rediscover: true }).then(()=> scheduleNextSync()).catch(e => {
     console.warn("[BOOT] background sync failed:", e.message);
   });
@@ -1522,4 +1282,3 @@ render();
     console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
   });
 })();
-
