@@ -1,0 +1,12 @@
+{
+  "name": "mylists-addon",
+  "version": "12.2.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
