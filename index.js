@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, sources & UI)
- *  v12.0.1
+ *  v12.1.0
  */
 "use strict";
 const express = require("express");
@@ -122,7 +122,7 @@ async function saveSnapshot(obj) {
   // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
-    await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
+    await fs.writeFile(SAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
   // GitHub (if enabled)
   if (!GH_ENABLED) return;
@@ -316,13 +316,14 @@ function applyCustomOrder(metas, lsid) {
     const pb = pos.has(b.id) ? pos.get(b.id) : Number.MAX_SAFE_INTEGER;
     if (pa !== pb) return pa - pb;
     return (a.name||"").localeCompare(b.name||"");
-    function sortByImdb(metas, lsid) {
+  });
+}
+// IMDb raw order
+function sortByImdb(metas, lsid) {
   const list = LISTS[lsid];
   if (!list || !Array.isArray(list.ids)) return metas.slice();
   const pos = new Map(list.ids.map((id, i) => [id, i]));
   return metas.slice().sort((a, b) => (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
-} 
-  });
 }
 
 // ----------------- SYNC -----------------
@@ -431,25 +432,20 @@ async function fullSync({ rediscover = true } = {}) {
       }
     }
 
-
-    // apply per-list add/remove edits to the next snapshot before we preload cards
-for (const id of Object.keys(next)) {
-  const ed = PREFS.listEdits && PREFS.listEdits[id];
-  if (!ed) continue;
-
-  const removed = new Set((ed.removed || []).filter(isImdb));
-  if (removed.size) next[id].ids = (next[id].ids || []).filter(tt => !removed.has(tt));
-
-  const add = (ed.added || []).filter(isImdb);
-  for (const tt of add) {
-    if (!next[id].ids.includes(tt)) next[id].ids.push(tt);
-    uniques.add(tt);
-  }
-}
-idsToPreload = Array.from(uniques);
+    // apply listEdits before we preload cards
+    for (const id of Object.keys(next)) {
+      const ed = PREFS.listEdits && PREFS.listEdits[id];
+      if (!ed) continue;
+      const removed = new Set((ed.removed || []).filter(isImdb));
+      if (removed.size) next[id].ids = (next[id].ids || []).filter(tt => !removed.has(tt));
+      const add = (ed.added || []).filter(isImdb);
+      for (const tt of add) if (!next[id].ids.includes(tt)) next[id].ids.push(tt);
+    }
+    const allIdsNow = new Set(); Object.values(next).forEach(L => (L.ids||[]).forEach(tt=>allIdsNow.add(tt)));
+    let idsToPreload2 = Array.from(allIdsNow);
 
     // preload cards
-    for (const tt of idsToPreload) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
+    for (const tt of idsToPreload2) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
 
     LISTS = next;
     LAST_SYNC_AT = Date.now();
@@ -488,7 +484,7 @@ idsToPreload = Array.from(uniques);
       ep2ser: Object.fromEntries(EP2SER)
     });
 
-    console.log(`[SYNC] ok – ${idsToPreload.length} ids across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
+    console.log(`[SYNC] ok – ${idsToPreload2.length} ids across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
   } catch (e) {
     console.error("[SYNC] failed:", e);
   } finally {
@@ -531,7 +527,7 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.0.1",
+  version: "12.1.0",
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
@@ -594,7 +590,15 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     const skip = Math.max(0, Number(extra.skip||0));
     const limit = Math.min(Number(extra.limit||100), 200);
 
-    let metas = (list.ids||[]).map(tt => CARD.get(tt) || cardFor(tt));
+    // apply per-list edits (immediate effect)
+    let ids = (list.ids || []).slice();
+    const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
+    const removed = new Set((ed.removed || []).filter(isImdb));
+    if (removed.size) ids = ids.filter(tt => !removed.has(tt));
+    const toAdd = (ed.added || []).filter(isImdb);
+    for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
+
+    let metas = ids.map(tt => CARD.get(tt) || cardFor(tt));
 
     if (q) {
       metas = metas.filter(m =>
@@ -604,10 +608,9 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       );
     }
 
-   if (sort === "custom") metas = applyCustomOrder(metas, lsid);
-else if (sort === "imdb") metas = sortByImdb(metas, lsid);
-else metas = stableSort(metas, sort);
-
+    if (sort === "custom") metas = applyCustomOrder(metas, lsid);
+    else if (sort === "imdb") metas = sortByImdb(metas, lsid);
+    else metas = stableSort(metas, sort);
 
     res.json({ metas: metas.slice(skip, skip+limit) });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
@@ -696,10 +699,8 @@ app.post("/api/unblock-list", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send("Failed"); }
 });
 
-
-
-// return cards for one list (for the drawer)
-app.get("/api/list-items", (req, res) => {
+// return cards for one list (for the drawer) — includes edits
+app.get("/api/list-items", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   const lsid = String(req.query.lsid || "");
   const list = LISTS[lsid];
@@ -805,8 +806,6 @@ app.post("/api/list-reset", async (req, res) => {
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
-
-
 // save a per-list custom order and set default sort=custom
 app.post("/api/custom-order", async (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -818,7 +817,7 @@ app.post("/api/custom-order", async (req,res) => {
     if (!list) return res.status(404).send("List not found");
 
     const set = new Set(list.ids);
-    const clean = order.filter(id => set.has(id)); // keep only items that exist in list
+    const clean = order.filter(id => set.has(id) || (PREFS.listEdits?.[lsid]?.added||[]).includes(id));
 
     PREFS.customOrder = PREFS.customOrder || {};
     PREFS.customOrder[lsid] = clean;
@@ -912,7 +911,7 @@ app.get("/api/debug-imdb", async (req,res)=>{
   }catch(e){ res.type("text").status(500).send("Fetch failed: "+e.message); }
 });
 
-// ------- Admin page (UI refresh + sources & sort-options) -------
+// ------- Admin page (UI refresh + sources, add/remove, resorting) -------
 app.get("/admin", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   const base = absoluteBase(req);
@@ -954,12 +953,17 @@ app.get("/admin", async (req,res)=>{
   .chev{cursor:pointer;font-size:18px;line-height:1;user-select:none}
   .drawer{background:#120f25}
   .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin:12px 0;padding:0;list-style:none}
-  .thumb{display:flex;gap:10px;align-items:center;border:1px solid var(--border);background:#1a1636;border-radius:12px;padding:6px 8px}
+  .thumb{position:relative;display:flex;gap:10px;align-items:center;border:1px solid var(--border);background:#1a1636;border-radius:12px;padding:6px 8px}
   .thumb img{width:52px;height:78px;object-fit:cover;border-radius:6px;background:#2a244e}
   .thumb .title{font-size:14px}
   .thumb .id{font-size:11px;color:var(--muted)}
   .thumb[draggable="true"]{cursor:grab}
   .thumb.dragging{opacity:.5}
+  .thumb .del{position:absolute;top:6px;right:6px;width:20px;height:20px;line-height:20px;text-align:center;border-radius:999px;background:#3a2c2c;color:#ffb4b4;font-weight:700;display:none}
+  .thumb:hover .del{display:block}
+  .thumb.add{align-items:center;justify-content:center;border:1px dashed var(--border);min-height:90px}
+  .addbox{width:100%;text-align:center}
+  .addbox input{margin-top:6px;width:100%;box-sizing:border-box;background:#1c1837;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px}
   .rowtools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
   .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
   .pill{display:inline-flex;align-items:center;gap:8px;background:#1c1837;border:1px solid var(--border);border-radius:999px;padding:6px 10px;color:#dcd8ff}
@@ -993,11 +997,11 @@ app.get("/admin", async (req,res)=>{
     <div class="card">
       <h3>Discovered & Sources</h3>
       <div style="margin-top:8px">
-  <div class="mini muted">Blocked lists (won't re-add on sync):</div>
-  <div id="blockedPills"></div>
-</div>
+        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+        <div id="blockedPills"></div>
+      </div>
 
-      <p class="mini muted">We merge your main user (+ extras) and explicit list URLs/IDs. Remove will also block the list (no re-add on next sync).</p>
+      <p class="mini muted">We merge your main user (+ extras) and explicit list URLs/IDs. Removing a list also blocks it so it won’t re-appear on the next sync.</p>
 
       <div class="row">
         <div><label>Add IMDb <b>User /lists</b> URL</label>
@@ -1028,7 +1032,7 @@ app.get("/admin", async (req,res)=>{
 
   <div class="card" style="margin-top:16px">
     <h3>Customize (enable/disable, order, defaults)</h3>
-    <p class="muted">Drag rows to change list order. Click ▾ to open a list: drag posters for a <b>custom</b> order, and pick which <b>sort options</b> appear in Stremio.</p>
+    <p class="muted">Drag rows to change list order. Click ▾ to open a list: drag posters for a <b>custom</b> order, pick which <b>sort options</b> appear in Stremio, add items by <code>tt…</code>, or remove items.</p>
     <div id="prefs"></div>
   </div>
 
@@ -1089,7 +1093,7 @@ function attachRowDnD(tbody) {
 function attachThumbDnD(ul) {
   let src = null;
   ul.addEventListener('dragstart', (e)=>{
-    const li = e.target.closest('li.thumb'); if (!li) return;
+    const li = e.target.closest('li.thumb'); if (!li || li.hasAttribute('data-add')) return;
     src = li; li.classList.add('dragging');
     e.dataTransfer.effectAllowed='move';
     e.dataTransfer.setData('text/plain', li.dataset.id || '');
@@ -1098,11 +1102,29 @@ function attachThumbDnD(ul) {
   ul.addEventListener('dragover', (e)=>{
     e.preventDefault();
     if (!src) return;
-    const over = e.target.closest('li.thumb'); if (!over || over===src) return;
+    const over = e.target.closest('li.thumb'); if (!over || over===src || over.hasAttribute('data-add')) return;
     const rect = over.getBoundingClientRect();
     const before = (e.clientY - rect.top) < rect.height/2;
     over.parentNode.insertBefore(src, before ? over : over.nextSibling);
   });
+}
+
+// client-side sort helpers (mirror server)
+function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(String(y)+'-01-01'); if(!Number.isNaN(t)) return t;} return null; }
+function stableSortClient(items, sortKey){
+  const s = String(sortKey||'name_asc').toLowerCase();
+  const dir = s.endsWith('_asc') ? 1 : -1;
+  const key = s.split('_')[0];
+  const cmpNullBottom = (a,b) => (a==null && b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0))));
+  return items.map((m,i)=>({m,i})).sort((A,B)=>{
+    const a=A.m,b=B.m; let c=0;
+    if (key==='date') c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
+    else if (key==='rating') c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    else if (key==='runtime') c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
+    else c = (a.name||'').localeCompare(b.name||'');
+    if (c===0){ c=(a.name||'').localeCompare(b.name||''); if(c===0) c=(a.id||'').localeCompare(b.id||''); if(c===0) c=A.i-B.i; }
+    return c*dir;
+  }).map(x=>x.m);
 }
 
 async function render() {
@@ -1131,49 +1153,29 @@ async function render() {
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
   });
-  
-// >>> INSERTED BLOCK: Blocked pills with Unblock action
-{
-const blockedWrap = document.getElementById('blockedPills');
-blockedWrap.innerHTML = '';
-const blocked = prefs.blocked || [];
-if (!blocked.length) blockedWrap.textContent = '(none)';
-blocked.forEach(lsid=>{
-const pill = el('span',{class:'pill'},[
-el('span',{text:lsid}),
-el('span',{class:'x',text:' Unblock'})
-]);
-pill.querySelector('.x').onclick = async ()=>{
-await fetch('/api/unblock-list?admin='+ADMIN, {
-method:'POST', headers:{'Content-Type':'application/json'},
-body: JSON.stringify({ lsid })
-});
-location.reload();
-};
-blockedWrap.appendChild(pill);
-blockedWrap.appendChild(document.createTextNode(' '));
-});
-}
-// <<< END INSERTED BLOCK
 
-  document.getElementById('addUser').onclick = async (e)=>{
-    e.preventDefault();
-    const v = document.getElementById('userInput').value.trim();
-    if (!v) return;
-    prefs.sources = prefs.sources || {users:[],lists:[]};
-    if (!prefs.sources.users.includes(v)) prefs.sources.users.push(v);
-    document.getElementById('userInput').value = '';
-    await saveAll('Added user');
-  };
-  document.getElementById('addList').onclick = async (e)=>{
-    e.preventDefault();
-    const v = document.getElementById('listInput').value.trim();
-    if (!v) return;
-    prefs.sources = prefs.sources || {users:[],lists:[]};
-    if (!prefs.sources.lists.includes(v)) prefs.sources.lists.push(v);
-    document.getElementById('listInput').value = '';
-    await saveAll('Added list');
-  };
+  // Blocked pills with Unblock action
+  {
+    const blockedWrap = document.getElementById('blockedPills');
+    blockedWrap.innerHTML = '';
+    const blocked = prefs.blocked || [];
+    if (!blocked.length) blockedWrap.textContent = '(none)';
+    blocked.forEach(lsid=>{
+      const pill = el('span',{class:'pill'},[
+        el('span',{text:lsid}),
+        el('span',{class:'x',text:' Unblock'})
+      ]);
+      pill.querySelector('.x').onclick = async ()=>{
+        await fetch('/api/unblock-list?admin='+ADMIN, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lsid })
+        });
+        location.reload();
+      };
+      blockedWrap.appendChild(pill);
+      blockedWrap.appendChild(document.createTextNode(' '));
+    });
+  }
 
   const container = document.getElementById('prefs'); container.innerHTML = "";
 
@@ -1196,14 +1198,18 @@ blockedWrap.appendChild(document.createTextNode(' '));
     const td = el('td',{colspan:'6'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
+
     getListItems(lsid).then(({items})=>{
       td.innerHTML = '';
+
+      const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
 
       // tools line: save/reset + sort options checkboxes
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
       const resetBtn = el('button',{text:'Reset order'});
-      tools.appendChild(saveBtn); tools.appendChild(resetBtn);
+      const resetAllBtn = el('button',{text:'Full reset'});
+      tools.appendChild(saveBtn); tools.appendChild(resetBtn); tools.appendChild(resetAllBtn);
 
       // sort options visible
       const optsWrap = el('div',{class:'rowtools'});
@@ -1226,57 +1232,117 @@ blockedWrap.appendChild(document.createTextNode(' '));
       td.appendChild(optsWrap);
 
       const ul = el('ul',{class:'thumbs'});
-      let ordered = items.slice();
-      const co = (prefs.customOrder && prefs.customOrder[lsid]) || [];
-      if (co && co.length) {
-        const pos = new Map(co.map((id,i)=>[id,i]));
-        ordered.sort((a,b)=>{
-          const pa = pos.has(a.id) ? pos.get(a.id) : 1e9;
-          const pb = pos.has(b.id) ? pos.get(b.id) : 1e9;
-          return pa - pb;
-        });
-      }
-      for (const it of ordered) {
+      td.appendChild(ul);
+
+      function liFor(it){
         const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
+        li.appendChild(el('div',{class:'del',text:'×'}));
+        li.querySelector('.del').onclick = async (e)=>{
+          e.stopPropagation();
+          if (!confirm('Remove this item from the list?')) return;
+          await fetch('/api/list-remove?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: it.id })});
+          await refresh();
+        };
         const img = el('img',{src: it.poster || '', alt:''});
         const wrap = el('div',{},[
           el('div',{class:'title',text: it.name || it.id}),
           el('div',{class:'id',text: it.id})
         ]);
         li.appendChild(img); li.appendChild(wrap);
-        ul.appendChild(li);
+        return li;
       }
-      td.appendChild(ul);
-      attachThumbDnD(ul);
+
+      function addTile(){
+        const li = el('li',{class:'thumb add','data-add':'1'});
+        const box = el('div',{class:'addbox'},[
+          el('div',{text:'Add by IMDb ID (tt...)'}),
+          el('input',{type:'text',placeholder:'tt1234567 or IMDb URL'})
+        ]);
+        li.appendChild(box);
+        li.onclick = ()=>{
+          const input = box.querySelector('input');
+          const doAdd = async ()=>{
+            const v = (input.value||'').trim();
+            const m = v.match(/tt\\d{7,}/i);
+            if (!m) { alert('Enter a valid IMDb id'); return; }
+            await fetch('/api/list-add?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: m[0] })});
+            await refresh();
+          };
+          input.addEventListener('keydown', e=>{ if (e.key==='Enter'){ e.preventDefault(); doAdd(); }});
+          input.addEventListener('blur', ()=>{ /* keep open */ });
+          input.focus();
+        };
+        return li;
+      }
+
+      function renderList(arr){
+        ul.innerHTML = '';
+        arr.forEach(it => ul.appendChild(liFor(it)));
+        ul.appendChild(addTile());
+        attachThumbDnD(ul);
+      }
+
+      function orderFor(sortKey){
+        if (sortKey === 'custom' && prefs.customOrder && Array.isArray(prefs.customOrder[lsid]) && prefs.customOrder[lsid].length){
+          const pos = new Map(prefs.customOrder[lsid].map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=>{
+            const pa = pos.has(a.id)?pos.get(a.id):1e9;
+            const pb = pos.has(b.id)?pos.get(b.id):1e9;
+            return pa-pb;
+          });
+        } else if (sortKey === 'imdb') {
+          return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
+        } else {
+          return stableSortClient(items, sortKey);
+        }
+      }
+
+      // initial render (respect current default sort)
+      const def = (prefs.perListSort && prefs.perListSort[lsid]) || 'name_asc';
+      renderList(orderFor(def));
 
       saveBtn.onclick = async ()=>{
-        const ids = Array.from(ul.querySelectorAll('li.thumb')).map(li=>li.getAttribute('data-id'));
-        saveBtn.disabled = true; resetBtn.disabled = true;
+        const ids = Array.from(ul.querySelectorAll('li.thumb[data-id]')).map(li=>li.getAttribute('data-id'));
+        saveBtn.disabled = true; resetBtn.disabled = true; resetAllBtn.disabled = true;
         try {
           await saveCustomOrder(lsid, ids);
+          // set dropdown to "custom" locally so user sees it
+          const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+          if (rowSel) rowSel.value = 'custom';
+          prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = 'custom';
           saveBtn.textContent = "Saved ✓";
           setTimeout(()=> saveBtn.textContent = "Save order", 1500);
         } catch(e) {
           alert("Failed to save custom order");
         } finally {
-          saveBtn.disabled = false; resetBtn.disabled = false;
+          saveBtn.disabled = false; resetBtn.disabled = false; resetAllBtn.disabled = false;
         }
       };
+
       resetBtn.onclick = ()=>{
-        ul.innerHTML = '';
-        for (const it of items) {
-          const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
-          li.appendChild(el('img',{src: it.poster || '', alt:''}));
-          const wrap = el('div',{},[
-            el('div',{class:'title',text: it.name || it.id}),
-            el('div',{class:'id',text: it.id})
-          ]);
-          li.appendChild(wrap);
-          ul.appendChild(li);
-        }
-        attachThumbDnD(ul);
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
+        renderList(orderFor(chosen));
       };
+
+      resetAllBtn.onclick = async ()=>{
+        if (!confirm('Full reset: clear custom order and local add/remove edits for this list?')) return;
+        resetAllBtn.disabled = true;
+        try{
+          await fetch('/api/list-reset?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
+          await refresh();
+        } finally { resetAllBtn.disabled = false; }
+      };
+
+      async function refresh(){
+        const r = await getListItems(lsid);
+        items = r.items || [];
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
+        renderList(orderFor(chosen));
+      }
     }).catch(()=>{ td.textContent = "Failed to load items."; });
+
     return tr;
   }
 
@@ -1310,7 +1376,18 @@ blockedWrap.appendChild(document.createTextNode(' '));
       if (o===def) opt.setAttribute('selected','');
       sortSel.appendChild(opt);
     });
-    sortSel.addEventListener('change', ()=>{ prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = sortSel.value; });
+    sortSel.addEventListener('change', ()=>{
+      prefs.perListSort = prefs.perListSort || {}; 
+      prefs.perListSort[lsid] = sortSel.value;
+
+      // if drawer is open, re-render to match selection immediately
+      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+      if (drawer && drawer.style.display !== "none") {
+        const reset = drawer.querySelector('button'); // first button is Save, next is Reset — safer to re-find UL and rebuild via reset click
+        const resetBtn = drawer.querySelectorAll('button')[1];
+        if (resetBtn) resetBtn.click();
+      }
+    });
 
     const rmBtn = el('button',{text:'Remove'});
     rmBtn.onclick = ()=> removeList(lsid);
