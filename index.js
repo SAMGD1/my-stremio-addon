@@ -37,7 +37,8 @@ const REQ_HEADERS = {
 };
 const CINEMETA = "https://v3-cinemeta.strem.io";
 
-const SORT_OPTIONS = ["custom","date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
+// include "imdb" (the raw order of the IMDb list)
+const SORT_OPTIONS = ["custom","imdb","date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
 const VALID_SORT = new Set(SORT_OPTIONS);
 
 // ----------------- STATE -----------------
@@ -46,6 +47,7 @@ let LISTS = Object.create(null);
 
 /** PREFS saved to snapshot */
 let PREFS = {
+  listEdits: {},          // { [lsid]: { added: ["tt..."], removed: ["tt..."] } }
   enabled: [],            // lsids shown in Stremio
   order: [],              // lsids order in manifest
   defaultList: "",
@@ -314,6 +316,12 @@ function applyCustomOrder(metas, lsid) {
     const pb = pos.has(b.id) ? pos.get(b.id) : Number.MAX_SAFE_INTEGER;
     if (pa !== pb) return pa - pb;
     return (a.name||"").localeCompare(b.name||"");
+    function sortByImdb(metas, lsid) {
+  const list = LISTS[lsid];
+  if (!list || !Array.isArray(list.ids)) return metas.slice();
+  const pos = new Map(list.ids.map((id, i) => [id, i]));
+  return metas.slice().sort((a, b) => (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+} 
   });
 }
 
@@ -422,6 +430,23 @@ async function fullSync({ rediscover = true } = {}) {
         next[id].ids = remapped;
       }
     }
+
+
+    // apply per-list add/remove edits to the next snapshot before we preload cards
+for (const id of Object.keys(next)) {
+  const ed = PREFS.listEdits && PREFS.listEdits[id];
+  if (!ed) continue;
+
+  const removed = new Set((ed.removed || []).filter(isImdb));
+  if (removed.size) next[id].ids = (next[id].ids || []).filter(tt => !removed.has(tt));
+
+  const add = (ed.added || []).filter(isImdb);
+  for (const tt of add) {
+    if (!next[id].ids.includes(tt)) next[id].ids.push(tt);
+    uniques.add(tt);
+  }
+}
+idsToPreload = Array.from(uniques);
 
     // preload cards
     for (const tt of idsToPreload) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
@@ -579,8 +604,10 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       );
     }
 
-    if (sort === "custom") metas = applyCustomOrder(metas, lsid);
-    else metas = stableSort(metas, sort);
+   if (sort === "custom") metas = applyCustomOrder(metas, lsid);
+else if (sort === "imdb") metas = sortByImdb(metas, lsid);
+else metas = stableSort(metas, sort);
+
 
     res.json({ metas: metas.slice(skip, skip+limit) });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
@@ -670,15 +697,115 @@ app.post("/api/unblock-list", async (req,res)=>{
 });
 
 
+
 // return cards for one list (for the drawer)
-app.get("/api/list-items", (req,res) => {
+app.get("/api/list-items", (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   const lsid = String(req.query.lsid || "");
   const list = LISTS[lsid];
   if (!list) return res.json({ items: [] });
-  const items = (list.ids||[]).map(tt => CARD.get(tt) || cardFor(tt));
+
+  // start with the list's current ids
+  let ids = (list.ids || []).slice();
+
+  // apply per-list edits (remove then add)
+  const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
+  const removed = new Set((ed.removed || []).filter(isImdb));
+  if (removed.size) ids = ids.filter(tt => !removed.has(tt));
+
+  const toAdd = (ed.added || []).filter(isImdb);
+  for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
+
+  const items = ids.map(tt => CARD.get(tt) || cardFor(tt));
   res.json({ items });
 });
+
+// add an item (tt...) to a list
+app.post("/api/list-add", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const lsid = String(req.body.lsid || "");
+    let tt = String(req.body.id || "").trim();
+    const m = tt.match(/tt\d{7,}/i);
+    if (!isListId(lsid) || !m) return res.status(400).send("Bad input");
+    tt = m[0];
+
+    PREFS.listEdits = PREFS.listEdits || {};
+    const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+    if (!ed.added.includes(tt)) ed.added.push(tt);
+    ed.removed = (ed.removed || []).filter(x => x !== tt); // un-remove if it was removed
+
+    // warm up metadata so it renders immediately
+    await getBestMeta(tt); CARD.set(tt, cardFor(tt));
+
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
+
+    res.status(200).send("Added");
+  } catch (e) { console.error(e); res.status(500).send("Failed"); }
+});
+
+// remove an item (tt...) from a list
+app.post("/api/list-remove", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const lsid = String(req.body.lsid || "");
+    let tt = String(req.body.id || "").trim();
+    const m = tt.match(/tt\d{7,}/i);
+    if (!isListId(lsid) || !m) return res.status(400).send("Bad input");
+    tt = m[0];
+
+    PREFS.listEdits = PREFS.listEdits || {};
+    const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+
+    if (!ed.removed.includes(tt)) ed.removed.push(tt);
+    ed.added = (ed.added || []).filter(x => x !== tt); // if it was locally added, drop it
+
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
+
+    res.status(200).send("Removed");
+  } catch (e) { console.error(e); res.status(500).send("Failed"); }
+});
+
+// clear custom order and all add/remove edits for a list
+app.post("/api/list-reset", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const lsid = String(req.body.lsid || "");
+    if (!isListId(lsid)) return res.status(400).send("Bad input");
+    if (PREFS.customOrder) delete PREFS.customOrder[lsid];
+    if (PREFS.listEdits) delete PREFS.listEdits[lsid];
+
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
+
+    res.status(200).send("Reset");
+  } catch (e) { console.error(e); res.status(500).send("Failed"); }
+});
+
+
 
 // save a per-list custom order and set default sort=custom
 app.post("/api/custom-order", async (req,res) => {
