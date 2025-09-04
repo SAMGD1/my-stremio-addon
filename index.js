@@ -39,8 +39,6 @@ const REQ_HEADERS = {
   "Cache-Control": "no-cache"
 };
 const CINEMETA = "https://v3-cinemeta.strem.io";
-// Use a built-in type so all clients (esp. Android/TV) render the sort UI
-const CATALOG_TYPE = String(process.env.CATALOG_TYPE || "movie").toLowerCase();
 
 // include "imdb" (raw list order) and mirror IMDb’s release-date order when available
 const SORT_OPTIONS = [
@@ -373,7 +371,7 @@ function manifestKey() {
   const perOpts = JSON.stringify(PREFS.sortOptions || {});
   const custom = Object.keys(PREFS.customOrder || {}).length;
   const order = (PREFS.order || []).join(",");
-return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}#t${CATALOG_TYPE}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}`;
 }
 
 async function harvestSources() {
@@ -579,7 +577,7 @@ const baseManifest = {
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["movie","series"],     // NOTE: lower-case
+  types: ["my lists","movie","series"],     // NOTE: lower-case
   idPrefixes: ["tt"]
 };
 function getEnabledOrderedIds() {
@@ -594,14 +592,7 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-   type: CATALOG_TYPE,
-    extraSupported: ["search","skip","limit","sort"],
-   extra: [
-     { name:"search" }, { name:"skip" }, { name:"limit" },
-     { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
-   ],
-    extraRequired: ["sort"],
-    // exact match with manifest -> fixes Android sort menu
+    type: "my lists", // exact match with manifest -> fixes Android sort menu
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
