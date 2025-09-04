@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, sources & UI)
- *  v12.1.0
+ *  v12.2.0
  */
 "use strict";
 const express = require("express");
@@ -12,9 +12,12 @@ const HOST  = "0.0.0.0";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 
-const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/ur136127821/lists/
+const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // e.g. https://www.imdb.com/user/urXXXXXXX/lists/
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
+
+// also fetch IMDb's own "release date" orders so our date sorting matches IMDb exactly
+const IMDB_FETCH_RELEASE_ORDERS = String(process.env.IMDB_FETCH_RELEASE_ORDERS || "true").toLowerCase() !== "false";
 
 // Optional fallback: comma-separated ls ids
 const IMDB_LIST_IDS = (process.env.IMDB_LIST_IDS || "")
@@ -28,7 +31,7 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.0";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.2";
 const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -37,12 +40,29 @@ const REQ_HEADERS = {
 };
 const CINEMETA = "https://v3-cinemeta.strem.io";
 
-// include "imdb" (the raw order of the IMDb list)
-const SORT_OPTIONS = ["custom","imdb","date_asc","date_desc","rating_asc","rating_desc","runtime_asc","runtime_desc","name_asc","name_desc"];
+// include "imdb" (raw list order) and will mirror IMDb’s own release-date order when available
+const SORT_OPTIONS = [
+  "custom","imdb",
+  "date_asc","date_desc",
+  "rating_asc","rating_desc",
+  "runtime_asc","runtime_desc",
+  "name_asc","name_desc"
+];
 const VALID_SORT = new Set(SORT_OPTIONS);
 
 // ----------------- STATE -----------------
-/** LISTS = { lsid: { id, name, url, ids:[tt...] } } */
+/** LISTS = {
+ *   [lsid]: {
+ *     id, name, url,
+ *     ids:[tt...],                 // our default order (= IMDb raw order after episode→series upgrade)
+ *     orders: {                    // optional IMDb-backed orders we keep
+ *        imdb:[tt...],             // original raw imdb order (after episode upgrade/dedupe)
+ *        date_asc:[tt...],
+ *        date_desc:[tt...]
+ *     }
+ *   }
+ * }
+ */
 let LISTS = Object.create(null);
 
 /** PREFS saved to snapshot */
@@ -122,7 +142,7 @@ async function saveSnapshot(obj) {
   // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
-    await fs.writeFile(SAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
+    await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
   // GitHub (if enabled)
   if (!GH_ENABLED) return;
@@ -155,9 +175,7 @@ function normalizeListIdOrUrl(s) {
   s = String(s).trim();
   const m = s.match(/ls\d{6,}/i);
   if (m) return { id: m[0], url: `https://www.imdb.com/list/${m[0]}/` };
-  if (/imdb\.com\/list\//i.test(s)) {
-    return { id: null, url: s };
-  }
+  if (/imdb\.com\/list\//i.test(s)) return { id: null, url: s };
   return null;
 }
 async function discoverFromUserLists(userListsUrl) {
@@ -200,23 +218,37 @@ function nextPageUrl(html) {
   try { return new URL(m[1], "https://www.imdb.com").toString(); } catch { return null; }
 }
 async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
-  const modes = ["detail", "grid", "compact"];
+  // raw order (whatever the list currently displays by default)
   const seen = new Set(); const ids = [];
-  for (const mode of modes) {
-    let url = withParam(listUrl, "mode", mode);
-    let pages = 0;
-    while (url && pages < maxPages) {
-      let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
-      const found = tconstsFromHtml(html);
-      let added = 0;
-      for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); added++; }
-      pages++;
-      const next = nextPageUrl(html);
-      if (!next || !added) break;
-      url = next;
-      await sleep(80);
-    }
-    if (ids.length) break;
+  let url = withParam(listUrl, "mode", "detail");
+  let pages = 0;
+  while (url && pages < maxPages) {
+    let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
+    const found = tconstsFromHtml(html);
+    let added = 0;
+    for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); added++; }
+    pages++;
+    const next = nextPageUrl(html);
+    if (!next || !added) break;
+    url = next;
+    await sleep(80);
+  }
+  return ids;
+}
+// fetch order as shown by IMDb when the list is sorted a certain way
+async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, maxPages = 80) {
+  const seen = new Set(); const ids = [];
+  let url = withParam(withParam(listUrl, "mode", "detail"), "sort", sortSpec);
+  let pages = 0;
+  while (url && pages < maxPages) {
+    let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
+    const found = tconstsFromHtml(html);
+    for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); }
+    pages++;
+    const next = nextPageUrl(html);
+    if (!next) break;
+    url = next;
+    await sleep(80);
   }
   return ids;
 }
@@ -318,11 +350,16 @@ function applyCustomOrder(metas, lsid) {
     return (a.name||"").localeCompare(b.name||"");
   });
 }
-// IMDb raw order
-function sortByImdb(metas, lsid) {
+// order helper (imdb/date_asc/date_desc) backed by LISTS[lsid].orders
+function sortByOrderKey(metas, lsid, key) {
   const list = LISTS[lsid];
-  if (!list || !Array.isArray(list.ids)) return metas.slice();
-  const pos = new Map(list.ids.map((id, i) => [id, i]));
+  if (!list) return metas.slice();
+  const arr =
+    (list.orders && Array.isArray(list.orders[key]) && list.orders[key].length)
+      ? list.orders[key]
+      : (key === "imdb" ? (list.ids || []) : null);
+  if (!arr) return metas.slice();
+  const pos = new Map(arr.map((id, i) => [id, i]));
   return metas.slice().sort((a, b) => (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
 }
 
@@ -338,19 +375,19 @@ function manifestKey() {
 }
 
 async function harvestSources() {
-  // 1) your primary IMDB_USER_URL
+  // 1) main IMDB_USER_URL
   const discovered = [];
   if (IMDB_USER_URL) {
     try { discovered.push(...await discoverFromUserLists(IMDB_USER_URL)); } catch(e){ console.warn("[DISCOVER] main failed:", e.message); }
   }
-  // 2) extra users from PREFS.sources.users
+  // 2) extra users
   const users = Array.from(new Set((PREFS.sources?.users || []).map(s => String(s).trim()).filter(Boolean)));
   for (const u of users) {
     try { discovered.push(...await discoverFromUserLists(u)); }
     catch(e){ console.warn("[DISCOVER] user", u, "failed:", e.message); }
     await sleep(80);
   }
-  // 3) explicit lists from PREFS.sources.lists + env fallback
+  // 3) explicit lists + env fallback
   const addlRaw = (PREFS.sources?.lists || []).concat(IMDB_LIST_IDS || []);
   for (const raw of addlRaw) {
     const norm = normalizeListIdOrUrl(raw);
@@ -391,7 +428,7 @@ async function fullSync({ rediscover = true } = {}) {
 
     const next = Object.create(null);
     const seen = new Set();
-    for (const d of discovered) { next[d.id] = { id: d.id, name: d.name || d.id, url: d.url, ids: [] }; seen.add(d.id); }
+    for (const d of discovered) { next[d.id] = { id: d.id, name: d.name || d.id, url: d.url, ids: [], orders: {} }; seen.add(d.id); }
     // keep previous ones that were not rediscovered *and* not blocked
     const blocked = new Set(PREFS.blocked || []);
     for (const id of Object.keys(LISTS)) if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
@@ -400,16 +437,33 @@ async function fullSync({ rediscover = true } = {}) {
     const uniques = new Set();
     for (const id of Object.keys(next)) {
       const url = next[id].url || `https://www.imdb.com/list/${id}/`;
-      let ids = [];
-      try { ids = await fetchImdbListIdsAllPages(url); } catch {}
-      next[id].ids = ids;
-      ids.forEach(tt => uniques.add(tt));
+
+      let raw = [];
+      try { raw = await fetchImdbListIdsAllPages(url); } catch {}
+      next[id].ids = raw.slice();
+      raw.forEach(tt => uniques.add(tt));
+
+      if (IMDB_FETCH_RELEASE_ORDERS) {
+        try {
+          const asc  = await fetchImdbOrder(url, "release_date,asc");
+          const desc = await fetchImdbOrder(url, "release_date,desc");
+          next[id].orders = next[id].orders || {};
+          next[id].orders.date_asc  = asc.slice();
+          next[id].orders.date_desc = desc.slice();
+          asc.forEach(tt => uniques.add(tt));
+          desc.forEach(tt => uniques.add(tt));
+        } catch (e) {
+          console.warn("[SYNC] release_date sort fetch failed for", id, e.message);
+        }
+      }
+
       await sleep(60);
     }
 
     // episode → series (optional)
     let idsToPreload = Array.from(uniques);
     if (PREFS.upgradeEpisodes) {
+      // build upgrade set and preload meta/EP2SER
       const up = new Set();
       for (const tt of idsToPreload) {
         const rec = await getBestMeta(tt);
@@ -419,33 +473,39 @@ async function fullSync({ rediscover = true } = {}) {
         } else up.add(tt);
       }
       idsToPreload = Array.from(up);
-      // remap per list
-      for (const id of Object.keys(next)) {
-        const remapped = []; const s = new Set();
-        for (const tt of next[id].ids) {
+
+      // helper: remap an array (episode → series) and dedupe while preserving order
+      const remap = (arr) => {
+        if (!Array.isArray(arr)) return [];
+        const out = []; const S = new Set();
+        for (const tt of arr) {
           let fin = tt;
           const r = BEST.get(tt);
-          if (!r || !r.meta) { const z = await episodeParentSeries(tt); if (z) fin = z; }
-          if (!s.has(fin)) { s.add(fin); remapped.push(fin); }
+          if (!r || !r.meta) { const z = EP2SER.get(tt); if (z) fin = z; }
+          if (!S.has(fin)) { S.add(fin); out.push(fin); }
         }
-        next[id].ids = remapped;
+        return out;
+      };
+
+      // remap per list
+      for (const id of Object.keys(next)) {
+        next[id].ids = remap(next[id].ids);
+        next[id].orders = next[id].orders || {};
+        if (next[id].orders.date_asc)  next[id].orders.date_asc  = remap(next[id].orders.date_asc);
+        if (next[id].orders.date_desc) next[id].orders.date_desc = remap(next[id].orders.date_desc);
+        // store imdb raw order explicitly
+        next[id].orders.imdb = next[id].ids.slice();
+      }
+    } else {
+      // still keep imdb raw order
+      for (const id of Object.keys(next)) {
+        next[id].orders = next[id].orders || {};
+        next[id].orders.imdb = next[id].ids.slice();
       }
     }
 
-    // apply listEdits before we preload cards
-    for (const id of Object.keys(next)) {
-      const ed = PREFS.listEdits && PREFS.listEdits[id];
-      if (!ed) continue;
-      const removed = new Set((ed.removed || []).filter(isImdb));
-      if (removed.size) next[id].ids = (next[id].ids || []).filter(tt => !removed.has(tt));
-      const add = (ed.added || []).filter(isImdb);
-      for (const tt of add) if (!next[id].ids.includes(tt)) next[id].ids.push(tt);
-    }
-    const allIdsNow = new Set(); Object.values(next).forEach(L => (L.ids||[]).forEach(tt=>allIdsNow.add(tt)));
-    let idsToPreload2 = Array.from(allIdsNow);
-
     // preload cards
-    for (const tt of idsToPreload2) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
+    for (const tt of idsToPreload) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
 
     LISTS = next;
     LAST_SYNC_AT = Date.now();
@@ -484,7 +544,7 @@ async function fullSync({ rediscover = true } = {}) {
       ep2ser: Object.fromEntries(EP2SER)
     });
 
-    console.log(`[SYNC] ok – ${idsToPreload2.length} ids across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
+    console.log(`[SYNC] ok – ${idsToPreload.length} ids across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
   } catch (e) {
     console.error("[SYNC] failed:", e);
   } finally {
@@ -527,11 +587,11 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.1.0",
+  version: "12.2.0",
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["my lists","movie","series"],
+  types: ["my lists","movie","series"],   // NOTE: "my lists" is lower-case
   idPrefixes: ["tt"]
 };
 function getEnabledOrderedIds() {
@@ -546,7 +606,7 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-    type: "My lists",
+    type: "my lists", // <-- exact match with manifest (fixes mobile dropdown)
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
@@ -609,8 +669,12 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     }
 
     if (sort === "custom") metas = applyCustomOrder(metas, lsid);
-    else if (sort === "imdb") metas = sortByImdb(metas, lsid);
-    else metas = stableSort(metas, sort);
+    else if (sort === "imdb") metas = sortByOrderKey(metas, lsid, "imdb");
+    else if (sort === "date_asc" || sort === "date_desc") {
+      // if we have IMDb-backed order, use it; else fall back to local sort
+      const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
+      metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
+    } else metas = stableSort(metas, sort);
 
     res.json({ metas: metas.slice(skip, skip+limit) });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
@@ -816,8 +880,8 @@ app.post("/api/custom-order", async (req,res) => {
     const list = LISTS[lsid];
     if (!list) return res.status(404).send("List not found");
 
-    const set = new Set(list.ids);
-    const clean = order.filter(id => set.has(id) || (PREFS.listEdits?.[lsid]?.added||[]).includes(id));
+    const set = new Set(list.ids.concat(PREFS.listEdits?.[lsid]?.added || []));
+    const clean = order.filter(id => set.has(id)); // keep only items that exist in list (incl. local adds)
 
     PREFS.customOrder = PREFS.customOrder || {};
     PREFS.customOrder[lsid] = clean;
@@ -986,7 +1050,7 @@ app.get("/admin", async (req,res)=>{
       <ul>${rows}</ul>
       <div class="rowtools">
         <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button class="btn2">Sync IMDb Lists Now</button></form>
-        <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge caches & re-sync?')"><button>🧹 Purge & Sync</button></form>
+        <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge & re-sync everything?')"><button>🧹 Purge & Sync</button></form>
         <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
       </div>
       <h4>Manifest URL</h4>
