@@ -4,18 +4,40 @@
 "use strict";
 const express = require("express");
 const fs = require("fs/promises");
+
+
+// --------- PUBLIC MULTI-USER ADDITIONS ----------
 const crypto = require("crypto");
 
+const USERS_DIR = "users";                // GitHub folder
+let CURRENT_UID = null;                   // which workspace is mounted in memory
+const inflight = new Map();               // uid -> Promise that represents a running sync/save
+const GH_CONCURRENCY_DELAY_MS = 250;      // small delay to help avoid GH 409s
+
+function uidFromReq(req){
+  if (req.params && req.params.uid) return String(req.params.uid);
+  if (req.query && req.query.admin && req.query.admin !== ADMIN_PASSWORD) return String(req.query.admin);
+  return null;
+}
+function randomUID(n=12){
+  const ALPH='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_';
+  return Array.from({length:n},()=>ALPH[Math.floor(Math.random()*ALPH.length)]).join('');
+}
+async function enqueue(uid, task){
+  const prev = inflight.get(uid) || Promise.resolve();
+  let release;
+  const next = new Promise(r => release = r);
+  inflight.set(uid, next);
+  await prev;
+  try { return await task(); }
+  finally { release(); if (inflight.get(uid) === next) inflight.delete(uid); }
+}
 // ----------------- ENV -----------------
 const PORT  = Number(process.env.PORT || 7000);
 const HOST  = "0.0.0.0";
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Stremio_172";
 const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
-// Public generator mode
-const PUBLIC_MODE = true; // always on
-const USERS_DIR = "users"; // per-user workspace root in data repo
-
 
 const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // https://www.imdb.com/user/urXXXXXXX/lists/
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
@@ -106,18 +128,96 @@ const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
 
+
 async function fetchText(url) {
-  const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
-  if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
-  return r.text();
+  let attempts = 0;
+  while (attempts < 5) {
+    attempts++;
+    try{
+      const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
+      if (r.ok) return await r.text();
+      const status = r.status;
+      if ((status===429 || status===503 || status===502) && attempts < 5){
+        await sleep(300 + Math.floor(Math.random()*600));
+        continue;
+      }
+      throw new Error(`GET ${url} -> ${status}`);
+    }catch(e){
+      if (attempts>=5) throw e;
+      await sleep(250 + Math.floor(Math.random()*600));
+    }
+  }
+  throw new Error(`GET ${url} failed after retries`);
 }
-async function fetchJson(url) {
-  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept":"application/json" }, redirect:"follow" });
-  if (!r.ok) return null;
-  try { return await r.json(); } catch { return null; }
+return null; }
 }
 const withParam = (u,k,v) => { const x = new URL(u); x.searchParams.set(k,v); return x.toString(); };
 
+
+// ---- GitHub helpers (extended) ----
+async function ghReadJson(path){
+  if (!GH_ENABLED) return null;
+  try{
+    const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+    const txt = Buffer.from(data.content || "", "base64").toString("utf8");
+    return { sha: data.sha || null, json: JSON.parse(txt || "{}") };
+  }catch(e){ return null; }
+}
+
+async function ghWriteJson(path, obj, commitMsg="Update snapshot.json", shaHint=null, retries=5){
+  if (!GH_ENABLED) return;
+  const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
+  async function attempt(retry){
+    const sha = await ghGetSha(path);
+    const body = { message: commitMsg, content, branch: GITHUB_BRANCH };
+    if (sha || shaHint) body.sha = sha || shaHint;
+    try { await gh("PUT", `/contents/${encodeURIComponent(path)}`, body); }
+    catch(e){
+      const msg = String(e.message||"");
+      const is409 = msg.includes("409") || msg.includes("does not match");
+      if (is409 && retry>0){
+        await sleep(GH_CONCURRENCY_DELAY_MS + Math.floor(Math.random()*400));
+        return attempt(retry-1);
+      }
+      throw e;
+    }
+  }
+  return attempt(retries);
+}
+
+async function saveSnapshotScoped(obj){
+  try{
+    await fs.mkdir("data", { recursive: true });
+    const localPath = CURRENT_UID ? `${USERS_DIR}/${CURRENT_UID}/snapshot.json` : SNAP_LOCAL;
+    await fs.mkdir(require("path").dirname(localPath), { recursive:true }).catch(()=>{});
+    await fs.writeFile(localPath, JSON.stringify(obj, null, 2), "utf8");
+  }catch {}
+  if (!GH_ENABLED) return;
+  const path = CURRENT_UID ? `${USERS_DIR}/${CURRENT_UID}/snapshot.json` : "data/snapshot.json";
+  await ghWriteJson(path, obj, "Update snapshot.json");
+}
+
+async function loadSnapshotScoped(uid){
+  CURRENT_UID = uid || null;
+  BEST.clear(); FALLBK.clear(); EP2SER.clear(); CARD.clear();
+  LAST_MANIFEST_KEY = ""; MANIFEST_REV = 1; LAST_SYNC_AT = 0;
+  LISTS = {}; PREFS = JSON.parse(JSON.stringify(DEFAULT_PREFS));
+  const path = uid ? `${USERS_DIR}/${uid}/snapshot.json` : "data/snapshot.json";
+  const data = await ghReadJson(path);
+  if (data && data.json && Object.keys(data.json).length){
+    const snap = data.json;
+    LISTS = snap.lists || {};
+    PREFS = Object.assign(JSON.parse(JSON.stringify(DEFAULT_PREFS)), snap.prefs || {});
+    if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
+    if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
+    if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
+    MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
+    LAST_SYNC_AT = snap.lastSyncAt || 0;
+    LAST_MANIFEST_KEY = manifestKey();
+    return true;
+  }
+  return false;
+}
 // ---- GitHub snapshot (optional) ----
 async function gh(method, path, bodyObj) {
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${path}`;
@@ -137,92 +237,19 @@ async function gh(method, path, bodyObj) {
   }
   return r.json();
 }
-
-async function ghReadJson(path) {
-  try {
-    const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
-    const buf = Buffer.from(data.content, "base64").toString("utf8");
-    return JSON.parse(buf);
-  } catch {
-    return null;
-  }
-}
-// ---- per-user snapshot helpers ----
-let __CURRENT_UID = null;
-function currentUid(){ return __CURRENT_UID; }
-async function loadUserSnapshot(uid){
-  if (!uid) return null;
-  if (!GH_ENABLED) return null; // public mode relies on GitHub
-  return await ghReadJson(`${USERS_DIR}/${uid}/snapshot.json`);
-}
-async function saveUserSnapshot(uid, obj){
-  if (!uid) return;
-  const metaPath = `${USERS_DIR}/${uid}/meta.json`;
-  const snapPath = `${USERS_DIR}/${uid}/snapshot.json`;
-  // update meta timestamps
-  const oldMeta = await ghReadJson(metaPath) || {};
-  const meta = { ...oldMeta, updatedAt: Date.now(), createdAt: oldMeta.createdAt || Date.now(), adminKey: uid };
-  const metaContent = Buffer.from(JSON.stringify(meta, null, 2)).toString("base64");
-  const metaSha = await ghGetSha(metaPath);
-  await gh("PUT", `/contents/${encodeURIComponent(metaPath)}`, { message:`Update ${metaPath}`, content: metaContent, branch: GITHUB_BRANCH, ...(metaSha?{sha:metaSha}:{}) });
-  // write snapshot
-  const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
-  const sha = await ghGetSha(snapPath);
-  await gh("PUT", `/contents/${encodeURIComponent(snapPath)}`, { message:`Update ${snapPath}`, content, branch: GITHUB_BRANCH, ...(sha?{sha:sha}:{}) });
-}
-
-async function applySnapshotFor(uid){
-  __CURRENT_UID = uid;
-  const snap = await loadUserSnapshot(uid);
-  if (!snap){
-    LISTS = Object.create(null);
-    PREFS = { enabled:[], order:[], perListSort:{}, sortOptions:{}, customOrder:{}, sources:{ users:[], lists:[] }, blocked:[] };
-    LAST_SYNC_AT = 0; MANIFEST_REV = 1; LAST_MANIFEST_KEY = "";
-    FALLBK = new Map(); CARD = new Map(); EP2SER = new Map();
-  } else {
-    LISTS = snap.lists || Object.create(null);
-    PREFS = { enabled:[], order:[], perListSort:{}, sortOptions:{}, customOrder:{}, ...(snap.prefs||{}) };
-    LAST_SYNC_AT = snap.lastSyncAt || 0;
-    MANIFEST_REV = snap.manifestRev || 1;
-    LAST_MANIFEST_KEY = manifestKey();
-    FALLBK = new Map(Object.entries(snap.fallback || {}));
-    CARD   = new Map(Object.entries(snap.cards || {}));
-    EP2SER = new Map(Object.entries(snap.ep2ser || {}));
-  }
-}
-async function persistCurrent(){
-  const obj = {
-    lastSyncAt: LAST_SYNC_AT,
-    manifestRev: MANIFEST_REV,
-    lists: LISTS,
-    prefs: PREFS,
-    fallback: Object.fromEntries(FALLBK),
-    cards: Object.fromEntries(CARD),
-    ep2ser: Object.fromEntries(EP2SER)
-  };
-  if (__CURRENT_UID) await saveUserSnapshot(__CURRENT_UID, obj);
-  else await saveSnapshot(obj);
-}
-function clearWorkspace(){ __CURRENT_UID = null; }
-
 async function ghGetSha(path) {
   try {
     const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
     return data && data.sha || null;
   } catch { return null; }
 }
-
-async function saveSnapshot(obj) {
-  // If we're in a per-user workspace, write into users/<uid>/snapshot.json
-  if (typeof __CURRENT_UID === "string" && __CURRENT_UID) {
-    try { await saveUserSnapshot(__CURRENT_UID, obj); } catch {}
-    return;
-  }
-  // legacy global path (for private mode)
+async function saveSnapshotScoped(obj) {
+  // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
     await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
+  // GitHub (if enabled)
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
   const path = "data/snapshot.json";
@@ -231,7 +258,6 @@ async function saveSnapshot(obj) {
   if (sha) body.sha = sha;
   await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
 }
-
 async function loadSnapshot() {
   // try GitHub first
   if (GH_ENABLED) {
@@ -599,7 +625,7 @@ async function fullSync({ rediscover = true } = {}) {
       console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
     }
 
-    await saveSnapshot({
+    await saveSnapshotScoped({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -628,18 +654,79 @@ function maybeBackgroundSync() {
 }
 
 // ----------------- SERVER -----------------
-const app = express();
-app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
-app.use(express.json({ limit: "1mb" }));
-// CORS for Stremio Web
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, x-admin-key");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
+
+  }
   next();
 });
 
+const app = express();
+// --- public generator landing page ---
+app.get("/", (req,res)=>{
+  res.setHeader("Content-Type","text/html; charset=utf-8");
+  res.end(`<!doctype html>
+<html><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>My Lists – Generator</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;background:#0f1121;color:#e6e7ef;padding:28px}
+  .box{max-width:820px;margin:0 auto;background:#171a30;border-radius:16px;padding:24px;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+  input,button{font-size:16px}
+  input[type=text]{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #2a2e52;background:#0e1124;color:#e6e7ef}
+  button{background:#6753ff;border:none;color:#fff;padding:10px 14px;border-radius:12px;cursor:pointer}
+  button[disabled]{opacity:.5;cursor:not-allowed}
+  small{color:#a7a9c9}
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>Make your own Stremio add-on from IMDb lists</h1>
+    <p>Paste either an <b>IMDb user /lists</b> page or one or more <b>list URLs/IDs</b>.</p>
+    <div>
+      <label>IMDb user /lists URL</label>
+      <input id="userUrl" type="text" placeholder="https://www.imdb.com/user/ur1234567/lists/">
+    </div>
+    <p style="margin:8px 0;text-align:center">— or —</p>
+    <div>
+      <label>IMDb list URLs or lsIDs (comma/space separated)</label>
+      <input id="lists" type="text" placeholder="https://www.imdb.com/list/ls123456/, ls7777777, ...">
+    </div>
+    <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+      <button id="go">Generate add-on</button> <small id="msg"></small>
+    </div>
+    <div id="out" style="margin-top:20px"></div>
+  </div>
+<script>
+  const $ = s => document.querySelector(s);
+  $('#go').onclick = async ()=>{
+    const user = $('#userUrl').value.trim();
+    const lists = $('#lists').value.trim();
+    if (!user && !lists){ $('#msg').textContent="Enter a user or lists"; return; }
+    $('#go').disabled = true; $('#msg').textContent = "Creating…";
+    try{
+      const r = await fetch('/api/create', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ user, lists })});
+      const j = await r.json();
+      if (!r.ok) throw new Error(j && j.error || 'Failed');
+      $('#out').innerHTML = '<h3>All set!</h3>'
+        + '<p><b>Admin page:</b> <a target="_blank" href="'+j.adminUrl+'">'+j.adminUrl+'</a></p>'
+        + '<p><b>Manifest URL:</b> <code>'+j.manifestUrl+'</code></p>'
+        + '<p><a target="_blank" href="'+j.installUrl+'">Install in Stremio</a></p>';
+      $('#msg').textContent = "";
+    }catch(e){ $('#msg').textContent = e.message || String(e); }
+    finally{ $('#go').disabled = false; }
+  };
+</script>
+</body></html>`);
+});
+
+// All /api requests: if admin=<uid> and not the global ADMIN_PASSWORD, mount that workspace
+app.use("/api", async (req,res,next)=>{
+  const uid = uidFromReq(req);
+  if (uid && uid !== ADMIN_PASSWORD){
+    await loadSnapshotScoped(uid).catch(()=>{});
+
+app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
+app.use(express.json({ limit: "1mb" }));
 
 function addonAllowed(req){
   if (!SHARED_SECRET) return true;
@@ -648,9 +735,7 @@ function addonAllowed(req){
 }
 function adminAllowed(req){
   const u = new URL(req.originalUrl, `http://${req.headers.host}`);
-  const k = (u.searchParams.get("admin") || req.headers["x-admin-key"] || "");
-  if (PUBLIC_MODE) return !!k; // any non-empty admin key (uid) in public mode
-  return k === ADMIN_PASSWORD;
+  return (u.searchParams.get("admin") || req.headers["x-admin-key"]) === ADMIN_PASSWORD;
 }
 const absoluteBase = req => {
   const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
@@ -775,20 +860,6 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
 });
 
 // ------- Admin + debug & new endpoints -------
-
-// Mount workspace for /api calls using ?admin=<uid>
-app.use("/api", async (req,res,next)=>{
-  try{
-    const u = new URL(req.originalUrl, `http://${req.headers.host}`);
-    const admin = u.searchParams.get("admin") || req.headers["x-admin-key"] || "";
-    if (PUBLIC_MODE && admin && admin !== ADMIN_PASSWORD){
-      await applySnapshotFor(admin);
-      res.on("finish", ()=> clearWorkspace());
-    }
-  }catch{}
-  next();
-});
-
 app.get("/api/lists", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   res.json(LISTS);
@@ -823,7 +894,7 @@ app.post("/api/prefs", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshot({
+    await saveSnapshotScoped({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -885,7 +956,7 @@ app.post("/api/list-add", async (req, res) => {
 
     await getBestMeta(tt); CARD.set(tt, cardFor(tt));
 
-    await saveSnapshot({
+    await saveSnapshotScoped({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -915,7 +986,7 @@ app.post("/api/list-remove", async (req, res) => {
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
 
-    await saveSnapshot({
+    await saveSnapshotScoped({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -938,7 +1009,7 @@ app.post("/api/list-reset", async (req, res) => {
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
 
-    await saveSnapshot({
+    await saveSnapshotScoped({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -973,7 +1044,7 @@ app.post("/api/custom-order", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshot({
+    await saveSnapshotScoped({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -1014,7 +1085,7 @@ app.post("/api/remove-list", async (req,res)=>{
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
 
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
-    await saveSnapshot({
+    await saveSnapshotScoped({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -1023,7 +1094,7 @@ app.post("/api/remove-list", async (req,res)=>{
       cards: Object.fromEntries(CARD),
       ep2ser: Object.fromEntries(EP2SER)
     });
-    res.json({ ok:true })
+    res.status(200).send("Removed & blocked");
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
@@ -1031,21 +1102,19 @@ app.post("/api/sync", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
     await fullSync({ rediscover:true });
-    const u = new URL(req.originalUrl, `http://${req.headers.host}`);
-    const admin = u.searchParams.get("admin") || "";
-    const back = admin && admin !== ADMIN_PASSWORD ? `/u/${admin}/admin?key=${admin}` : `/admin?admin=${ADMIN_PASSWORD}`;
-    res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="${back}">Back</a>`);
+    scheduleNextSync();
+    res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 app.post("/api/purge-sync", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
-    const u = new URL(req.originalUrl, `http://${req.headers.host}`);
-    const admin = u.searchParams.get("admin") || "";
-    PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]) ]));
+    LISTS = Object.create(null);
+    BEST.clear(); FALLBK.clear(); EP2SER.clear(); CARD.clear();
+    PREFS.customOrder = PREFS.customOrder || {};
     await fullSync({ rediscover:true });
-    const back = admin && admin !== ADMIN_PASSWORD ? `/u/${admin}/admin?key=${admin}` : `/admin?admin=${ADMIN_PASSWORD}`;
-    res.status(200).send(`Purged & synced. <a href="${back}">Back</a>`);
+    scheduleNextSync();
+    res.status(200).send(`Purged & synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
@@ -1643,11 +1712,197 @@ render();
     }
   } catch(e){ console.warn("[BOOT] load snapshot failed:", e.message); }
 
-  fullSync({ rediscover: true }).then(()=> scheduleNextSync()).catch(e => {
-    console.warn("[BOOT] background sync failed:", e.message);
-  });
+  /* public mode: no boot sync */
 
-  app.listen(PORT, HOST, () => {
+  
+// Create a new workspace from a pasted IMDb user or list URLs
+app.post("/api/create", async (req,res)=>{
+  try{
+    const user = String((req.body && req.body.user) || "").trim();
+    const listsRaw = String((req.body && req.body.lists) || "").trim();
+    if (!user && !listsRaw) return res.status(400).json({ error: "Provide an IMDb user /lists URL or list URLs/IDs." });
+    const uid = randomUID(12);
+    CURRENT_UID = uid;
+    LISTS = {}; BEST.clear(); FALLBK.clear(); EP2SER.clear(); CARD.clear();
+    PREFS = JSON.parse(JSON.stringify(DEFAULT_PREFS));
+    PREFS.sources.users = user ? [user] : [];
+    PREFS.sources.lists = listsRaw ? listsRaw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean) : [];
+    LAST_SYNC_AT = 0; MANIFEST_REV = 1; LAST_MANIFEST_KEY = manifestKey();
+    await fs.mkdir(USERS_DIR+"/"+uid, { recursive:true }).catch(()=>{});
+    await saveSnapshotScoped({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: {},
+      cards: {},
+      ep2ser: {}
+    });
+    const base = `${req.protocol}://${req.get('host')}/u/${uid}`;
+    res.json({
+      uid,
+      adminUrl: `${base}/admin?key=${uid}`,
+      manifestUrl: `${base}/manifest.json`,
+      installUrl: `https://web.stremio.com/#/addons/3rdparty/add?addon=${encodeURIComponent(base+'/manifest.json')}`
+    });
+  }catch(e){ console.error(e); res.status(500).json({ error: String(e.message||e) }); }
+});
+app.get("/u/:uid/admin", async (req,res)=>{
+  // per-user admin: allowed
+  const base = absoluteBase(req);
+  const manifestUrl = `${base}/u/${req.params.uid}/manifest.json`;
+  let discovered = [];
+  try { discovered = await harvestSources(); } catch {}
+
+  const rows = Object.keys(LISTS).map(id => {
+    const L = LISTS[id]; const count=(L.ids||[]).length;
+    return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
+  }).join("") || "<li>(none)</li>";
+
+  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
+
+  const lastSyncText = LAST_SYNC_AT
+    ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
+    : "never";
+
+  res.type("html").send(`<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>My Lists – Admin</title>
+<style>
+  :root{color-scheme:light; --bg:#0f0d1a; --card:#15122b; --muted:#9aa0b4; --text:#f7f7fb; --accent:#6c5ce7; --accent2:#8b7cf7; --border:#2a2650}
+  body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:linear-gradient(180deg,#141126 0%,#0f0d1a 100%);color:var(--text)}
+  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+  .hero{padding:20px 0 8px}
+  h1{margin:0 0 4px;font-weight:700}
+  .subtitle{color:var(--muted)}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr}
+  @media(min-width:980px){ .grid{grid-template-columns:1fr 1fr} }
+  .card{border:1px solid var(--border);border-radius:14px;padding:16px;background:var(--card);box-shadow:0 8px 24px rgba(0,0,0,.28)}
+  button{padding:10px 16px;border:0;border-radius:10px;background:var(--accent);color:#fff;cursor:pointer}
+  .btn2{background:var(--accent2)}
+  small{color:var(--muted)}
+  .code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#1c1837;color:#d6d3ff;padding:4px 6px;border-radius:6px}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+  .muted{color:var(--muted)}
+  .chev{cursor:pointer;font-size:18px;line-height:1;user-select:none}
+  .drawer{background:#120f25}
+  .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin:12px 0;padding:0;list-style:none}
+  .thumb{position:relative;display:flex;gap:10px;align-items:center;border:1px solid var(--border);background:#1a1636;border-radius:12px;padding:6px 8px}
+  .thumb img{width:52px;height:78px;object-fit:cover;border-radius:6px;background:#2a244e}
+  .thumb .title{font-size:14px}
+  .thumb .id{font-size:11px;color:var(--muted)}
+  .thumb[draggable="true"]{cursor:grab}
+  .thumb.dragging{opacity:.5}
+  .thumb .del{position:absolute;top:6px;right:6px;width:20px;height:20px;line-height:20px;text-align:center;border-radius:999px;background:#3a2c2c;color:#ffb4b4;font-weight:700;display:none}
+  .thumb:hover .del{display:block}
+  .thumb.add{align-items:center;justify-content:center;border:1px dashed var(--border);min-height:90px}
+  .addbox{width:100%;text-align:center}
+  .addbox input{margin-top:6px;width:100%;box-sizing:border-box;background:#1c1837;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px}
+  .rowtools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+  .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
+  .pill{display:inline-flex;align-items:center;gap:8px;background:#1c1837;border:1px solid var(--border);border-radius:999px;padding:6px 10px;color:#dcd8ff}
+  .pill input{margin-right:4px}
+  .pill .x{cursor:pointer;color:#ffb4b4}
+  input[type="text"]{background:#1c1837;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px;width:100%}
+  .row{display:grid;gap:10px;grid-template-columns:1fr 100px}
+  .mini{font-size:12px}
+</style>
+</head><body>
+<div class="wrap">
+  <div class="hero">
+    <h1>My Lists – Admin</h1>
+    <div class="subtitle">Last sync: ${lastSyncText}</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Current Snapshot</h3>
+      <ul>${rows}</ul>
+      <div class="rowtools">
+        <form method="POST" action="/api/sync?admin=${req.params.uid}"><button class="btn2">Sync IMDb Lists Now</button></form>
+        <form method="POST" action="/api/purge-sync?admin=${req.params.uid}" onsubmit="return confirm('Purge & re-sync everything?')"><button>🧹 Purge & Sync</button></form>
+        <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
+      </div>
+      <h4>Manifest URL</h4>
+      <p class="code">${manifestUrl}</p>
+      <p class="mini muted">Version bumps automatically when catalogs change.</p>
+    </div>
+
+    <div class="card">
+      <h3>Discovered & Sources</h3>
+      <div style="margin-top:8px">
+        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+        <div id="blockedPills"></div>
+      </div>
+
+      <p class="mini muted">We merge your main user (+ extras) and explicit list URLs/IDs. Removing a list also blocks it so it won’t re-appear on the next sync.</p>
+
+      <div class="row">
+        <div><label>Add IMDb <b>User /lists</b> URL</label>
+          <input id="userInput" placeholder="https://www.imdb.com/user/urXXXXXXX/lists/" />
+        </div>
+        <div><button id="addUser">Add</button></div>
+      </div>
+      <div class="row">
+        <div><label>Add IMDb <b>List</b> URL or ID (ls…)</label>
+          <input id="listInput" placeholder="https://www.imdb.com/list/ls123456789/ or ls123456789" />
+        </div>
+        <div><button id="addList">Add</button></div>
+      </div>
+
+      <div style="margin-top:10px">
+        <div class="mini muted">Your extra users:</div>
+        <div id="userPills"></div>
+      </div>
+      <div style="margin-top:8px">
+        <div class="mini muted">Your extra lists:</div>
+        <div id="listPills"></div>
+      </div>
+
+      <h4 style="margin-top:14px">Discovered</h4>
+      <ul>${disc}</ul>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>Customize (enable/disable, order, defaults)</h3>
+    <p class="muted">Drag rows to change list order. Click ▾ to open a list: drag posters for a <b>custom</b> order, pick which <b>sort options</b> appear in Stremio, add items by <code>tt…</code>, or remove items.</p>
+    <div id="prefs"></div>
+  </div>
+
+</div>
+
+<script>
+const ADMIN="${req.params.uid}";
+const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
+
+async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
+async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
+async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
+async function saveCustomOrder(lsid, order){
+  const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
+app.get("/u/:uid/manifest.json", (req,res)=>{
+  try{
+    // per-user manifest open
+    
+    const version = `${baseManifest.version}-${MANIFEST_REV}`;
+    res.json({ ...baseManifest, version, catalogs: catalogs() });
+app.get("/u/:uid/catalog/:type/:id/:extra?.json", (req,res)=>{
+  try{
+    // per-user catalog open
+    
+
+    const { id } = req.params; await loadSnapshotScoped(String(req.params.uid));
+    if (!id || !id.startsWith("list:")) return res.json({ metas: [] });
+app.get("/u/:uid/meta/:type/:id.json", async (req,res)=>{
+  try{
+    // per-user meta open
+    
+
+    const imdbId = req.params.id; await loadSnapshotScoped(String(req.params.uid));
+    if (!isImdb(imdbId)) return res.json({ meta:{ id: imdbId, type:"movie", name:"Unknown item" } });
+app.listen(PORT, HOST, () => {
     console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
     console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
   });
