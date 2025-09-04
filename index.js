@@ -1327,7 +1327,7 @@ async function render() {
           const input = box.querySelector('input');
           const doAdd = async ()=>{
             const v = (input.value||'').trim();
-            const m = v.match(/tt\\d{7,}/i);
+            const m = v.match(/tt\d{7,}/i);
             if (!m) { alert('Enter a valid IMDb id'); return; }
             await fetch('/api/list-add?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: m[0] })});
             await refresh();
