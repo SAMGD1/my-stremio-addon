@@ -39,6 +39,8 @@ const REQ_HEADERS = {
   "Cache-Control": "no-cache"
 };
 const CINEMETA = "https://v3-cinemeta.strem.io";
+// Use a built-in type so all clients (esp. Android/TV) render the sort UI
+const CATALOG_TYPE = String(process.env.CATALOG_TYPE || "movie").toLowerCase();
 
 // include "imdb" (raw list order) and mirror IMDb’s release-date order when available
 const SORT_OPTIONS = [
@@ -577,7 +579,7 @@ const baseManifest = {
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["my lists","movie","series"],     // NOTE: lower-case
+  types: ["movie","series"],     // NOTE: lower-case
   idPrefixes: ["tt"]
 };
 function getEnabledOrderedIds() {
