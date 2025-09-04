@@ -592,7 +592,7 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-    type: "my lists", // exact match with manifest -> fixes Android sort menu
+    type: "movie", // exact match with manifest -> fixes Android sort menu
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
