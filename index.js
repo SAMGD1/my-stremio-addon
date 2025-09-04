@@ -1293,28 +1293,46 @@ async function render() {
         return li;
       }
 
-      function addTile(){
-        const li = el('li',{class:'thumb add','data-add':'1'});
-        const box = el('div',{class:'addbox'},[
-          el('div',{text:'Add by IMDb ID (tt...)'}),
-          el('input',{type:'text',placeholder:'tt1234567 or IMDb URL'})
-        ]);
-        li.appendChild(box);
-        li.onclick = ()=>{
-          const input = box.querySelector('input');
-          const doAdd = async ()=>{
-            const v = (input.value||'').trim();
-            const m = v.match(/tt\d{7,}/i);   // ✅ FIXED: accept proper tt ids
-            if (!m) { alert('Enter a valid IMDb id'); return; }
-            await fetch('/api/list-add?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: m[0] })});
-            await refresh();
-          };
-          input.addEventListener('keydown', e=>{ if (e.key==='Enter'){ e.preventDefault(); doAdd(); }});
-          input.addEventListener('blur', ()=>{ /* keep open */ });
-          input.focus();
-        };
-        return li;
-      }
+     function addTile(){
+  const li = el('li',{class:'thumb add','data-add':'1'});
+  const box = el('div',{class:'addbox'},[
+    el('div',{text:'Add by IMDb ID (tt...)'}),
+    el('input',{type:'text',placeholder:'tt1234567 or IMDb URL', spellcheck:'false'})
+  ]);
+  li.appendChild(box);
+
+  const input = box.querySelector('input');
+
+  async function doAdd(){
+    // accept bare ID or a full IMDb title URL
+    const v = (input.value || '').trim();
+    const m = v.match(/(tt\\d{7,})/i);
+    if (!m) { alert('Enter a valid IMDb id'); return; }
+
+    input.disabled = true;
+    try {
+      await fetch('/api/list-add?admin='+ADMIN, {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ lsid, id: m[1] })
+      });
+      input.value = '';
+      await refresh();
+    } finally {
+      input.disabled = false;
+    }
+  }
+
+  // Wire once (no stacking) – press Enter to add
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); doAdd(); }
+  });
+  // don’t let clicks on the input bubble up and rebind anything
+  input.addEventListener('click', (e) => e.stopPropagation());
+
+  return li;
+}
+
 
       function renderList(arr){
         ul.innerHTML = '';
