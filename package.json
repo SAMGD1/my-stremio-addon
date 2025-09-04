@@ -1,11 +1,12 @@
-
 {
-  "name": "my-stremio-addon-public",
-  "version": "13.0.0",
-  "description": "Public IMDb → Stremio add-on generator (per-user workspaces)",
+  "name": "imdb-to-stremio-public",
+  "version": "1.0.0",
+  "private": true,
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "NODE_ENV=development node index.js"
   },
   "engines": {
     "node": ">=18"
