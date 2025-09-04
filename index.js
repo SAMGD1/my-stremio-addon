@@ -373,7 +373,7 @@ function manifestKey() {
   const perOpts = JSON.stringify(PREFS.sortOptions || {});
   const custom = Object.keys(PREFS.customOrder || {}).length;
   const order = (PREFS.order || []).join(",");
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}`;
+return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}#t${CATALOG_TYPE}`;
 }
 
 async function harvestSources() {
@@ -594,7 +594,14 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-    type: "movie", // exact match with manifest -> fixes Android sort menu
+   type: CATALOG_TYPE,
+    extraSupported: ["search","skip","limit","sort"],
+   extra: [
+     { name:"search" }, { name:"skip" }, { name:"limit" },
+     { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
+   ],
+    extraRequired: ["sort"],
+    // exact match with manifest -> fixes Android sort menu
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
