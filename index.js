@@ -573,13 +573,19 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.3.1",
+  version: "12.3.1",            // keep your current version
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["my lists","movie","series"],     // NOTE: lower-case
-  idPrefixes: ["tt"]
+  types: ["my lists","movie","series"],
+  idPrefixes: ["tt"],
+  // ⬇️ ADD THIS
+  behaviorHints: {
+    configurable: true,
+    configurationRequired: false
+  }
 };
+
 function getEnabledOrderedIds() {
   const allIds  = Object.keys(LISTS);
   const enabled = new Set(PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds);
@@ -608,8 +614,32 @@ app.get("/manifest.json", (req,res)=>{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
     const version = `${baseManifest.version}-${MANIFEST_REV}`;
-    res.json({ ...baseManifest, version, catalogs: catalogs() });
+res.json({
+  ...baseManifest,
+  version,
+  catalogs: catalogs(),
+  // ⬇️ ADD THIS: where the “Configure” button should open
+  configuration: `${absoluteBase(req)}/configure`
+});
   }catch(e){ console.error("manifest:", e); res.status(500).send("Internal Server Error");}
+});
+
+app.get("/configure", (req, res) => {
+  const base = absoluteBase(req);
+  const dest = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+
+  // Works inside Stremio’s webview; also shows a manual link as fallback
+  res.type("html").send(`
+    <!doctype html><meta charset="utf-8">
+    <title>Configure – My Lists</title>
+    <meta http-equiv="refresh" content="0; url='${dest}'">
+    <style>
+      body{font-family:system-ui; background:#0f0d1a; color:#f7f7fb;
+           display:grid; place-items:center; height:100vh; margin:0}
+      a{color:#9aa0b4;}
+    </style>
+    <p>Opening admin… <a href="${dest}">continue</a></p>
+  `);
 });
 
 // ------- Catalog -------
