@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.3.1
+ *  v12.3.1 (with private list cookie support)
  */
 "use strict";
 const express = require("express");
@@ -30,6 +30,9 @@ const GITHUB_REPO   = process.env.GITHUB_REPO   || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
+
+// NEW: allow private IMDb lists via your logged-in cookie
+const IMDB_COOKIE = process.env.IMDB_COOKIE || "";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.1";
 const REQ_HEADERS = {
@@ -101,13 +104,23 @@ const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
 
+// ---- IMDb cookie-aware headers (NEW) ----
+function withImdbHeaders(url, baseHeaders) {
+  const h = { ...baseHeaders };
+  if (/\/\/(?:www\.)?imdb\.com\//i.test(url) && IMDB_COOKIE) {
+    h.Cookie = IMDB_COOKIE;
+  }
+  return h;
+}
+
 async function fetchText(url) {
-  const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
+  const r = await fetch(url, { headers: withImdbHeaders(url, REQ_HEADERS), redirect: "follow" });
   if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
   return r.text();
 }
 async function fetchJson(url) {
-  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept":"application/json" }, redirect:"follow" });
+  const headers = withImdbHeaders(url, { "User-Agent": UA, "Accept":"application/json" });
+  const r = await fetch(url, { headers, redirect:"follow" });
   if (!r.ok) return null;
   try { return await r.json(); } catch { return null; }
 }
@@ -1446,7 +1459,9 @@ async function render() {
         try{
           await fetch('/api/list-reset?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
           await refresh();
-        } finally { resetAllBtn.disabled = false; }
+        } finally {
+          resetAllBtn.disabled = false;
+        }
       };
 
       async function refresh(){
@@ -1535,6 +1550,7 @@ async function render() {
   table.appendChild(tbody);
   attachRowDnD(tbody);
 
+  const container = document.getElementById('prefs');
   container.appendChild(table);
 
   const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'});
