@@ -1,12 +1,11 @@
 {
-  "name": "imdb-to-stremio-public",
+  "name": "mylists-multiuser",
   "version": "1.0.0",
-  "private": true,
+  "description": "My Lists \u2014 multi-user Stremio addon server",
   "main": "index.js",
-  "type": "commonjs",
+  "license": "MIT",
   "scripts": {
-    "start": "node index.js",
-    "dev": "NODE_ENV=development node index.js"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=18"
