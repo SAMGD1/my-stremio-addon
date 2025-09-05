@@ -5,33 +5,6 @@
 const express = require("express");
 const fs = require("fs/promises");
 
-
-// --------- PUBLIC MULTI-USER ADDITIONS ----------
-const crypto = require("crypto");
-
-const USERS_DIR = "users";                // GitHub folder
-let CURRENT_UID = null;                   // which workspace is mounted in memory
-const inflight = new Map();               // uid -> Promise that represents a running sync/save
-const GH_CONCURRENCY_DELAY_MS = 250;      // small delay to help avoid GH 409s
-
-function uidFromReq(req){
-  if (req.params && req.params.uid) return String(req.params.uid);
-  if (req.query && req.query.admin && req.query.admin !== ADMIN_PASSWORD) return String(req.query.admin);
-  return null;
-}
-function randomUID(n=12){
-  const ALPH='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_';
-  return Array.from({length:n},()=>ALPH[Math.floor(Math.random()*ALPH.length)]).join('');
-}
-async function enqueue(uid, task){
-  const prev = inflight.get(uid) || Promise.resolve();
-  let release;
-  const next = new Promise(r => release = r);
-  inflight.set(uid, next);
-  await prev;
-  try { return await task(); }
-  finally { release(); if (inflight.get(uid) === next) inflight.delete(uid); }
-}
 // ----------------- ENV -----------------
 const PORT  = Number(process.env.PORT || 7000);
 const HOST  = "0.0.0.0";
@@ -128,96 +101,18 @@ const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
 
-
 async function fetchText(url) {
-  let attempts = 0;
-  while (attempts < 5) {
-    attempts++;
-    try{
-      const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
-      if (r.ok) return await r.text();
-      const status = r.status;
-      if ((status===429 || status===503 || status===502) && attempts < 5){
-        await sleep(300 + Math.floor(Math.random()*600));
-        continue;
-      }
-      throw new Error(`GET ${url} -> ${status}`);
-    }catch(e){
-      if (attempts>=5) throw e;
-      await sleep(250 + Math.floor(Math.random()*600));
-    }
-  }
-  throw new Error(`GET ${url} failed after retries`);
+  const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
+  if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
+  return r.text();
 }
-return null; }
+async function fetchJson(url) {
+  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept":"application/json" }, redirect:"follow" });
+  if (!r.ok) return null;
+  try { return await r.json(); } catch { return null; }
 }
 const withParam = (u,k,v) => { const x = new URL(u); x.searchParams.set(k,v); return x.toString(); };
 
-
-// ---- GitHub helpers (extended) ----
-async function ghReadJson(path){
-  if (!GH_ENABLED) return null;
-  try{
-    const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
-    const txt = Buffer.from(data.content || "", "base64").toString("utf8");
-    return { sha: data.sha || null, json: JSON.parse(txt || "{}") };
-  }catch(e){ return null; }
-}
-
-async function ghWriteJson(path, obj, commitMsg="Update snapshot.json", shaHint=null, retries=5){
-  if (!GH_ENABLED) return;
-  const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
-  async function attempt(retry){
-    const sha = await ghGetSha(path);
-    const body = { message: commitMsg, content, branch: GITHUB_BRANCH };
-    if (sha || shaHint) body.sha = sha || shaHint;
-    try { await gh("PUT", `/contents/${encodeURIComponent(path)}`, body); }
-    catch(e){
-      const msg = String(e.message||"");
-      const is409 = msg.includes("409") || msg.includes("does not match");
-      if (is409 && retry>0){
-        await sleep(GH_CONCURRENCY_DELAY_MS + Math.floor(Math.random()*400));
-        return attempt(retry-1);
-      }
-      throw e;
-    }
-  }
-  return attempt(retries);
-}
-
-async function saveSnapshotScoped(obj){
-  try{
-    await fs.mkdir("data", { recursive: true });
-    const localPath = CURRENT_UID ? `${USERS_DIR}/${CURRENT_UID}/snapshot.json` : SNAP_LOCAL;
-    await fs.mkdir(require("path").dirname(localPath), { recursive:true }).catch(()=>{});
-    await fs.writeFile(localPath, JSON.stringify(obj, null, 2), "utf8");
-  }catch {}
-  if (!GH_ENABLED) return;
-  const path = CURRENT_UID ? `${USERS_DIR}/${CURRENT_UID}/snapshot.json` : "data/snapshot.json";
-  await ghWriteJson(path, obj, "Update snapshot.json");
-}
-
-async function loadSnapshotScoped(uid){
-  CURRENT_UID = uid || null;
-  BEST.clear(); FALLBK.clear(); EP2SER.clear(); CARD.clear();
-  LAST_MANIFEST_KEY = ""; MANIFEST_REV = 1; LAST_SYNC_AT = 0;
-  LISTS = {}; PREFS = JSON.parse(JSON.stringify(DEFAULT_PREFS));
-  const path = uid ? `${USERS_DIR}/${uid}/snapshot.json` : "data/snapshot.json";
-  const data = await ghReadJson(path);
-  if (data && data.json && Object.keys(data.json).length){
-    const snap = data.json;
-    LISTS = snap.lists || {};
-    PREFS = Object.assign(JSON.parse(JSON.stringify(DEFAULT_PREFS)), snap.prefs || {});
-    if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
-    if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
-    if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
-    MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
-    LAST_SYNC_AT = snap.lastSyncAt || 0;
-    LAST_MANIFEST_KEY = manifestKey();
-    return true;
-  }
-  return false;
-}
 // ---- GitHub snapshot (optional) ----
 async function gh(method, path, bodyObj) {
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${path}`;
@@ -243,7 +138,7 @@ async function ghGetSha(path) {
     return data && data.sha || null;
   } catch { return null; }
 }
-async function saveSnapshotScoped(obj) {
+async function saveSnapshot(obj) {
   // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
@@ -625,7 +520,7 @@ async function fullSync({ rediscover = true } = {}) {
       console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
     }
 
-    await saveSnapshotScoped({
+    await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -654,77 +549,7 @@ function maybeBackgroundSync() {
 }
 
 // ----------------- SERVER -----------------
-
-  }
-  next();
-});
-
 const app = express();
-// --- public generator landing page ---
-app.get("/", (req,res)=>{
-  res.setHeader("Content-Type","text/html; charset=utf-8");
-  res.end(`<!doctype html>
-<html><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>My Lists – Generator</title>
-<style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;background:#0f1121;color:#e6e7ef;padding:28px}
-  .box{max-width:820px;margin:0 auto;background:#171a30;border-radius:16px;padding:24px;box-shadow:0 6px 24px rgba(0,0,0,.35)}
-  input,button{font-size:16px}
-  input[type=text]{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #2a2e52;background:#0e1124;color:#e6e7ef}
-  button{background:#6753ff;border:none;color:#fff;padding:10px 14px;border-radius:12px;cursor:pointer}
-  button[disabled]{opacity:.5;cursor:not-allowed}
-  small{color:#a7a9c9}
-</style>
-</head>
-<body>
-  <div class="box">
-    <h1>Make your own Stremio add-on from IMDb lists</h1>
-    <p>Paste either an <b>IMDb user /lists</b> page or one or more <b>list URLs/IDs</b>.</p>
-    <div>
-      <label>IMDb user /lists URL</label>
-      <input id="userUrl" type="text" placeholder="https://www.imdb.com/user/ur1234567/lists/">
-    </div>
-    <p style="margin:8px 0;text-align:center">— or —</p>
-    <div>
-      <label>IMDb list URLs or lsIDs (comma/space separated)</label>
-      <input id="lists" type="text" placeholder="https://www.imdb.com/list/ls123456/, ls7777777, ...">
-    </div>
-    <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
-      <button id="go">Generate add-on</button> <small id="msg"></small>
-    </div>
-    <div id="out" style="margin-top:20px"></div>
-  </div>
-<script>
-  const $ = s => document.querySelector(s);
-  $('#go').onclick = async ()=>{
-    const user = $('#userUrl').value.trim();
-    const lists = $('#lists').value.trim();
-    if (!user && !lists){ $('#msg').textContent="Enter a user or lists"; return; }
-    $('#go').disabled = true; $('#msg').textContent = "Creating…";
-    try{
-      const r = await fetch('/api/create', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ user, lists })});
-      const j = await r.json();
-      if (!r.ok) throw new Error(j && j.error || 'Failed');
-      $('#out').innerHTML = '<h3>All set!</h3>'
-        + '<p><b>Admin page:</b> <a target="_blank" href="'+j.adminUrl+'">'+j.adminUrl+'</a></p>'
-        + '<p><b>Manifest URL:</b> <code>'+j.manifestUrl+'</code></p>'
-        + '<p><a target="_blank" href="'+j.installUrl+'">Install in Stremio</a></p>';
-      $('#msg').textContent = "";
-    }catch(e){ $('#msg').textContent = e.message || String(e); }
-    finally{ $('#go').disabled = false; }
-  };
-</script>
-</body></html>`);
-});
-
-// All /api requests: if admin=<uid> and not the global ADMIN_PASSWORD, mount that workspace
-app.use("/api", async (req,res,next)=>{
-  const uid = uidFromReq(req);
-  if (uid && uid !== ADMIN_PASSWORD){
-    await loadSnapshotScoped(uid).catch(()=>{});
-
 app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
 app.use(express.json({ limit: "1mb" }));
 
@@ -894,7 +719,7 @@ app.post("/api/prefs", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshotScoped({
+    await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -956,7 +781,7 @@ app.post("/api/list-add", async (req, res) => {
 
     await getBestMeta(tt); CARD.set(tt, cardFor(tt));
 
-    await saveSnapshotScoped({
+    await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -986,7 +811,7 @@ app.post("/api/list-remove", async (req, res) => {
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
 
-    await saveSnapshotScoped({
+    await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -1009,7 +834,7 @@ app.post("/api/list-reset", async (req, res) => {
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
 
-    await saveSnapshotScoped({
+    await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -1044,7 +869,7 @@ app.post("/api/custom-order", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshotScoped({
+    await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -1085,7 +910,7 @@ app.post("/api/remove-list", async (req,res)=>{
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
 
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
-    await saveSnapshotScoped({
+    await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lists: LISTS,
@@ -1712,60 +1537,282 @@ render();
     }
   } catch(e){ console.warn("[BOOT] load snapshot failed:", e.message); }
 
-  /* public mode: no boot sync */
+  fullSync({ rediscover: true }).then(()=> scheduleNextSync()).catch(e => {
+    console.warn("[BOOT] background sync failed:", e.message);
+  });
 
-  
-// Create a new workspace from a pasted IMDb user or list URLs
-app.post("/api/create", async (req,res)=>{
+  app.listen(PORT, HOST, () => {
+    console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
+    console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
+  });
+})();
+
+
+// ========================= PUBLIC GENERATOR / MULTI-USER EXTENSION =========================
+// We keep your original single-user logic intact. Everything below adds per-user workspaces
+// that save to GitHub at users/<uid>/snapshot.json and provide /u/:uid/... routes.
+//
+// Minimal CORS (already present above), plus OPTIONS handler:
+app.use((req,res,next)=>{
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Admin-Key");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// Helpers for per-user GitHub storage
+async function saveSnapshotUser(obj, uid) {
+  try {
+    await fs.mkdir("data", { recursive: true });
+    await fs.writeFile(`data/snapshot-${uid}.json`, JSON.stringify(obj, null, 2), "utf8");
+  } catch {/* ignore local */}
+  if (!GH_ENABLED) return;
+  const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
+  const path = `users/${uid}/snapshot.json`;
+  // upsert meta
+  const metaPath = `users/${uid}/meta.json`;
+  try {
+    const oldM = await gh("GET", `/contents/${encodeURIComponent(metaPath)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+    const metaBuf = Buffer.from(oldM.content, "base64").toString("utf8");
+    const metaOld = JSON.parse(metaBuf || "{}");
+    const metaNew = { ...metaOld, updatedAt: Date.now(), createdAt: metaOld.createdAt || Date.now() };
+    const metaContent = Buffer.from(JSON.stringify(metaNew, null, 2)).toString("base64");
+    const metaSha = oldM && oldM.sha || null;
+    const bodyM = { message:`Update user ${uid} meta`, content: metaContent, branch: GITHUB_BRANCH };
+    if (metaSha) bodyM.sha = metaSha;
+    await gh("PUT", `/contents/${encodeURIComponent(metaPath)}`, bodyM);
+  } catch {
+    const metaNew = { createdAt: Date.now(), updatedAt: Date.now() };
+    const metaContent = Buffer.from(JSON.stringify(metaNew, null, 2)).toString("base64");
+    const bodyM = { message:`Create user ${uid} meta`, content: metaContent, branch: GITHUB_BRANCH };
+    await gh("PUT", `/contents/${encodeURIComponent(metaPath)}`, bodyM);
+  }
+  // upsert snapshot with retries to avoid 409 conflicts
+  let tries = 0;
+  while (tries < 6) {
+    tries++;
+    try {
+      let sha = null;
+      try {
+        const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+        sha = data && data.sha || null;
+      } catch {/* not found */}
+      const body = { message:`Update user ${uid} snapshot`, content, branch: GITHUB_BRANCH };
+      if (sha) body.sha = sha;
+      await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
+      break;
+    } catch (e) {
+      const msg = (e && e.message) || "";
+      if (msg.includes("409")) {
+        await new Promise(r => setTimeout(r, 350 * tries));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+async function loadSnapshotUser(uid) {
+  if (GH_ENABLED) {
+    try {
+      const data = await gh("GET", `/contents/${encodeURIComponent(`users/${uid}/snapshot.json`)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+      const buf = Buffer.from(data.content, "base64").toString("utf8");
+      return JSON.parse(buf);
+    } catch {/* ignore */}
+  }
   try{
-    const user = String((req.body && req.body.user) || "").trim();
-    const listsRaw = String((req.body && req.body.lists) || "").trim();
-    if (!user && !listsRaw) return res.status(400).json({ error: "Provide an IMDb user /lists URL or list URLs/IDs." });
-    const uid = randomUID(12);
-    CURRENT_UID = uid;
-    LISTS = {}; BEST.clear(); FALLBK.clear(); EP2SER.clear(); CARD.clear();
-    PREFS = JSON.parse(JSON.stringify(DEFAULT_PREFS));
-    PREFS.sources.users = user ? [user] : [];
-    PREFS.sources.lists = listsRaw ? listsRaw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean) : [];
-    LAST_SYNC_AT = 0; MANIFEST_REV = 1; LAST_MANIFEST_KEY = manifestKey();
-    await fs.mkdir(USERS_DIR+"/"+uid, { recursive:true }).catch(()=>{});
-    await saveSnapshotScoped({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
+    const txt = await fs.readFile(`data/snapshot-${uid}.json`, "utf8");
+    return JSON.parse(txt);
+  } catch { return null; }
+}
+
+// simple uid utils
+function newUid(){ return Math.random().toString(36).slice(2, 12) + '-' + Math.random().toString(36).slice(2,6); }
+function userAllowed(req, uid){
+  const u = new URL(req.originalUrl, `http://${req.headers.host}`);
+  // accept either ?key=<uid> or ?admin=<uid>
+  const k = u.searchParams.get("key") || u.searchParams.get("admin") || req.headers["x-admin-key"];
+  return k === uid;
+}
+
+// workspace swapper (load per-user snapshot into globals, run fn, restore snapshot afterwards)
+async function withUserWorkspace(uid, fn){
+  // backup
+  const B_LISTS = LISTS, B_PREFS=PREFS, B_FALLBK=FALLBK, B_CARD=CARD, B_EP2SER=EP2SER, B_BEST=BEST;
+  const B_LAST_SYNC_AT = LAST_SYNC_AT, B_MANIFEST_REV = MANIFEST_REV, B_LAST_MANIFEST_KEY = LAST_MANIFEST_KEY;
+  // init
+  let snap = await loadSnapshotUser(uid);
+  if (!snap) {
+    LISTS = Object.create(null);
+    PREFS = { enabled:[], order:[], perListSort:{}, sortOptions:{}, customOrder:{}, sources:{users:[],lists:[]}, blocked:[] };
+    FALLBK = new Map(); CARD=new Map(); EP2SER=new Map(); BEST=new Map();
+    LAST_SYNC_AT = 0; MANIFEST_REV = 1; LAST_MANIFEST_KEY = "";
+  } else {
+    LISTS = snap.lists || Object.create(null);
+    PREFS = { enabled:[], order:[], perListSort:{}, sortOptions:{}, customOrder:{}, ...(snap.prefs||{}) };
+    FALLBK = new Map(Object.entries(snap.fallback||{}));
+    CARD   = new Map(Object.entries(snap.cards||{}));
+    EP2SER = new Map(Object.entries(snap.ep2ser||{}));
+    BEST   = new Map();
+    LAST_SYNC_AT = snap.lastSyncAt || 0;
+    MANIFEST_REV = snap.manifestRev || 1;
+    LAST_MANIFEST_KEY = ""; // recompute on demand
+  }
+  try {
+    return await fn(async (obj)=> saveSnapshotUser(obj, uid));
+  } finally {
+    // restore
+    LISTS = B_LISTS; PREFS=B_PREFS; FALLBK=B_FALLBK; CARD=B_CARD; EP2SER=B_EP2SER; BEST=B_BEST;
+    LAST_SYNC_AT = B_LAST_SYNC_AT; MANIFEST_REV = B_MANIFEST_REV; LAST_MANIFEST_KEY = B_LAST_MANIFEST_KEY;
+  }
+}
+
+// a tiny global sync queue so we don't collide saveSnapshot rewrites across users
+let syncQueue = Promise.resolve();
+function queue(fn){ const next = syncQueue.then(()=>fn(), ()=>fn()); syncQueue = next.catch(()=>{}); return next; }
+
+// Landing page: paste IMDb user/lists to create a workspace
+app.get("/", (req,res)=>{
+  const base = absoluteBase(req);
+  res.type("html").send(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>My Lists – Generator</title>
+  <style>
+  body{font-family:system-ui;margin:0;background:#0f0d1a;color:#fff}
+  .wrap{max-width:860px;margin:40px auto;padding:0 16px}
+  .card{background:#15122b;border:1px solid #2a2650;border-radius:14px;padding:16px}
+  input,textarea{width:100%;background:#1c1837;color:#fff;border:1px solid #2a2650;border-radius:10px;padding:10px}
+  button{background:#6c5ce7;color:#fff;border:0;border-radius:10px;padding:12px 16px;cursor:pointer}
+  small{color:#9aa0b4}
+  </style>
+  <div class="wrap">
+    <h1>My Lists – Generate Your Add-on</h1>
+    <div class="card">
+      <form method="POST" action="/api/create">
+        <label>IMDb User /lists URL</label>
+        <input name="userUrl" placeholder="https://www.imdb.com/user/urXXXXXXX/lists/" />
+        <div style="height:10px"></div>
+        <label>IMDb List URLs/IDs (optional, one per line)</label>
+        <textarea rows="4" name="lists" placeholder="ls123..., https://www.imdb.com/list/ls123..."></textarea>
+        <div style="height:12px"></div>
+        <button>Generate Add-on</button>
+        <div><small>After you generate, you’ll get a personal Admin page & Manifest.</small></div>
+      </form>
+    </div>
+  </div>`);
+});
+app.post("/api/create", express.urlencoded({extended:true}), async (req,res)=>{
+  const uid = newUid();
+  const userUrl = String(req.body.userUrl||"").trim();
+  const lists = String(req.body.lists||"").split(/[\r\n]+/).map(s=>s.trim()).filter(Boolean);
+  await withUserWorkspace(uid, async (saveScoped)=>{
+    PREFS.sources = { users: userUrl? [userUrl] : [], lists };
+    await saveScoped({
+      lastSyncAt: 0,
+      manifestRev: 1,
       lists: LISTS,
       prefs: PREFS,
-      fallback: {},
-      cards: {},
-      ep2ser: {}
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
     });
-    const base = `${req.protocol}://${req.get('host')}/u/${uid}`;
-    res.json({
-      uid,
-      adminUrl: `${base}/admin?key=${uid}`,
-      manifestUrl: `${base}/manifest.json`,
-      installUrl: `https://web.stremio.com/#/addons/3rdparty/add?addon=${encodeURIComponent(base+'/manifest.json')}`
-    });
-  }catch(e){ console.error(e); res.status(500).json({ error: String(e.message||e) }); }
-});
-app.get("/u/:uid/admin", async (req,res)=>{
-  // per-user admin: allowed
+  });
   const base = absoluteBase(req);
-  const manifestUrl = `${base}/u/${req.params.uid}/manifest.json`;
-  let discovered = [];
-  try { discovered = await harvestSources(); } catch {}
+  const admin = `${base}/u/${uid}/admin?key=${uid}`;
+  const manifest = `${base}/u/${uid}/manifest.json`;
+  res.type("html").send(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>All set!</title><style>body{font-family:system-ui;background:#0f0d1a;color:#fff;padding:24px}</style>
+  <h2>All set!</h2>
+  <p><b>Admin page:</b> <a href="${admin}">${admin}</a></p>
+  <p><b>Manifest URL:</b> <span style="font-family:monospace">${manifest}</span></p>
+  <p><a href="https://web.stremio.com/#/addons/3rdparty/add?addon=${encodeURIComponent(manifest)}">Install in Stremio</a></p>`);
+});
 
-  const rows = Object.keys(LISTS).map(id => {
-    const L = LISTS[id]; const count=(L.ids||[]).length;
-    return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
-  }).join("") || "<li>(none)</li>";
+// Per-user manifest
+app.get("/u/:uid/manifest.json", async (req,res)=>{
+  const uid = req.params.uid;
+  await withUserWorkspace(uid, async ()=>{
+    const mf = { ...baseManifest, id:`org.mylists.${uid}`, behaviorHints:{ configurable:true, configurationPage: `${absoluteBase(req)}/u/${uid}/admin?key=${uid}` } };
+    const version = `${baseManifest.version}-${MANIFEST_REV}`;
+    res.json({ ...mf, version, catalogs: catalogs() });
+  });
+});
 
-  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
+// Per-user catalog
+app.get("/u/:uid/catalog/:type/:id/:extra?.json", async (req,res)=>{
+  const uid = req.params.uid;
+  await withUserWorkspace(uid, async ()=>{
+    const { id } = req.params;
+    if (!id || !id.startsWith("list:")) return res.json({ metas: [] });
+    const lsid = id.slice(5);
+    const list = LISTS[lsid];
+    if (!list) return res.json({ metas: [] });
+    const extra = parseExtra(req.params.extra, req.query);
+    const q = String(extra.search||"").toLowerCase().trim();
+    const sortReq = String(extra.sort||"").toLowerCase();
+    const defaultSort = (PREFS.perListSort && PREFS.perListSort[lsid]) || "name_asc";
+    const sort = sortReq || defaultSort;
+    const skip = Math.max(0, Number(extra.skip||0));
+    const limit = Math.min(Number(extra.limit||100), 200);
+    let ids = (list.ids || []).slice();
+    const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
+    const removed = new Set((ed.removed || []).filter(isImdb));
+    if (removed.size) ids = ids.filter(tt => !removed.has(tt));
+    const toAdd = (ed.added || []).filter(isImdb);
+    for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
+    let metas = ids.map(tt => CARD.get(tt) || cardFor(tt));
+    if (q) metas = metas.filter(m => (m.name||"").toLowerCase().includes(q) || (m.id||"").toLowerCase().includes(q) || (m.description||"").toLowerCase().includes(q));
+    if (sort === "custom" && PREFS.customOrder && Array.isArray(PREFS.customOrder[lsid]) && PREFS.customOrder[lsid].length) {
+      const pos = new Map(PREFS.customOrder[lsid].map((id,i)=>[id,i]));
+      metas = metas.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+    } else if (sort === "imdb") {
+      const imdbIndex = new Map((list.ids || []).map((id,i)=>[id,i]));
+      metas = metas.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
+    } else if ((sort === "date_asc" || sort === "date_desc") && list.orders && Array.isArray(list.orders[sort]) && list.orders[sort].length) {
+      const pos = new Map(list.orders[sort].map((id,i)=>[id,i]));
+      metas = metas.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+    } else {
+      metas = stableSort(metas, sort);
+    }
+    res.json({ metas: metas.slice(skip, skip+limit) });
+  });
+});
 
-  const lastSyncText = LAST_SYNC_AT
-    ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
-    : "never";
+// Per-user meta
+app.get("/u/:uid/meta/:type/:id.json", async (req,res)=>{
+  const uid = req.params.uid;
+  await withUserWorkspace(uid, async ()=>{
+    const imdbId = req.params.id;
+    if (!isImdb(imdbId)) return res.json({ meta:{ id: imdbId, type:"movie", name:"Unknown item" } });
+    let rec = BEST.get(imdbId);
+    if (!rec) rec = await getBestMeta(imdbId);
+    if (!rec || !rec.meta) {
+      const fb = FALLBK.get(imdbId) || {};
+      return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
+    }
+    res.json({ meta: { ...rec.meta, id: imdbId, type: rec.kind } });
+  });
+});
 
-  res.type("html").send(`<!doctype html>
+
+// Per-user admin page (re-uses your full admin HTML)
+app.get("/u/:uid/admin", async (req,res)=>{
+  const uid = req.params.uid;
+  if (!userAllowed(req, uid)) return res.status(403).send("Forbidden. Append ?key=<your id>");
+  await withUserWorkspace(uid, async ()=>{
+    const base = absoluteBase(req);
+    const manifestUrl = `${base}/u/${uid}/manifest.json`;
+    let discovered = [];
+    try { discovered = await harvestSources(); } catch {}
+    const rows = Object.keys(LISTS).map(id => {
+      const L = LISTS[id]; const count=(L.ids||[]).length;
+      return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
+    }).join("") || "<li>(none)</li>";
+    const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
+    const lastSyncText = LAST_SYNC_AT
+      ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
+      : "never";
+    // Evaluate the same template as your original admin route, but with our variables and uid as ADMIN_PASSWORD
+    const __tpl = new Function("ADMIN_PASSWORD","manifestUrl","rows","disc","lastSyncText", "return `<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Admin</title>
 <style>
@@ -1820,8 +1867,8 @@ app.get("/u/:uid/admin", async (req,res)=>{
       <h3>Current Snapshot</h3>
       <ul>${rows}</ul>
       <div class="rowtools">
-        <form method="POST" action="/api/sync?admin=${req.params.uid}"><button class="btn2">Sync IMDb Lists Now</button></form>
-        <form method="POST" action="/api/purge-sync?admin=${req.params.uid}" onsubmit="return confirm('Purge & re-sync everything?')"><button>🧹 Purge & Sync</button></form>
+        <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button class="btn2">Sync IMDb Lists Now</button></form>
+        <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge & re-sync everything?')"><button>🧹 Purge & Sync</button></form>
         <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
       </div>
       <h4>Manifest URL</h4>
@@ -1874,7 +1921,7 @@ app.get("/u/:uid/admin", async (req,res)=>{
 </div>
 
 <script>
-const ADMIN="${req.params.uid}";
+const ADMIN="${ADMIN_PASSWORD}";
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 
 async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
@@ -1882,28 +1929,657 @@ async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); ret
 async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
 async function saveCustomOrder(lsid, order){
   const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
-app.get("/u/:uid/manifest.json", (req,res)=>{
-  try{
-    // per-user manifest open
-    
-    const version = `${baseManifest.version}-${MANIFEST_REV}`;
-    res.json({ ...baseManifest, version, catalogs: catalogs() });
-app.get("/u/:uid/catalog/:type/:id/:extra?.json", (req,res)=>{
-  try{
-    // per-user catalog open
-    
+  if (!r.ok) throw new Error('save failed');
+  return r.json();
+}
 
-    const { id } = req.params; await loadSnapshotScoped(String(req.params.uid));
-    if (!id || !id.startsWith("list:")) return res.json({ metas: [] });
-app.get("/u/:uid/meta/:type/:id.json", async (req,res)=>{
-  try{
-    // per-user meta open
-    
+function el(tag, attrs={}, kids=[]) {
+  const e = document.createElement(tag);
+  for (const k in attrs) {
+    if (k === "text") e.textContent = attrs[k];
+    else if (k === "html") e.innerHTML = attrs[k];
+    else e.setAttribute(k, attrs[k]);
+  }
+  kids.forEach(ch => e.appendChild(ch));
+  return e;
+}
+function isCtrl(node){
+  const t = (node && node.tagName || "").toLowerCase();
+  return t === "input" || t === "select" || t === "button" || t === "a" || t === "label" || t === "textarea";
+}
 
-    const imdbId = req.params.id; await loadSnapshotScoped(String(req.params.uid));
-    if (!isImdb(imdbId)) return res.json({ meta:{ id: imdbId, type:"movie", name:"Unknown item" } });
-app.listen(PORT, HOST, () => {
-    console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
-    console.log(`Manifest: http://localhost:${PORT}/manifest.json${SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""}`);
+// Row drag (table tbody)
+function attachRowDnD(tbody) {
+  let dragSrc = null;
+  tbody.addEventListener('dragstart', (e) => {
+    const tr = e.target.closest('tr[data-lsid]');
+    if (!tr || isCtrl(e.target)) return;
+    dragSrc = tr;
+    tr.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
   });
-})();
+  tbody.addEventListener('dragend', () => { if (dragSrc) dragSrc.classList.remove('dragging'); dragSrc = null; });
+  tbody.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (!dragSrc) return;
+    const over = e.target.closest('tr[data-lsid]');
+    if (!over || over === dragSrc) return;
+    const rect = over.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
+  });
+}
+
+// Thumb drag (ul.thumbs)
+function attachThumbDnD(ul) {
+  let src = null;
+  ul.addEventListener('dragstart', (e)=>{
+    const li = e.target.closest('li.thumb'); if (!li || li.hasAttribute('data-add')) return;
+    src = li; li.classList.add('dragging');
+    e.dataTransfer.effectAllowed='move';
+    e.dataTransfer.setData('text/plain', li.dataset.id || '');
+  });
+  ul.addEventListener('dragend', ()=>{ if(src){src.classList.remove('dragging'); src=null;} });
+  ul.addEventListener('dragover', (e)=>{
+    e.preventDefault();
+    if (!src) return;
+    const over = e.target.closest('li.thumb'); if (!over || over===src || over.hasAttribute('data-add')) return;
+    const rect = over.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height/2;
+    over.parentNode.insertBefore(src, before ? over : over.nextSibling);
+  });
+}
+
+// client-side sort helpers (mirror server)
+function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(String(y)+'-01-01'); if(!Number.isNaN(t)) return t;} return null; }
+function stableSortClient(items, sortKey){
+  const s = String(sortKey||'name_asc').toLowerCase();
+  const dir = s.endsWith('_asc') ? 1 : -1;
+  const key = s.split('_')[0];
+  const cmpNullBottom = (a,b) => (a==null && b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0))));
+  return items.map((m,i)=>({m,i})).sort((A,B)=>{
+    const a=A.m,b=B.m; let c=0;
+    if (key==='date') c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
+    else if (key==='rating') c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    else if (key==='runtime') c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
+    else c = (a.name||'').localeCompare(b.name||'');
+    if (c===0){ c=(a.name||'').localeCompare(b.name||''); if(c===0) c=(a.id||'').localeCompare(b.id||''); if(c===0) c=A.i-B.i; }
+    return c*dir;
+  }).map(x=>x.m);
+}
+
+async function render() {
+  const prefs = await getPrefs();
+  const lists = await getLists();
+
+  function renderPills(id, arr, onRemove){
+    const wrap = document.getElementById(id); wrap.innerHTML = '';
+    (arr||[]).forEach((txt, idx)=>{
+      const pill = el('span', {class:'pill'}, [
+        el('span',{text:txt}),
+        el('span',{class:'x',text:'✕'})
+      ]);
+      pill.querySelector('.x').onclick = ()=> onRemove(idx);
+      wrap.appendChild(pill);
+      wrap.appendChild(document.createTextNode(' '));
+    });
+    if (!arr || !arr.length) wrap.textContent = '(none)';
+  }
+  renderPills('userPills', prefs.sources?.users || [], (i)=>{
+    prefs.sources.users.splice(i,1);
+    saveAll('Saved');
+  });
+  renderPills('listPills', prefs.sources?.lists || [], (i)=>{
+    prefs.sources.lists.splice(i,1);
+    saveAll('Saved');
+  });
+
+  // Blocked pills with Unblock action
+  {
+    const blockedWrap = document.getElementById('blockedPills');
+    blockedWrap.innerHTML = '';
+    const blocked = prefs.blocked || [];
+    if (!blocked.length) blockedWrap.textContent = '(none)';
+    blocked.forEach(lsid=>{
+      const pill = el('span',{class:'pill'},[
+        el('span',{text:lsid}),
+        el('span',{class:'x',text:' Unblock'})
+      ]);
+      pill.querySelector('.x').onclick = async ()=>{
+        await fetch('/api/unblock-list?admin='+ADMIN, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lsid })
+        });
+        location.reload();
+      };
+      blockedWrap.appendChild(pill);
+      blockedWrap.appendChild(document.createTextNode(' '));
+    });
+  }
+
+  const container = document.getElementById('prefs'); container.innerHTML = "";
+
+  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
+  const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
+  const missing   = Object.keys(lists).filter(id => !baseOrder.includes(id))
+    .sort((a,b)=>( (lists[a]?.name||a).localeCompare(lists[b]?.name||b) ));
+  const order = baseOrder.concat(missing);
+
+  const table = el('table');
+  const thead = el('thead', {}, [el('tr',{},[
+    el('th',{text:''}), el('th',{text:'Enabled'}), el('th',{text:'List (lsid)'}), el('th',{text:'Items'}),
+    el('th',{text:'Default sort'}), el('th',{text:'Remove'})
+  ])]);
+  table.appendChild(thead);
+  const tbody = el('tbody');
+
+  function makeDrawer(lsid) {
+    const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
+    const td = el('td',{colspan:'6'});
+    td.appendChild(el('div',{text:'Loading…'}));
+    tr.appendChild(td);
+
+    getListItems(lsid).then(({items})=>{
+      td.innerHTML = '';
+
+      const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
+      const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
+      const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
+
+      const tools = el('div', {class:'rowtools'});
+      const saveBtn = el('button',{text:'Save order'});
+      const resetBtn = el('button',{text:'Reset order'});
+      const resetAllBtn = el('button',{text:'Full reset'});
+      tools.appendChild(saveBtn); tools.appendChild(resetBtn); tools.appendChild(resetAllBtn);
+
+      const optsWrap = el('div',{class:'rowtools'});
+      optsWrap.appendChild(el('span',{class:'mini muted', text:'Sort options shown in Stremio:'}));
+      const current = (prefs.sortOptions && prefs.sortOptions[lsid] && prefs.sortOptions[lsid].length) ? new Set(prefs.sortOptions[lsid]) : new Set(SORT_OPTIONS);
+      SORT_OPTIONS.forEach(opt=>{
+        const lab = el('label',{class:'pill'});
+        const cb = el('input',{type:'checkbox'}); cb.checked = current.has(opt);
+        cb.onchange = ()=>{
+          const arr = Array.from(optsWrap.querySelectorAll('input')).map((c,i)=>c.checked?SORT_OPTIONS[i]:null).filter(Boolean);
+          prefs.sortOptions = prefs.sortOptions || {};
+          prefs.sortOptions[lsid] = arr.length ? arr : SORT_OPTIONS.slice();
+        };
+        lab.appendChild(cb);
+        lab.appendChild(el('span',{text:opt}));
+        optsWrap.appendChild(lab);
+      });
+
+      td.appendChild(tools);
+      td.appendChild(optsWrap);
+
+      const ul = el('ul',{class:'thumbs'});
+      td.appendChild(ul);
+
+      function liFor(it){
+        const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
+        li.appendChild(el('div',{class:'del',text:'×'}));
+        li.querySelector('.del').onclick = async (e)=>{
+          e.stopPropagation();
+          if (!confirm('Remove this item from the list?')) return;
+          await fetch('/api/list-remove?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: it.id })});
+          await refresh();
+        };
+        const img = el('img',{src: it.poster || '', alt:''});
+        const wrap = el('div',{},[
+          el('div',{class:'title',text: it.name || it.id}),
+          el('div',{class:'id',text: it.id})
+        ]);
+        li.appendChild(img); li.appendChild(wrap);
+        return li;
+      }
+
+     function addTile(){
+  const li = el('li',{class:'thumb add','data-add':'1'});
+  const box = el('div',{class:'addbox'},[
+    el('div',{text:'Add by IMDb ID (tt...)'}),
+    el('input',{type:'text',placeholder:'tt1234567 or IMDb URL', spellcheck:'false'})
+  ]);
+  li.appendChild(box);
+
+  const input = box.querySelector('input');
+
+  async function doAdd(){
+    // accept bare ID or a full IMDb title URL
+    const v = (input.value || '').trim();
+    const m = v.match(/(tt\\d{7,})/i);
+    if (!m) { alert('Enter a valid IMDb id'); return; }
+
+    input.disabled = true;
+    try {
+      await fetch('/api/list-add?admin='+ADMIN, {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ lsid, id: m[1] })
+      });
+      input.value = '';
+      await refresh();
+    } finally {
+      input.disabled = false;
+    }
+  }
+
+  // Wire once (no stacking) – press Enter to add
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); doAdd(); }
+  });
+  // don’t let clicks on the input bubble up and rebind anything
+  input.addEventListener('click', (e) => e.stopPropagation());
+
+  return li;
+}
+
+
+      function renderList(arr){
+        ul.innerHTML = '';
+        arr.forEach(it => ul.appendChild(liFor(it)));
+        ul.appendChild(addTile());
+        attachThumbDnD(ul);
+      }
+
+      function orderFor(sortKey){
+        if (sortKey === 'custom' && prefs.customOrder && Array.isArray(prefs.customOrder[lsid]) && prefs.customOrder[lsid].length){
+          const pos = new Map(prefs.customOrder[lsid].map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=>{
+            const pa = pos.has(a.id)?pos.get(a.id):1e9;
+            const pb = pos.has(b.id)?pos.get(b.id):1e9;
+            return pa-pb;
+          });
+        } else if (sortKey === 'imdb') {
+          return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
+        } else if (sortKey === 'date_asc' && imdbDateAsc.length){
+          const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+        } else if (sortKey === 'date_desc' && imdbDateDesc.length){
+          const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+        } else {
+          return stableSortClient(items, sortKey);
+        }
+      }
+
+      // initial render (respect current default sort)
+      const def = (prefs.perListSort && prefs.perListSort[lsid]) || 'name_asc';
+      renderList(orderFor(def));
+
+      saveBtn.onclick = async ()=>{
+        const ids = Array.from(ul.querySelectorAll('li.thumb[data-id]')).map(li=>li.getAttribute('data-id'));
+        saveBtn.disabled = true; resetBtn.disabled = true; resetAllBtn.disabled = true;
+        try {
+          await saveCustomOrder(lsid, ids);
+          const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+          if (rowSel) rowSel.value = 'custom';
+          prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = 'custom';
+          saveBtn.textContent = "Saved ✓";
+          setTimeout(()=> saveBtn.textContent = "Save order", 1500);
+        } catch(e) {
+          alert("Failed to save custom order");
+        } finally {
+          saveBtn.disabled = false; resetBtn.disabled = false; resetAllBtn.disabled = false;
+        }
+      };
+
+      resetBtn.onclick = ()=>{
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
+        renderList(orderFor(chosen));
+      };
+
+      resetAllBtn.onclick = async ()=>{
+        if (!confirm('Full reset: clear custom order and local add/remove edits for this list?')) return;
+        resetAllBtn.disabled = true;
+        try{
+          await fetch('/api/list-reset?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
+          await refresh();
+        } finally { resetAllBtn.disabled = false; }
+      };
+
+      async function refresh(){
+        const r = await getListItems(lsid);
+        items = r.items || [];
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
+        renderList(orderFor(chosen));
+      }
+    }).catch(()=>{ td.textContent = "Failed to load items."; });
+
+    return tr;
+  }
+
+  function removeList(lsid){
+    if (!confirm('Remove this list and block it from reappearing?')) return;
+    fetch('/api/remove-list?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })})
+      .then(()=> location.reload())
+      .catch(()=> alert('Remove failed'));
+  }
+
+  function makeRow(lsid) {
+    const L = lists[lsid];
+    const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
+
+    const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
+    const chevTd = el('td',{},[chev]);
+
+    const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
+    cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
+
+    const nameCell = el('td',{}); 
+    nameCell.appendChild(el('div',{text:(L.name||lsid)}));
+    nameCell.appendChild(el('small',{text:lsid}));
+
+    const count = el('td',{text:String((L.ids||[]).length)});
+
+    const sortSel = el('select');
+    SORT_OPTIONS.forEach(o=>{
+      const opt = el('option',{value:o,text:o});
+      const def = (prefs.perListSort && prefs.perListSort[lsid]) || "name_asc";
+      if (o===def) opt.setAttribute('selected','');
+      sortSel.appendChild(opt);
+    });
+    sortSel.addEventListener('change', ()=>{
+      prefs.perListSort = prefs.perListSort || {}; 
+      prefs.perListSort[lsid] = sortSel.value;
+      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+      if (drawer && drawer.style.display !== "none") {
+        const resetBtn = drawer.querySelectorAll('button')[1];
+        if (resetBtn) resetBtn.click();
+      }
+    });
+
+    const rmBtn = el('button',{text:'Remove'});
+    rmBtn.onclick = ()=> removeList(lsid);
+
+    tr.appendChild(chevTd);
+    tr.appendChild(el('td',{},[cb]));
+    tr.appendChild(nameCell);
+    tr.appendChild(count);
+    tr.appendChild(el('td',{},[sortSel]));
+    tr.appendChild(el('td',{},[rmBtn]));
+
+    let drawer = null; let open = false;
+    chev.onclick = ()=>{
+      open = !open;
+      if (open) {
+        chev.textContent = "▴";
+        if (!drawer) {
+          drawer = makeDrawer(lsid);
+          tr.parentNode.insertBefore(drawer, tr.nextSibling);
+        } else {
+          drawer.style.display = "";
+        }
+      } else {
+        chev.textContent = "▾";
+        if (drawer) drawer.style.display = "none";
+      }
+    };
+
+    return tr;
+  }
+
+  order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
+  table.appendChild(tbody);
+  attachRowDnD(tbody);
+
+  container.appendChild(table);
+
+  const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'});
+  const saveBtn = el('button',{text:'Save'});
+  const msg = el('span',{class:'inline-note'});
+  saveWrap.appendChild(saveBtn); saveWrap.appendChild(msg);
+  container.appendChild(saveWrap);
+
+  async function saveAll(text){
+    const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+    const enabled = Array.from(enabledSet);
+    const body = {
+      enabled,
+      order: newOrder,
+      defaultList: prefs.defaultList || (enabled[0] || ""),
+      perListSort: prefs.perListSort || {},
+      sortOptions: prefs.sortOptions || {},
+      upgradeEpisodes: prefs.upgradeEpisodes || false,
+      sources: prefs.sources || {},
+      blocked: prefs.blocked || []
+    };
+    msg.textContent = "Saving…";
+    const r = await fetch('/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const t = await r.text();
+    msg.textContent = text || t || "Saved.";
+    setTimeout(()=>{ msg.textContent = ""; }, 1800);
+  }
+
+  saveBtn.onclick = ()=> saveAll();
+}
+
+render();
+</script>
+</body></html>`;");
+    const html = __tpl(uid, manifestUrl, rows, disc, lastSyncText);
+    // rewrite all absolute links to point to /u/:uid/ endpoints
+    const fixed = html
+      .replace(/href="\/manifest\.json[^"]*"/g, `href="${manifestUrl}"`)
+      .replace(/action="\/api\//g, `action="/u/${uid}/api/`)
+      .replace(/fetch\('\/api\//g, `fetch('/u/${uid}/api/`)
+      .replace(/\/admin\?admin=/g, `/u/${uid}/admin?key=`);
+    res.type("html").send(fixed);
+  });
+});
+
+// API endpoints scoped per-user (mirror originals)
+// We wrap each handler in withUserWorkspace + queue to avoid snapshot save conflicts.
+function perUserRoute(method, path, handler){
+  app[method](`/u/:uid${path}`, async (req,res)=>{
+    const uid = req.params.uid;
+    if (!userAllowed(req, uid)) return res.status(403).send("Forbidden");
+    await queue(()=> withUserWorkspace(uid, async (saveScoped)=> handler(req,res, saveScoped)));
+  });
+}
+// clone /api endpoints (those used by the Admin UI)
+perUserRoute("get", "/api/lists", async (req,res)=>{ res.json(LISTS); });
+perUserRoute("get", "/api/prefs", async (req,res)=>{ res.json(PREFS); });
+
+perUserRoute("post", "/api/prefs", async (req,res, saveScoped)=>{
+  const body = req.body || {};
+  PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
+  PREFS.order           = Array.isArray(body.order) ? body.order.filter(isListId) : [];
+  if (body.defaultList) PREFS.defaultList = String(body.defaultList);
+  PREFS.perListSort     = typeof body.perListSort === "object" ? body.perListSort : {};
+  PREFS.sortOptions     = typeof body.sortOptions === "object" ? Object.fromEntries(Object.entries(body.sortOptions||{}).map(([k,v])=>[k, clampSortOptions(v)])) : {};
+  PREFS.customOrder     = typeof body.customOrder === "object" ? body.customOrder : {};
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: ++MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.json({ ok:true, manifestRev: MANIFEST_REV });
+});
+
+perUserRoute("get", "/api/list-items", async (req,res)=>{
+  const lsid = String(req.query.lsid||"");
+  if (!isListId(lsid) || !LISTS[lsid]) return res.json({ items: [] });
+  const list = LISTS[lsid];
+  const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || { added:[], removed:[] };
+  const removed = new Set((ed.removed||[]).filter(isImdb));
+  const added   = (ed.added||[]).filter(isImdb);
+  let ids = (list.ids||[]).filter(tt => !removed.has(tt));
+  for (const tt of added) if (!ids.includes(tt)) ids.push(tt);
+  const items = ids.map(tt => CARD.get(tt) || cardFor(tt));
+  res.json({ items });
+});
+
+perUserRoute("post", "/api/list-add", async (req,res, saveScoped)=>{
+  const lsid = String(req.body.lsid||""); let tt = String(req.body.id||"").trim();
+  const m = tt.match(/tt\d{7,}/i);
+  if (!isListId(lsid) || !m) return res.status(400).send("Bad input");
+  tt = m[0];
+  PREFS.listEdits = PREFS.listEdits || {};
+  const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added:[], removed:[] });
+  if (!ed.added.includes(tt)) ed.added.push(tt);
+  ed.removed = (ed.removed || []).filter(x=>x!==tt);
+  await getBestMeta(tt); CARD.set(tt, cardFor(tt));
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: ++MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.json({ ok:true });
+});
+
+perUserRoute("post", "/api/list-remove", async (req,res, saveScoped)=>{
+  const lsid = String(req.body.lsid||""); const tt = String(req.body.id||"").trim();
+  if (!isListId(lsid) || !isImdb(tt)) return res.status(400).send("Bad input");
+  PREFS.listEdits = PREFS.listEdits || {};
+  const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added:[], removed:[] });
+  if (!ed.removed.includes(tt)) ed.removed.push(tt);
+  ed.added = (ed.added || []).filter(x=>x!==tt);
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: ++MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.json({ ok:true });
+});
+
+perUserRoute("post", "/api/custom-order", async (req,res, saveScoped)=>{
+  const lsid = String(req.body.lsid||""); const order = Array.isArray(req.body.order)?req.body.order.filter(isImdb):[];
+  if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+  PREFS.customOrder = PREFS.customOrder || {}; PREFS.customOrder[lsid] = order;
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: ++MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.json({ ok:true });
+});
+
+perUserRoute("post", "/api/list-reset", async (req,res, saveScoped)=>{
+  const lsid = String(req.body.lsid||""); if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+  PREFS.customOrder = PREFS.customOrder || {}; delete PREFS.customOrder[lsid];
+  if (PREFS.listEdits) delete PREFS.listEdits[lsid];
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: ++MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.json({ ok:true });
+});
+
+perUserRoute("post", "/api/unblock-list", async (req,res, saveScoped)=>{
+  const lsid = String(req.body.lsid||"");
+  if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+  PREFS.blocked = (PREFS.blocked || []).filter(id => id !== lsid);
+  await fullSync({ rediscover:true });
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.status(200).send("Unblocked & synced");
+});
+
+perUserRoute("post", "/api/remove-list", async (req,res, saveScoped)=>{
+  const lsid = String(req.body.lsid||"");
+  if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+  delete LISTS[lsid];
+  PREFS.enabled = (PREFS.enabled||[]).filter(id=>id!==lsid);
+  PREFS.order   = (PREFS.order||[]).filter(id=>id!==lsid);
+  PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: ++MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.status(200).send("Removed & blocked");
+});
+
+perUserRoute("post", "/api/add-sources", async (req,res, saveScoped)=>{
+  const users = Array.isArray(req.body.users) ? req.body.users.map(s=>String(s).trim()).filter(Boolean) : [];
+  const lists = Array.isArray(req.body.lists) ? req.body.lists.map(s=>String(s).trim()).filter(Boolean) : [];
+  PREFS.sources = PREFS.sources || { users:[], lists:[] };
+  PREFS.sources.users = Array.from(new Set([ ...(PREFS.sources.users||[]), ...users ]));
+  PREFS.sources.lists = Array.from(new Set([ ...(PREFS.sources.lists||[]), ...lists ]));
+  // save prefs immediately so admin sees updated sources
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  // then trigger a sync
+  await fullSync({ rediscover:true });
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.status(200).send("Sources added & synced");
+});
+
+perUserRoute("post", "/api/sync", async (req,res, saveScoped)=>{
+  await fullSync({ rediscover:true });
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.json({ ok:true });
+});
+
+perUserRoute("post", "/api/purge-sync", async (req,res, saveScoped)=>{
+  PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]) ]));
+  await fullSync({ rediscover:true });
+  await saveScoped({
+    lastSyncAt: LAST_SYNC_AT,
+    manifestRev: MANIFEST_REV,
+    lists: LISTS,
+    prefs: PREFS,
+    fallback: Object.fromEntries(FALLBK),
+    cards: Object.fromEntries(CARD),
+    ep2ser: Object.fromEntries(EP2SER)
+  });
+  res.json({ ok:true });
+});
+// ======================= END PUBLIC EXTENSION =======================
