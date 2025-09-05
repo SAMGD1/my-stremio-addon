@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.3.0
+ *  v12.3.1
  */
 "use strict";
 const express = require("express");
@@ -31,7 +31,7 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.1";
 const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -573,7 +573,7 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.3.0",
+  version: "12.3.1",
   name: "My Lists",
   description: "Your IMDb lists as catalogs (cached).",
   resources: ["catalog","meta"],
@@ -1093,6 +1093,52 @@ async function saveCustomOrder(lsid, order){
   return r.json();
 }
 
+// --- normalize helpers + wire "Add" buttons ---
+function normalizeUserListsUrl(v){
+  v = String(v||'').trim();
+  if (!v) return null;
+  if (/imdb\\.com\\/user\\/ur\\d+\\/lists/i.test(v)) return v;
+  const m = v.match(/ur\\d{6,}/i);
+  return m ? 'https://www.imdb.com/user/'+m[0]+'/lists/' : null;
+}
+function normalizeListIdOrUrl2(v){
+  v = String(v||'').trim();
+  if (!v) return null;
+  if (/imdb\\.com\\/list\\/ls\\d{6,}/i.test(v)) return v;
+  const m = v.match(/ls\\d{6,}/i);
+  return m ? 'https://www.imdb.com/list/'+m[0]+'/' : null;
+}
+async function addSources(payload){
+  await fetch('/api/add-sources?admin='+ADMIN, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+}
+function wireAddButtons(){
+  const userBtn = document.getElementById('addUser');
+  const listBtn = document.getElementById('addList');
+  const userInp = document.getElementById('userInput');
+  const listInp = document.getElementById('listInput');
+
+  userBtn.onclick = async (e) => {
+    e.preventDefault();
+    const url = normalizeUserListsUrl(userInp.value);
+    if (!url) { alert('Enter a valid IMDb user /lists URL or ur… id'); return; }
+    userBtn.disabled = true;
+    try { await addSources({ users:[url], lists:[] }); location.reload(); }
+    finally { userBtn.disabled = false; }
+  };
+
+  listBtn.onclick = async (e) => {
+    e.preventDefault();
+    const url = normalizeListIdOrUrl2(listInp.value);
+    if (!url) { alert('Enter a valid IMDb list URL or ls… id'); return; }
+    listBtn.disabled = true;
+    try { await addSources({ users:[], lists:[url] }); location.reload(); }
+    finally { listBtn.disabled = false; }
+  };
+}
+
 function el(tag, attrs={}, kids=[]) {
   const e = document.createElement(tag);
   for (const k in attrs) {
@@ -1306,9 +1352,21 @@ async function render() {
   async function doAdd(){
     // accept bare ID or a full IMDb title URL
     const v = (input.value || '').trim();
-    const m = v.match(/(tt\\d{7,})/i);
-    if (!m) { alert('Enter a valid IMDb id'); return; }
+    const m = v.match(/(tt\\d{7,})/i); // placeholder, replaced below
+  }
 
+  // Wire once (no stacking) – press Enter to add
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); doAddReal(); }
+  });
+  // don’t let clicks on the input bubble up and rebind anything
+  input.addEventListener('click', (e) => e.stopPropagation());
+
+  // correct implementation (single backslash)
+  async function doAddReal(){
+    const v = (input.value || '').trim();
+    const m = v.match(/(tt\\d{7,})/i); // keep escaped inside template
+    if (!m) { alert('Enter a valid IMDb id'); return; }
     input.disabled = true;
     try {
       await fetch('/api/list-add?admin='+ADMIN, {
@@ -1322,13 +1380,6 @@ async function render() {
       input.disabled = false;
     }
   }
-
-  // Wire once (no stacking) – press Enter to add
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); doAdd(); }
-  });
-  // don’t let clicks on the input bubble up and rebind anything
-  input.addEventListener('click', (e) => e.stopPropagation());
 
   return li;
 }
@@ -1515,6 +1566,7 @@ async function render() {
   saveBtn.onclick = ()=> saveAll();
 }
 
+wireAddButtons();
 render();
 </script>
 </body></html>`);
