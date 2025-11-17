@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.3.1
+ *  v12.3.1 + Trakt list support
  */
 "use strict";
 const express = require("express");
@@ -31,6 +31,9 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
 
+// NEW: Trakt support (public API key / client id)
+const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
+
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.1";
 const REQ_HEADERS = {
   "User-Agent": UA,
@@ -52,34 +55,38 @@ const VALID_SORT = new Set(SORT_OPTIONS);
 
 // ----------------- STATE -----------------
 /** LISTS = {
- *   [lsid]: {
+ *   [listId]: {
  *     id, name, url,
- *     ids:[tt...],                 // default order (= IMDb raw order after episode→series upgrade)
- *     orders: {                    // optional IMDb-backed orders we keep
- *        imdb:[tt...],             // raw imdb order (after episode upgrade/dedupe)
+ *     ids:[tt...],                 // default order (= IMDb/Trakt raw order after episode→series upgrade)
+ *     orders: {                    // optional IMDb-backed orders we keep (for IMDb lists)
+ *        imdb:[tt...],
  *        date_asc:[tt...],
  *        date_desc:[tt...]
  *     }
  *   }
  * }
+ *
+ * listId is either:
+ *   - IMDb list:  "ls123456789"
+ *   - Trakt list: "trakt:username:slug"
  */
 let LISTS = Object.create(null);
 
 /** PREFS saved to snapshot */
 let PREFS = {
-  listEdits: {},          // { [lsid]: { added: ["tt..."], removed: ["tt..."] } }
-  enabled: [],            // lsids shown in Stremio
-  order: [],              // lsids order in manifest
+  listEdits: {},          // { [listId]: { added: ["tt..."], removed: ["tt..."] } }
+  enabled: [],            // listIds shown in Stremio
+  order: [],              // listIds order in manifest
   defaultList: "",
-  perListSort: {},        // { lsid: 'date_asc' | ... | 'custom' }
-  sortOptions: {},        // { lsid: ['custom', 'date_desc', ...] } -> controls Stremio dropdown
-  customOrder: {},        // { lsid: [ 'tt...', 'tt...' ] }
+  perListSort: {},        // { listId: 'date_asc' | ... | 'custom' }
+  sortOptions: {},        // { listId: ['custom', 'date_desc', ...] } -> controls Stremio dropdown
+  customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
   upgradeEpisodes: UPGRADE_EPISODES,
   sources: {              // extra sources you add in the UI
-    users: [],            // array of user /lists URLs
-    lists: []             // array of list URLs or lsids
+    users: [],            // array of IMDb user /lists URLs
+    lists: []             // array of list URLs (IMDb or Trakt) or lsids
   },
-  blocked: []             // lsids you removed/blocked
+  blocked: []             // listIds you removed/blocked (IMDb or Trakt)
 };
 
 const BEST   = new Map(); // Map<tt, { kind, meta }>
@@ -96,7 +103,19 @@ let LAST_MANIFEST_KEY = "";
 
 // ----------------- UTILS -----------------
 const isImdb = v => /^tt\d{7,}$/i.test(String(v||""));
-const isListId = v => /^ls\d{6,}$/i.test(String(v||""));
+
+const isImdbListId = v => /^ls\d{6,}$/i.test(String(v||""));
+const isTraktListId = v => /^trakt:[^:]+:[^:]+$/i.test(String(v||""));
+const isListId = v => isImdbListId(v) || isTraktListId(v);
+
+function makeTraktListKey(user, slug) {
+  return `trakt:${user}:${slug}`;
+}
+function parseTraktListKey(id) {
+  const m = String(id || "").match(/^trakt:([^:]+):(.+)$/i);
+  return m ? { user: m[1], slug: m[2] } : null;
+}
+
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
@@ -167,6 +186,93 @@ async function loadSnapshot() {
     const txt = await fs.readFile(SNAP_LOCAL, "utf8");
     return JSON.parse(txt);
   } catch { return null; }
+}
+
+// ----------------- TRAKT HELPERS -----------------
+function parseTraktListUrl(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  const m = s.match(/trakt\.tv\/users\/([^/]+)\/lists\/([^/?#]+)/i);
+  if (!m) return null;
+  const user = decodeURIComponent(m[1]);
+  const slug = decodeURIComponent(m[2]);
+  return { user, slug };
+}
+
+async function traktJson(path) {
+  if (!TRAKT_CLIENT_ID) throw new Error("TRAKT_CLIENT_ID not set");
+  const url = `https://api.trakt.tv${path}`;
+  const r = await fetch(url, {
+    headers: {
+      "Content-Type": "application/json",
+      "trakt-api-version": "2",
+      "trakt-api-key": TRAKT_CLIENT_ID,
+      "User-Agent": UA
+    },
+    redirect: "follow"
+  });
+  if (!r.ok) throw new Error(`Trakt ${path} -> ${r.status}`);
+  try { return await r.json(); } catch { return null; }
+}
+
+async function fetchTraktListMeta(user, slug) {
+  try {
+    const data = await traktJson(`/users/${encodeURIComponent(user)}/lists/${encodeURIComponent(slug)}`);
+    if (!data) return null;
+    return {
+      name: data.name || `${user}/${slug}`,
+      url: `https://trakt.tv/users/${user}/lists/${slug}`
+    };
+  } catch (e) {
+    console.warn("[TRAKT] list meta failed", user, slug, e.message);
+    return null;
+  }
+}
+
+async function fetchTraktListImdbIds(user, slug) {
+  const types = [
+    { key: "movies",   prop: "movie"   },
+    { key: "shows",    prop: "show"    },
+    { key: "episodes", prop: "episode" }
+  ];
+  const out = [];
+  const seen = new Set();
+
+  for (const { key, prop } of types) {
+    let page = 1;
+    while (true) {
+      let items;
+      try {
+        items = await traktJson(`/users/${encodeURIComponent(user)}/lists/${encodeURIComponent(slug)}/items/${key}?page=${page}&limit=100`);
+      } catch (e) {
+        console.warn("[TRAKT] items fetch failed", user, slug, key, e.message);
+        break;
+      }
+      if (!Array.isArray(items) || !items.length) break;
+
+      for (const it of items) {
+        const obj = it[prop];
+        const ids = obj && obj.ids;
+        let imdb = ids && ids.imdb;
+
+        // For episodes, fall back to show imdb if needed
+        if (!imdb && key === "episodes" && it.show && it.show.ids && it.show.ids.imdb) {
+          imdb = it.show.ids.imdb;
+        }
+
+        if (imdb && isImdb(imdb) && !seen.has(imdb)) {
+          seen.add(imdb);
+          out.push(imdb);
+        }
+      }
+
+      if (items.length < 100) break;
+      page++;
+      await sleep(80);
+    }
+  }
+
+  return out;
 }
 
 // ----------------- IMDb DISCOVERY -----------------
@@ -343,7 +449,7 @@ function applyCustomOrder(metas, lsid) {
   const order = (PREFS.customOrder && PREFS.customOrder[lsid]) || [];
   if (!order || !order.length) return metas.slice();
   const pos = new Map(order.map((id, i) => [id, i]));
-  return metas.slice().sort((a,b) => {
+  return metas.slice().sort((a, b) => {
     const pa = pos.has(a.id) ? pos.get(a.id) : Number.MAX_SAFE_INTEGER;
     const pb = pos.has(b.id) ? pos.get(b.id) : Number.MAX_SAFE_INTEGER;
     if (pa !== pb) return pa - pb;
@@ -375,35 +481,92 @@ function manifestKey() {
 }
 
 async function harvestSources() {
-  const discovered = [];
+  const blocked = new Set(PREFS.blocked || []);
+  const map = new Map();
+
+  const add = (d) => {
+    if (!d || !d.id) return;
+    if (blocked.has(d.id)) return;
+    if (!d.name) d.name = d.id;
+    map.set(d.id, d);
+  };
+
+  // 1) IMDb main user /lists (auto-discovery)
   if (IMDB_USER_URL) {
-    try { discovered.push(...await discoverFromUserLists(IMDB_USER_URL)); } catch(e){ console.warn("[DISCOVER] main failed:", e.message); }
+    try {
+      const arr = await discoverFromUserLists(IMDB_USER_URL);
+      arr.forEach(add);
+    } catch (e) {
+      console.warn("[DISCOVER] main failed:", e.message);
+    }
   }
-  const users = Array.from(new Set((PREFS.sources?.users || []).map(s => String(s).trim()).filter(Boolean)));
+
+  // 2) extra IMDb user /lists URLs from prefs
+  const users = Array.from(
+    new Set((PREFS.sources?.users || []).map(s => String(s).trim()).filter(Boolean))
+  );
   for (const u of users) {
-    try { discovered.push(...await discoverFromUserLists(u)); }
-    catch(e){ console.warn("[DISCOVER] user", u, "failed:", e.message); }
+    try {
+      const arr = await discoverFromUserLists(u);
+      arr.forEach(add);
+    } catch (e) {
+      console.warn("[DISCOVER] user", u, "failed:", e.message);
+    }
     await sleep(80);
   }
+
+  // 3) explicit list URLs or IDs (IMDb or Trakt) + IMDB_LIST_IDS fallback
   const addlRaw = (PREFS.sources?.lists || []).concat(IMDB_LIST_IDS || []);
   for (const raw of addlRaw) {
-    const norm = normalizeListIdOrUrl(raw);
+    const val = String(raw || "").trim();
+    if (!val) continue;
+
+    // ---- Trakt lists ----
+    const tinfo = parseTraktListUrl(val);
+    if (tinfo) {
+      if (!TRAKT_CLIENT_ID) {
+        console.warn("[TRAKT] got list", val, "but TRAKT_CLIENT_ID is not set – ignoring.");
+        continue;
+      }
+      const key = makeTraktListKey(tinfo.user, tinfo.slug);
+      if (blocked.has(key)) continue;
+
+      let name = key;
+      try {
+        const meta = await fetchTraktListMeta(tinfo.user, tinfo.slug);
+        if (meta) {
+          name = meta.name || name;
+        }
+      } catch (e) {
+        console.warn("[TRAKT] meta fetch failed for", val, e.message);
+      }
+
+      add({
+        id: key,
+        url: `https://trakt.tv/users/${tinfo.user}/lists/${tinfo.slug}`,
+        name
+      });
+      await sleep(60);
+      continue;
+    }
+
+    // ---- IMDb lists ----
+    const norm = normalizeListIdOrUrl(val);
     if (!norm) continue;
-    let id = norm.id;
-    let url = norm.url;
+    let { id, url } = norm;
     if (!id) {
       const m = String(url).match(/ls\d{6,}/i);
       if (m) id = m[0];
     }
     if (!id) continue;
+
     let name = id;
-    try { name = await fetchListName(url); } catch {}
-    discovered.push({ id, url, name });
+    try { name = await fetchListName(url); } catch { /* ignore */ }
+
+    add({ id, url, name });
     await sleep(60);
   }
-  const blocked = new Set(PREFS.blocked || []);
-  const map = new Map();
-  for (const d of discovered) if (!blocked.has(d.id)) map.set(d.id, d);
+
   return Array.from(map.values());
 }
 
@@ -423,33 +586,61 @@ async function fullSync({ rediscover = true } = {}) {
 
     const next = Object.create(null);
     const seen = new Set();
-    for (const d of discovered) { next[d.id] = { id: d.id, name: d.name || d.id, url: d.url, ids: [], orders: {} }; seen.add(d.id); }
+    for (const d of discovered) {
+      next[d.id] = {
+        id: d.id,
+        name: d.name || d.id,
+        url: d.url,
+        ids: [],
+        orders: d.orders || {}
+      };
+      seen.add(d.id);
+    }
     const blocked = new Set(PREFS.blocked || []);
-    for (const id of Object.keys(LISTS)) if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
+    for (const id of Object.keys(LISTS)) {
+      if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
+    }
 
-    // pull items & IMDb date orders
+    // pull items for each list (IMDb or Trakt)
     const uniques = new Set();
     for (const id of Object.keys(next)) {
-      const url = next[id].url || `https://www.imdb.com/list/${id}/`;
-
+      const list = next[id];
       let raw = [];
-      try { raw = await fetchImdbListIdsAllPages(url); } catch {}
-      next[id].ids = raw.slice();
-      raw.forEach(tt => uniques.add(tt));
 
-      if (IMDB_FETCH_RELEASE_ORDERS) {
+      if (isTraktListId(id)) {
+        const ts = parseTraktListKey(id);
+        if (ts && TRAKT_CLIENT_ID) {
+          try {
+            raw = await fetchTraktListImdbIds(ts.user, ts.slug);
+          } catch (e) {
+            console.warn("[SYNC] Trakt fetch failed for", id, e.message);
+          }
+        }
+      } else {
+        const url = list.url || `https://www.imdb.com/list/${id}/`;
         try {
-          const asc  = await fetchImdbOrder(url, "release_date,asc");
-          const desc = await fetchImdbOrder(url, "release_date,desc");
-          next[id].orders = next[id].orders || {};
-          next[id].orders.date_asc  = asc.slice();
-          next[id].orders.date_desc = desc.slice();
-          asc.forEach(tt => uniques.add(tt));
-          desc.forEach(tt => uniques.add(tt));
+          raw = await fetchImdbListIdsAllPages(url);
         } catch (e) {
-          console.warn("[SYNC] release_date sort fetch failed for", id, e.message);
+          console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
+        }
+
+        if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
+          try {
+            const asc  = await fetchImdbOrder(url, "release_date,asc");
+            const desc = await fetchImdbOrder(url, "release_date,desc");
+            list.orders = list.orders || {};
+            list.orders.date_asc  = asc.slice();
+            list.orders.date_desc = desc.slice();
+            asc.forEach(tt => uniques.add(tt));
+            desc.forEach(tt => uniques.add(tt));
+          } catch (e) {
+            console.warn("[SYNC] release_date sort fetch failed for", id, e.message);
+          }
         }
       }
+
+      list.ids = raw.slice();
+      raw.forEach(tt => uniques.add(tt));
       await sleep(60);
     }
 
@@ -573,13 +764,12 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.3.1",            // keep your current version
+  version: "12.3.1",
   name: "My Lists",
-  description: "Your IMDb lists as catalogs (cached).",
+  description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
   types: ["my lists","movie","series"],
   idPrefixes: ["tt"],
-  // ⬇️ ADD THIS
   behaviorHints: {
     configurable: true,
     configurationRequired: false
@@ -614,13 +804,12 @@ app.get("/manifest.json", (req,res)=>{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
     const version = `${baseManifest.version}-${MANIFEST_REV}`;
-res.json({
-  ...baseManifest,
-  version,
-  catalogs: catalogs(),
-  // ⬇️ ADD THIS: where the “Configure” button should open
-  configuration: `${absoluteBase(req)}/configure`
-});
+    res.json({
+      ...baseManifest,
+      version,
+      catalogs: catalogs(),
+      configuration: `${absoluteBase(req)}/configure`
+    });
   }catch(e){ console.error("manifest:", e); res.status(500).send("Internal Server Error");}
 });
 
@@ -768,7 +957,7 @@ app.post("/api/unblock-list", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
     const lsid = String(req.body.lsid||"");
-    if (!/^ls\d{6,}$/i.test(lsid)) return res.status(400).send("Invalid lsid");
+    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
     PREFS.blocked = (PREFS.blocked || []).filter(id => id !== lsid);
     await fullSync({ rediscover:true });
     scheduleNextSync();
@@ -1057,7 +1246,7 @@ app.get("/admin", async (req,res)=>{
       <h3>Current Snapshot</h3>
       <ul>${rows}</ul>
       <div class="rowtools">
-        <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button class="btn2">Sync IMDb Lists Now</button></form>
+        <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}"><button class="btn2">Sync Lists Now</button></form>
         <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge & re-sync everything?')"><button>🧹 Purge & Sync</button></form>
         <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
       </div>
@@ -1082,8 +1271,8 @@ app.get("/admin", async (req,res)=>{
         <div><button id="addUser">Add</button></div>
       </div>
       <div class="row">
-        <div><label>Add IMDb <b>List</b> URL or ID (ls…)</label>
-          <input id="listInput" placeholder="https://www.imdb.com/list/ls123456789/ or ls123456789" />
+        <div><label>Add IMDb/Trakt <b>List</b> URL</label>
+          <input id="listInput" placeholder="IMDb ls… or Trakt list URL" />
         </div>
         <div><button id="addList">Add</button></div>
       </div>
@@ -1134,6 +1323,9 @@ function normalizeUserListsUrl(v){
 function normalizeListIdOrUrl2(v){
   v = String(v||'').trim();
   if (!v) return null;
+  // Trakt lists
+  if (/trakt\\.tv\\/users\\/[^/]+\\/lists\\/[^/?#]+/i.test(v)) return v;
+  // IMDb lists
   if (/imdb\\.com\\/list\\/ls\\d{6,}/i.test(v)) return v;
   const m = v.match(/ls\\d{6,}/i);
   return m ? 'https://www.imdb.com/list/'+m[0]+'/' : null;
@@ -1162,7 +1354,7 @@ function wireAddButtons(){
   listBtn.onclick = async (e) => {
     e.preventDefault();
     const url = normalizeListIdOrUrl2(listInp.value);
-    if (!url) { alert('Enter a valid IMDb list URL or ls… id'); return; }
+    if (!url) { alert('Enter a valid IMDb list URL, ls… id, or Trakt list URL'); return; }
     listBtn.disabled = true;
     try { await addSources({ users:[], lists:[url] }); location.reload(); }
     finally { listBtn.disabled = false; }
@@ -1304,7 +1496,7 @@ async function render() {
 
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:''}), el('th',{text:'Enabled'}), el('th',{text:'List (lsid)'}), el('th',{text:'Items'}),
+    el('th',{text:''}), el('th',{text:'Enabled'}), el('th',{text:'List (id)'}), el('th',{text:'Items'}),
     el('th',{text:'Default sort'}), el('th',{text:'Remove'})
   ])]);
   table.appendChild(thead);
@@ -1369,51 +1561,41 @@ async function render() {
         return li;
       }
 
-     function addTile(){
-  const li = el('li',{class:'thumb add','data-add':'1'});
-  const box = el('div',{class:'addbox'},[
-    el('div',{text:'Add by IMDb ID (tt...)'}),
-    el('input',{type:'text',placeholder:'tt1234567 or IMDb URL', spellcheck:'false'})
-  ]);
-  li.appendChild(box);
+      function addTile(){
+        const li = el('li',{class:'thumb add','data-add':'1'});
+        const box = el('div',{class:'addbox'},[
+          el('div',{text:'Add by IMDb ID (tt...)'}),
+          el('input',{type:'text',placeholder:'tt1234567 or IMDb URL', spellcheck:'false'})
+        ]);
+        li.appendChild(box);
 
-  const input = box.querySelector('input');
+        const input = box.querySelector('input');
 
-  async function doAdd(){
-    // accept bare ID or a full IMDb title URL
-    const v = (input.value || '').trim();
-    const m = v.match(/(tt\\d{7,})/i); // placeholder, replaced below
-  }
+        async function doAddReal(){
+          const v = (input.value || '').trim();
+          const m = v.match(/(tt\\d{7,})/i);
+          if (!m) { alert('Enter a valid IMDb id'); return; }
+          input.disabled = true;
+          try {
+            await fetch('/api/list-add?admin='+ADMIN, {
+              method: 'POST',
+              headers: { 'Content-Type':'application/json' },
+              body: JSON.stringify({ lsid, id: m[1] })
+            });
+            input.value = '';
+            await refresh();
+          } finally {
+            input.disabled = false;
+          }
+        }
 
-  // Wire once (no stacking) – press Enter to add
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); doAddReal(); }
-  });
-  // don’t let clicks on the input bubble up and rebind anything
-  input.addEventListener('click', (e) => e.stopPropagation());
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); doAddReal(); }
+        });
+        input.addEventListener('click', (e) => e.stopPropagation());
 
-  // correct implementation (single backslash)
-  async function doAddReal(){
-    const v = (input.value || '').trim();
-    const m = v.match(/(tt\\d{7,})/i); // keep escaped inside template
-    if (!m) { alert('Enter a valid IMDb id'); return; }
-    input.disabled = true;
-    try {
-      await fetch('/api/list-add?admin='+ADMIN, {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({ lsid, id: m[1] })
-      });
-      input.value = '';
-      await refresh();
-    } finally {
-      input.disabled = false;
-    }
-  }
-
-  return li;
-}
-
+        return li;
+      }
 
       function renderList(arr){
         ul.innerHTML = '';
@@ -1476,7 +1658,9 @@ async function render() {
         try{
           await fetch('/api/list-reset?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
           await refresh();
-        } finally { resetAllBtn.disabled = false; }
+        } finally {
+          resetAllBtn.disabled = false;
+        }
       };
 
       async function refresh(){
