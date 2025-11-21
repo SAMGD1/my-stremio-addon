@@ -317,12 +317,34 @@ function tconstsFromHtml(html) {
   return out;
 }
 function nextPageUrl(html) {
-  let m = html.match(/<a[^>]+rel=["']next["'][^>]+href=["']([^"']+)["']/i);
-  if (!m) m = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*class=["'][^"']*lister-page-next[^"']*["']/i);
-  if (!m) m = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*data-testid=["']pagination-next-page-button["'][^>]*>/i);
-  if (!m) return null;
-  try { return new URL(m[1], "https://www.imdb.com").toString(); } catch { return null; }
+  // Try several patterns IMDb has used for the "Next" pagination link
+  const patterns = [
+    // Standard rel="next"
+    /<a[^>]+rel=["']next["'][^>]+href=["']([^"']+)["']/i,
+
+    // Old list layout: class containing lister-page-next or pagination-next-page-button
+    /<a[^>]+href=["']([^"']+)["'][^>]*class=["'][^"']*(?:lister-page-next|pagination-next-page-button)[^"']*["'][^>]*>/i,
+
+    // Newer "Next Page" aria label style
+    /<a[^>]+href=["']([^"']+)["'][^>]*aria-label=["']Next[^"']*["'][^>]*>/i,
+
+    // Very generic: any link whose inner text contains "Next"
+    /<a[^>]+href=["']([^"']+)["'][^>]*>[^<]*Next(?:\s*&raquo;|\s*»)?[^<]*<\/a>/i
+  ];
+
+  for (const rx of patterns) {
+    const m = html.match(rx);
+    if (m && m[1]) {
+      try {
+        return new URL(m[1], "https://www.imdb.com").toString();
+      } catch {
+        // ignore and try next pattern
+      }
+    }
+  }
+  return null;
 }
+
 async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
   // raw order (whatever the list currently displays by default)
   const seen = new Set(); const ids = [];
