@@ -192,7 +192,7 @@ async function loadSnapshot() {
 function parseTraktListUrl(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
-  const m = s.match(/trakt\.tv\/users\/([^/]+)\/lists\/([^/?#]+)/i);
+  const m = s.match(/trakt\.tv\/users\/([^/]+)\/lists\/([^\/?#]+)/i);
   if (!m) return null;
   const user = decodeURIComponent(m[1]);
   const slug = decodeURIComponent(m[2]);
@@ -316,54 +316,70 @@ function tconstsFromHtml(html) {
   while ((m = re2.exec(html))) if (!seen.has(m[1])) { seen.add(m[1]); out.push(m[1]); }
   return out;
 }
+
+/**
+ * Old helper (now unused) that tries to parse a "Next" link from the HTML.
+ * Left here just in case, but pagination is now done by forcing ?page=N.
+ */
 function nextPageUrl(html) {
-  // Try several patterns IMDb has used for the "Next" pagination link
-  const patterns = [
-    // Standard rel="next"
-    /<a[^>]+rel=["']next["'][^>]+href=["']([^"']+)["']/i,
-
-    // Old list layout: class containing lister-page-next or pagination-next-page-button
-    /<a[^>]+href=["']([^"']+)["'][^>]*class=["'][^"']*(?:lister-page-next|pagination-next-page-button)[^"']*["'][^>]*>/i,
-
-    // Newer "Next Page" aria label style
-    /<a[^>]+href=["']([^"']+)["'][^>]*aria-label=["']Next[^"']*["'][^>]*>/i,
-
-    // Very generic: any link whose inner text contains "Next"
-    /<a[^>]+href=["']([^"']+)["'][^>]*>[^<]*Next(?:\s*&raquo;|\s*»)?[^<]*<\/a>/i
-  ];
-
-  for (const rx of patterns) {
-    const m = html.match(rx);
-    if (m && m[1]) {
-      try {
-        return new URL(m[1], "https://www.imdb.com").toString();
-      } catch {
-        // ignore and try next pattern
-      }
-    }
-  }
-  return null;
+  let m = html.match(/<a[^>]+rel=["']next["'][^>]+href=["']([^"']+)["']/i);
+  if (!m) m = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*class=["'][^"']*lister-page-next[^"']*["'][^>]*>/i);
+  if (!m) m = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*data-testid=["']pagination-next-page-button["'][^>]*>/i);
+  if (!m) return null;
+  try { return new URL(m[1], "https://www.imdb.com").toString(); } catch { return null; }
 }
 
+/**
+ * NEW: page-based pagination for IMDb lists.
+ * - Always fetches page 1 (no ?page=) first.
+ * - Then forces ?page=2,3,... until no new IDs or maxPages reached.
+ * - This avoids depending on IMDb's "Next" link markup.
+ */
 async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
-  // raw order (whatever the list currently displays by default)
   const seen = new Set();
-  const ids = [];
+  const ids  = [];
 
-  let page = 1;
-  while (page <= maxPages) {
-    // Always force detail mode and explicit page number
-    let url = withParam(listUrl, "mode", "detail");
-    url = withParam(url, "page", String(page));
+  // Normalise: ensure mode=detail, strip any existing page param
+  const baseUrl = new URL(listUrl);
+  baseUrl.searchParams.set("mode", "detail");
+  baseUrl.searchParams.delete("page");
 
+  // --- Page 1: no explicit page parameter ---
+  try {
+    const firstUrl = withParam(baseUrl.toString(), "_", Date.now());
+    const html1 = await fetchText(firstUrl);
+    const found1 = tconstsFromHtml(html1);
+    let added1 = 0;
+    for (const tt of found1) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added1++;
+      }
+    }
+    // If the first page already gave us everything (or nothing), no reason to loop pages
+    if (!added1) return ids;
+  } catch (e) {
+    console.warn("[IMDb] page 1 fetch failed:", e.message);
+    return ids;
+  }
+
+  // --- Pages 2..N: force ?page=N ---
+  for (let page = 2; page <= maxPages; page++) {
     let html;
     try {
-      html = await fetchText(withParam(url, "_", Date.now()));
-    } catch {
-      break; // if IMDb fails or blocks us, stop
+      let u = new URL(baseUrl.toString());
+      u.searchParams.set("page", String(page));
+      u.searchParams.set("_", Date.now().toString());
+      html = await fetchText(u.toString());
+    } catch (e) {
+      console.warn("[IMDb] page fetch failed", listUrl, "page", page, e.message);
+      break;
     }
 
     const found = tconstsFromHtml(html);
+    if (!found.length) break;
+
     let added = 0;
     for (const tt of found) {
       if (!seen.has(tt)) {
@@ -373,35 +389,61 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
       }
     }
 
-    // if this page didn't give us any new IDs, we're done
+    // If this page added nothing new (e.g. IMDb ignored page=N), stop to avoid a loop
     if (!added) break;
 
-    page++;
     await sleep(80);
   }
 
   return ids;
 }
 
-// fetch order IMDb shows when sorted a certain way
+/**
+ * fetch order IMDb shows when sorted a certain way
+ * Now also page-based like fetchImdbListIdsAllPages, but with &sort=...
+ */
 async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, maxPages = 80) {
   const seen = new Set();
-  const ids = [];
+  const ids  = [];
 
-  let page = 1;
-  while (page <= maxPages) {
-    let url = withParam(listUrl, "mode", "detail");
-    url = withParam(url, "sort", sortSpec);
-    url = withParam(url, "page", String(page));
+  const baseUrl = new URL(listUrl);
+  baseUrl.searchParams.set("mode", "detail");
+  baseUrl.searchParams.set("sort", sortSpec);
+  baseUrl.searchParams.delete("page");
 
+  // First page (no explicit page)
+  try {
+    const firstUrl = withParam(baseUrl.toString(), "_", Date.now());
+    const html1 = await fetchText(firstUrl);
+    const found1 = tconstsFromHtml(html1);
+    for (const tt of found1) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+      }
+    }
+    if (!found1.length) return ids;
+  } catch (e) {
+    console.warn("[IMDb] order page 1 failed", listUrl, sortSpec, e.message);
+    return ids;
+  }
+
+  // Subsequent pages with ?page=N
+  for (let page = 2; page <= maxPages; page++) {
     let html;
     try {
-      html = await fetchText(withParam(url, "_", Date.now()));
-    } catch {
+      let u = new URL(baseUrl.toString());
+      u.searchParams.set("page", String(page));
+      u.searchParams.set("_", Date.now().toString());
+      html = await fetchText(u.toString());
+    } catch (e) {
+      console.warn("[IMDb] order page fetch failed", listUrl, sortSpec, "page", page, e.message);
       break;
     }
 
     const found = tconstsFromHtml(html);
+    if (!found.length) break;
+
     let added = 0;
     for (const tt of found) {
       if (!seen.has(tt)) {
@@ -410,10 +452,8 @@ async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, m
         added++;
       }
     }
-
     if (!added) break;
 
-    page++;
     await sleep(80);
   }
 
