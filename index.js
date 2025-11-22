@@ -347,37 +347,76 @@ function nextPageUrl(html) {
 
 async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
   // raw order (whatever the list currently displays by default)
-  const seen = new Set(); const ids = [];
-  let url = withParam(listUrl, "mode", "detail");
-  let pages = 0;
-  while (url && pages < maxPages) {
-    let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
+  const seen = new Set();
+  const ids = [];
+
+  let page = 1;
+  while (page <= maxPages) {
+    // Always force detail mode and explicit page number
+    let url = withParam(listUrl, "mode", "detail");
+    url = withParam(url, "page", String(page));
+
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break; // if IMDb fails or blocks us, stop
+    }
+
     const found = tconstsFromHtml(html);
     let added = 0;
-    for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); added++; }
-    pages++;
-    const next = nextPageUrl(html);
-    if (!next || !added) break;
-    url = next;
+    for (const tt of found) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added++;
+      }
+    }
+
+    // if this page didn't give us any new IDs, we're done
+    if (!added) break;
+
+    page++;
     await sleep(80);
   }
+
   return ids;
 }
+
 // fetch order IMDb shows when sorted a certain way
 async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, maxPages = 80) {
-  const seen = new Set(); const ids = [];
-  let url = withParam(withParam(listUrl, "mode", "detail"), "sort", sortSpec);
-  let pages = 0;
-  while (url && pages < maxPages) {
-    let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
+  const seen = new Set();
+  const ids = [];
+
+  let page = 1;
+  while (page <= maxPages) {
+    let url = withParam(listUrl, "mode", "detail");
+    url = withParam(url, "sort", sortSpec);
+    url = withParam(url, "page", String(page));
+
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
+
     const found = tconstsFromHtml(html);
-    for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); }
-    pages++;
-    const next = nextPageUrl(html);
-    if (!next) break;
-    url = next;
+    let added = 0;
+    for (const tt of found) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added++;
+      }
+    }
+
+    if (!added) break;
+
+    page++;
     await sleep(80);
   }
+
   return ids;
 }
 
