@@ -1,6 +1,6 @@
 {
   "name": "my-stremio-addon",
-  "version": "12.3.1",
+  "version": "12.4.0",
   "description": "IMDb lists → Stremio catalogs with per-list sorting, admin UI, and a Configure button.",
   "main": "index.js",
   "type": "commonjs",
