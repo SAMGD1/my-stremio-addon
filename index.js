@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.4.0 + Trakt list support + UI Revamp + Landscape support
+ *  v12.4.1 + Trakt list support + UI Revamp + Landscape support
  */
 "use strict";
 const express = require("express");
@@ -34,7 +34,7 @@ const SNAP_LOCAL    = "data/snapshot.json";
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.4.0";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.4.1";
 const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -784,7 +784,7 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.4.0",
+  version: "12.4.1",
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
@@ -1280,6 +1280,7 @@ app.get("/admin", async (req,res)=>{
 
 <script>
 const ADMIN="${ADMIN_PASSWORD}";
+const SECRET="${SHARED_SECRET}";
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 const HOST_URL = "${absoluteBase(req)}";
 
@@ -1287,7 +1288,7 @@ const HOST_URL = "${absoluteBase(req)}";
 document.getElementById('installBtn').onclick = (e) => {
   e.preventDefault();
   let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
-  if ("${SHARED_SECRET}") url += '?key=${SHARED_SECRET}';
+  if (SECRET) url += '?key=' + SECRET;
   window.location.href = url;
 };
 
@@ -1635,7 +1636,7 @@ async function render() {
 
       async function refreshDrawer() {
          const r = await getListItems(lsid); items = r.items;
-         const cur = document.querySelector(`tr[data-lsid="${lsid}"] select`).value;
+         const cur = document.querySelector('tr[data-lsid="' + lsid + '"] select').value;
          renderGrid(getSorted(cur));
       }
 
@@ -1646,13 +1647,13 @@ async function render() {
             await saveCustomOrder(lsid, ids);
             saveOrderBtn.innerText = 'Saved ✓'; setTimeout(()=>saveOrderBtn.innerText='Save Custom Order', 2000);
             // Auto set select to custom
-            const sel = document.querySelector(`tr[data-lsid="${lsid}"] select`);
+            const sel = document.querySelector('tr[data-lsid="' + lsid + '"] select');
             if(sel) { sel.value='custom'; sel.dispatchEvent(new Event('change')); }
          } catch(e) { alert('Error'); saveOrderBtn.innerText='Error'; }
       };
 
       resetOrderBtn.onclick = () => {
-         const cur = document.querySelector(`tr[data-lsid="${lsid}"] select`).value;
+         const cur = document.querySelector('tr[data-lsid="' + lsid + '"] select').value;
          renderGrid(getSorted(cur));
       };
       
