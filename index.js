@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.4.1 + Trakt list support + UI Revamp + Landscape support
+ *  v12.3.1 + Trakt list support + per-list posterShape (portrait/landscape)
  */
 "use strict";
 const express = require("express");
@@ -34,7 +34,7 @@ const SNAP_LOCAL    = "data/snapshot.json";
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.4.1";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.1";
 const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -80,8 +80,8 @@ let PREFS = {
   defaultList: "",
   perListSort: {},        // { listId: 'date_asc' | ... | 'custom' }
   sortOptions: {},        // { listId: ['custom', 'date_desc', ...] } -> controls Stremio dropdown
-  posterShapes: {},       // { listId: 'poster' | 'landscape' } -> controls Stremio display shape
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
+  posterShape: {},        // NEW: { listId: 'poster' | 'landscape' }
   upgradeEpisodes: UPGRADE_EPISODES,
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
@@ -193,7 +193,7 @@ async function loadSnapshot() {
 function parseTraktListUrl(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
-  const m = s.match(/trakt\.tv\/users\/([^/]+)\/lists\/([^\/?#]+)/i);
+  const m = s.match(/trakt\.tv\/users\/([^/]+)\/lists\/([^/?#]+)/i);
   if (!m) return null;
   const user = decodeURIComponent(m[1]);
   const slug = decodeURIComponent(m[2]);
@@ -317,110 +317,44 @@ function tconstsFromHtml(html) {
   while ((m = re2.exec(html))) if (!seen.has(m[1])) { seen.add(m[1]); out.push(m[1]); }
   return out;
 }
-
+function nextPageUrl(html) {
+  let m = html.match(/<a[^>]+rel=["']next["'][^>]+href=["']([^"']+)["']/i);
+  if (!m) m = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*class=["'][^"']*lister-page-next[^"']*["']/i);
+  if (!m) m = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*data-testid=["']pagination-next-page-button["'][^>]*>/i);
+  if (!m) return null;
+  try { return new URL(m[1], "https://www.imdb.com").toString(); } catch { return null; }
+}
 async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
-  const seen = new Set();
-  const ids  = [];
-
-  const baseUrl = new URL(listUrl);
-  baseUrl.searchParams.set("mode", "detail");
-  baseUrl.searchParams.delete("page");
-
-  try {
-    const firstUrl = withParam(baseUrl.toString(), "_", Date.now());
-    const html1 = await fetchText(firstUrl);
-    const found1 = tconstsFromHtml(html1);
-    let added1 = 0;
-    for (const tt of found1) {
-      if (!seen.has(tt)) {
-        seen.add(tt);
-        ids.push(tt);
-        added1++;
-      }
-    }
-    if (!added1) return ids;
-  } catch (e) {
-    console.warn("[IMDb] page 1 fetch failed:", e.message);
-    return ids;
-  }
-
-  for (let page = 2; page <= maxPages; page++) {
-    let html;
-    try {
-      let u = new URL(baseUrl.toString());
-      u.searchParams.set("page", String(page));
-      u.searchParams.set("_", Date.now().toString());
-      html = await fetchText(u.toString());
-    } catch (e) {
-      console.warn("[IMDb] page fetch failed", listUrl, "page", page, e.message);
-      break;
-    }
-
+  // raw order (whatever the list currently displays by default)
+  const seen = new Set(); const ids = [];
+  let url = withParam(listUrl, "mode", "detail");
+  let pages = 0;
+  while (url && pages < maxPages) {
+    let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
     const found = tconstsFromHtml(html);
-    if (!found.length) break;
-
     let added = 0;
-    for (const tt of found) {
-      if (!seen.has(tt)) {
-        seen.add(tt);
-        ids.push(tt);
-        added++;
-      }
-    }
-    if (!added) break;
+    for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); added++; }
+    pages++;
+    const next = nextPageUrl(html);
+    if (!next || !added) break;
+    url = next;
     await sleep(80);
   }
   return ids;
 }
-
-async function fetchImdbOrder(listUrl, sortSpec, maxPages = 80) {
-  const seen = new Set();
-  const ids  = [];
-  const baseUrl = new URL(listUrl);
-  baseUrl.searchParams.set("mode", "detail");
-  baseUrl.searchParams.set("sort", sortSpec);
-  baseUrl.searchParams.delete("page");
-
-  try {
-    const firstUrl = withParam(baseUrl.toString(), "_", Date.now());
-    const html1 = await fetchText(firstUrl);
-    const found1 = tconstsFromHtml(html1);
-    for (const tt of found1) {
-      if (!seen.has(tt)) {
-        seen.add(tt);
-        ids.push(tt);
-      }
-    }
-    if (!found1.length) return ids;
-  } catch (e) {
-    console.warn("[IMDb] order page 1 failed", listUrl, sortSpec, e.message);
-    return ids;
-  }
-
-  for (let page = 2; page <= maxPages; page++) {
-    let html;
-    try {
-      let u = new URL(baseUrl.toString());
-      u.searchParams.set("page", String(page));
-      u.searchParams.set("_", Date.now().toString());
-      html = await fetchText(u.toString());
-    } catch (e) {
-      console.warn("[IMDb] order page fetch failed", listUrl, sortSpec, "page", page, e.message);
-      break;
-    }
-
+// fetch order IMDb shows when sorted a certain way
+async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, maxPages = 80) {
+  const seen = new Set(); const ids = [];
+  let url = withParam(withParam(listUrl, "mode", "detail"), "sort", sortSpec);
+  let pages = 0;
+  while (url && pages < maxPages) {
+    let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
     const found = tconstsFromHtml(html);
-    if (!found.length) break;
-
-    let added = 0;
-    for (const tt of found) {
-      if (!seen.has(tt)) {
-        seen.add(tt);
-        ids.push(tt);
-        added++;
-      }
-    }
-    if (!added) break;
+    for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); }
+    pages++;
+    const next = nextPageUrl(html);
+    if (!next) break;
+    url = next;
     await sleep(80);
   }
   return ids;
@@ -539,13 +473,14 @@ function sortByOrderKey(metas, lsid, key) {
 // ----------------- SYNC -----------------
 function manifestKey() {
   const enabled = (PREFS.enabled && PREFS.enabled.length) ? PREFS.enabled : Object.keys(LISTS);
-  const names = enabled.map(id => LISTS[id]?.name || id).sort().join("|");
+  const names   = enabled.map(id => LISTS[id]?.name || id).sort().join("|");
   const perSort = JSON.stringify(PREFS.perListSort || {});
   const perOpts = JSON.stringify(PREFS.sortOptions || {});
-  const shapes = JSON.stringify(PREFS.posterShapes || {});
-  const custom = Object.keys(PREFS.customOrder || {}).length;
-  const order = (PREFS.order || []).join(",");
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#${shapes}#c${custom}`;
+  const custom  = Object.keys(PREFS.customOrder || {}).length;
+  const shapes  = JSON.stringify(PREFS.posterShape || {});   // include poster shapes
+  const order   = (PREFS.order || []).join(",");
+
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}#sh${shapes}`;
 }
 
 async function harvestSources() {
@@ -589,6 +524,7 @@ async function harvestSources() {
     const val = String(raw || "").trim();
     if (!val) continue;
 
+    // ---- Trakt lists ----
     const tinfo = parseTraktListUrl(val);
     if (tinfo) {
       if (!TRAKT_CLIENT_ID) {
@@ -597,24 +533,43 @@ async function harvestSources() {
       }
       const key = makeTraktListKey(tinfo.user, tinfo.slug);
       if (blocked.has(key)) continue;
+
       let name = key;
-      try { const meta = await fetchTraktListMeta(tinfo.user, tinfo.slug); if (meta) name = meta.name || name; }
-      catch (e) { console.warn("[TRAKT] meta fetch failed for", val, e.message); }
-      add({ id: key, url: `https://trakt.tv/users/${tinfo.user}/lists/${tinfo.slug}`, name });
+      try {
+        const meta = await fetchTraktListMeta(tinfo.user, tinfo.slug);
+        if (meta) {
+          name = meta.name || name;
+        }
+      } catch (e) {
+        console.warn("[TRAKT] meta fetch failed for", val, e.message);
+      }
+
+      add({
+        id: key,
+        url: `https://trakt.tv/users/${tinfo.user}/lists/${tinfo.slug}`,
+        name
+      });
       await sleep(60);
       continue;
     }
 
+    // ---- IMDb lists ----
     const norm = normalizeListIdOrUrl(val);
     if (!norm) continue;
     let { id, url } = norm;
-    if (!id) { const m = String(url).match(/ls\d{6,}/i); if (m) id = m[0]; }
+    if (!id) {
+      const m = String(url).match(/ls\d{6,}/i);
+      if (m) id = m[0];
+    }
     if (!id) continue;
+
     let name = id;
     try { name = await fetchListName(url); } catch { /* ignore */ }
+
     add({ id, url, name });
     await sleep(60);
   }
+
   return Array.from(map.values());
 }
 
@@ -624,7 +579,9 @@ async function fullSync({ rediscover = true } = {}) {
   const started = Date.now();
   try {
     let discovered = [];
-    if (rediscover) discovered = await harvestSources();
+    if (rediscover) {
+      discovered = await harvestSources();
+    }
     if ((!discovered || !discovered.length) && IMDB_LIST_IDS.length) {
       discovered = IMDB_LIST_IDS.map(id => ({ id, name: id, url: `https://www.imdb.com/list/${id}/` }));
       console.log(`[DISCOVER] used IMDB_LIST_IDS fallback (${discovered.length})`);
@@ -633,7 +590,13 @@ async function fullSync({ rediscover = true } = {}) {
     const next = Object.create(null);
     const seen = new Set();
     for (const d of discovered) {
-      next[d.id] = { id: d.id, name: d.name || d.id, url: d.url, ids: [], orders: d.orders || {} };
+      next[d.id] = {
+        id: d.id,
+        name: d.name || d.id,
+        url: d.url,
+        ids: [],
+        orders: d.orders || {}
+      };
       seen.add(d.id);
     }
     const blocked = new Set(PREFS.blocked || []);
@@ -641,20 +604,29 @@ async function fullSync({ rediscover = true } = {}) {
       if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
     }
 
+    // pull items for each list (IMDb or Trakt)
     const uniques = new Set();
     for (const id of Object.keys(next)) {
       const list = next[id];
       let raw = [];
+
       if (isTraktListId(id)) {
         const ts = parseTraktListKey(id);
         if (ts && TRAKT_CLIENT_ID) {
-          try { raw = await fetchTraktListImdbIds(ts.user, ts.slug); }
-          catch (e) { console.warn("[SYNC] Trakt fetch failed for", id, e.message); }
+          try {
+            raw = await fetchTraktListImdbIds(ts.user, ts.slug);
+          } catch (e) {
+            console.warn("[SYNC] Trakt fetch failed for", id, e.message);
+          }
         }
       } else {
         const url = list.url || `https://www.imdb.com/list/${id}/`;
-        try { raw = await fetchImdbListIdsAllPages(url); }
-        catch (e) { console.warn("[SYNC] IMDb list fetch failed for", id, e.message); }
+        try {
+          raw = await fetchImdbListIdsAllPages(url);
+        } catch (e) {
+          console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
+        }
+
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
           try {
             const asc  = await fetchImdbOrder(url, "release_date,asc");
@@ -664,14 +636,18 @@ async function fullSync({ rediscover = true } = {}) {
             list.orders.date_desc = desc.slice();
             asc.forEach(tt => uniques.add(tt));
             desc.forEach(tt => uniques.add(tt));
-          } catch (e) { console.warn("[SYNC] release_date sort fetch failed for", id, e.message); }
+          } catch (e) {
+            console.warn("[SYNC] release_date sort fetch failed for", id, e.message);
+          }
         }
       }
+
       list.ids = raw.slice();
       raw.forEach(tt => uniques.add(tt));
       await sleep(60);
     }
 
+    // episode → series (optional)
     let idsToPreload = Array.from(uniques);
     if (PREFS.upgradeEpisodes) {
       const up = new Set();
@@ -683,6 +659,7 @@ async function fullSync({ rediscover = true } = {}) {
         } else up.add(tt);
       }
       idsToPreload = Array.from(up);
+
       const remap = (arr) => {
         if (!Array.isArray(arr)) return [];
         const out = []; const S = new Set();
@@ -694,6 +671,7 @@ async function fullSync({ rediscover = true } = {}) {
         }
         return out;
       };
+
       for (const id of Object.keys(next)) {
         next[id].ids = remap(next[id].ids);
         next[id].orders = next[id].orders || {};
@@ -708,18 +686,22 @@ async function fullSync({ rediscover = true } = {}) {
       }
     }
 
+    // preload cards
     for (const tt of idsToPreload) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
 
     LISTS = next;
     LAST_SYNC_AT = Date.now();
 
+    // ensure prefs.order stability
     const allIds   = Object.keys(LISTS);
     const keep     = Array.isArray(PREFS.order) ? PREFS.order.filter(id => LISTS[id]) : [];
     const missingO = allIds.filter(id => !keep.includes(id));
     PREFS.order    = keep.concat(missingO);
+
     if (Array.isArray(PREFS.enabled) && PREFS.enabled.length) {
       PREFS.enabled = PREFS.enabled.filter(id => LISTS[id]);
     }
+
     const valid = new Set(Object.keys(LISTS));
     if (PREFS.customOrder) {
       for (const k of Object.keys(PREFS.customOrder)) if (!valid.has(k)) delete PREFS.customOrder[k];
@@ -741,6 +723,7 @@ async function fullSync({ rediscover = true } = {}) {
       cards: Object.fromEntries(CARD),
       ep2ser: Object.fromEntries(EP2SER)
     });
+
     console.log(`[SYNC] ok – ${Object.values(LISTS).reduce((n,L)=>n+(L.ids?.length||0),0)} items across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
   } catch (e) {
     console.error("[SYNC] failed:", e);
@@ -784,7 +767,7 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.4.1",
+  version: "12.3.1",
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
@@ -808,7 +791,7 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-    type: "my lists",
+    type: "my lists", // exact match with manifest -> fixes Android sort menu
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
@@ -816,8 +799,7 @@ function catalogs(){
       { name:"search" }, { name:"skip" }, { name:"limit" },
       { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
     ],
-    // Respect per-list poster shape preference. Default is "poster".
-    posterShape: (PREFS.posterShapes && PREFS.posterShapes[lsid]) === "landscape" ? "landscape" : "poster"
+    posterShape: (PREFS.posterShape && PREFS.posterShape[lsid]) || "poster" // portrait/landscape per list
   }));
 }
 app.get("/manifest.json", (req,res)=>{
@@ -837,6 +819,8 @@ app.get("/manifest.json", (req,res)=>{
 app.get("/configure", (req, res) => {
   const base = absoluteBase(req);
   const dest = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+
+  // Works inside Stremio’s webview; also shows a manual link as fallback
   res.type("html").send(`
     <!doctype html><meta charset="utf-8">
     <title>Configure – My Lists</title>
@@ -874,6 +858,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     const skip = Math.max(0, Number(extra.skip||0));
     const limit = Math.min(Number(extra.limit||100), 200);
 
+    // apply per-list edits (immediate effect)
     let ids = (list.ids || []).slice();
     const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
     const removed = new Set((ed.removed || []).filter(isImdb));
@@ -938,18 +923,30 @@ app.post("/api/prefs", async (req,res) => {
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : (PREFS.perListSort || {});
-    PREFS.posterShapes    = body.posterShapes && typeof body.posterShapes === "object" ? body.posterShapes : (PREFS.posterShapes || {});
-    PREFS.sortOptions     = body.sortOptions && typeof body.sortOptions === "object" ? Object.fromEntries(Object.entries(body.sortOptions).map(([k,v])=>[k,clampSortOptions(v)])) : (PREFS.sortOptions || {});
+    PREFS.sortOptions     = body.sortOptions && typeof body.sortOptions === "object"
+      ? Object.fromEntries(Object.entries(body.sortOptions).map(([k,v])=>[k,clampSortOptions(v)]))
+      : (PREFS.sortOptions || {});
+
+    // NEW: per-list posterShape
+    PREFS.posterShape = body.posterShape && typeof body.posterShape === "object"
+      ? Object.fromEntries(
+          Object.entries(body.posterShape)
+            .filter(([k,v]) => isListId(k) && (v === "poster" || v === "landscape"))
+        )
+      : (PREFS.posterShape || {});
+
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
 
     if (body.customOrder && typeof body.customOrder === "object") {
       PREFS.customOrder = body.customOrder;
     }
+
     const src = body.sources || {};
     PREFS.sources = {
       users: Array.isArray(src.users) ? src.users.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.users || []),
       lists: Array.isArray(src.lists) ? src.lists.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.lists || [])
     };
+
     PREFS.blocked = Array.isArray(body.blocked) ? body.blocked.filter(isListId) : (PREFS.blocked || []);
 
     const key = manifestKey();
@@ -969,6 +966,7 @@ app.post("/api/prefs", async (req,res) => {
   }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
 });
 
+// unblock a previously removed list
 app.post("/api/unblock-list", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -981,6 +979,7 @@ app.post("/api/unblock-list", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send("Failed"); }
 });
 
+// return cards for one list (for the drawer) — includes edits
 app.get("/api/list-items", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   const lsid = String(req.query.lsid || "");
@@ -998,6 +997,7 @@ app.get("/api/list-items", (req,res) => {
   res.json({ items });
 });
 
+// add an item (tt...) to a list
 app.post("/api/list-add", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1006,11 +1006,14 @@ app.post("/api/list-add", async (req, res) => {
     const m = tt.match(/tt\d{7,}/i);
     if (!isListId(lsid) || !m) return res.status(400).send("Bad input");
     tt = m[0];
+
     PREFS.listEdits = PREFS.listEdits || {};
     const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
     if (!ed.added.includes(tt)) ed.added.push(tt);
-    ed.removed = (ed.removed || []).filter(x => x !== tt);
+    ed.removed = (ed.removed || []).filter(x => x !== tt); // un-remove if it was removed
+
     await getBestMeta(tt); CARD.set(tt, cardFor(tt));
+
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
@@ -1020,10 +1023,12 @@ app.post("/api/list-add", async (req, res) => {
       cards: Object.fromEntries(CARD),
       ep2ser: Object.fromEntries(EP2SER)
     });
+
     res.status(200).send("Added");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
+// remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1032,10 +1037,13 @@ app.post("/api/list-remove", async (req, res) => {
     const m = tt.match(/tt\d{7,}/i);
     if (!isListId(lsid) || !m) return res.status(400).send("Bad input");
     tt = m[0];
+
     PREFS.listEdits = PREFS.listEdits || {};
     const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
+
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
@@ -1045,10 +1053,12 @@ app.post("/api/list-remove", async (req, res) => {
       cards: Object.fromEntries(CARD),
       ep2ser: Object.fromEntries(EP2SER)
     });
+
     res.status(200).send("Removed");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
+// clear custom order and all add/remove edits for a list
 app.post("/api/list-reset", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1056,6 +1066,7 @@ app.post("/api/list-reset", async (req, res) => {
     if (!isListId(lsid)) return res.status(400).send("Bad input");
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
+
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
@@ -1065,10 +1076,12 @@ app.post("/api/list-reset", async (req, res) => {
       cards: Object.fromEntries(CARD),
       ep2ser: Object.fromEntries(EP2SER)
     });
+
     res.status(200).send("Reset");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
+// save a per-list custom order and set default sort=custom
 app.post("/api/custom-order", async (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -1077,14 +1090,18 @@ app.post("/api/custom-order", async (req,res) => {
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
     const list = LISTS[lsid];
     if (!list) return res.status(404).send("List not found");
+
     const set = new Set(list.ids.concat(PREFS.listEdits?.[lsid]?.added || []));
     const clean = order.filter(id => set.has(id));
+
     PREFS.customOrder = PREFS.customOrder || {};
     PREFS.customOrder[lsid] = clean;
     PREFS.perListSort = PREFS.perListSort || {};
     PREFS.perListSort[lsid] = "custom";
+
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
+
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
@@ -1094,10 +1111,12 @@ app.post("/api/custom-order", async (req,res) => {
       cards: Object.fromEntries(CARD),
       ep2ser: Object.fromEntries(EP2SER)
     });
+
     res.status(200).json({ ok:true, manifestRev: MANIFEST_REV });
   }catch(e){ console.error("custom-order:", e); res.status(500).send("Failed"); }
 });
 
+// add sources quickly then sync
 app.post("/api/add-sources", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -1112,6 +1131,7 @@ app.post("/api/add-sources", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
+// remove/block a list
 app.post("/api/remove-list", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -1121,7 +1141,8 @@ app.post("/api/remove-list", async (req,res)=>{
     PREFS.enabled = (PREFS.enabled||[]).filter(id => id!==lsid);
     PREFS.order   = (PREFS.order||[]).filter(id => id!==lsid);
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
-    LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
+
+    LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
@@ -1140,7 +1161,7 @@ app.post("/api/sync", async (req,res)=>{
   try{
     await fullSync({ rediscover:true });
     scheduleNextSync();
-    res.status(200).send(`Synced at ${new Date().toISOString()}`);
+    res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 app.post("/api/purge-sync", async (req,res)=>{
@@ -1151,7 +1172,7 @@ app.post("/api/purge-sync", async (req,res)=>{
     PREFS.customOrder = PREFS.customOrder || {};
     await fullSync({ rediscover:true });
     scheduleNextSync();
-    res.status(200).send(`Purged & synced at ${new Date().toISOString()}`);
+    res.status(200).send(`Purged & synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
@@ -1165,132 +1186,316 @@ app.get("/api/debug-imdb", async (req,res)=>{
   }catch(e){ res.type("text").status(500).send("Fetch failed: "+e.message); }
 });
 
-// ------- Admin page (sources + add/remove + true IMDb sorting in drawer) -------
+// ------- Admin page (revamped UI + poster shape toggle + install button) -------
 app.get("/admin", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   const base = absoluteBase(req);
   const manifestUrl = `${base}/manifest.json${SHARED_SECRET?`?key=${SHARED_SECRET}`:""}`;
+  const stremioInstallUrl = `stremio://addon/install/manifest?url=${encodeURIComponent(manifestUrl)}`;
   let discovered = [];
   try { discovered = await harvestSources(); } catch {}
 
-  const disc = discovered.map(d=>`<li class="text-sm text-gray-400"><strong class="text-gray-200">${d.name||d.id}</strong><br/>${d.url}</li>`).join("") || "<li class='text-gray-500 text-sm'>(none)</li>";
+  const rows = Object.keys(LISTS).map(id => {
+    const L = LISTS[id]; const count=(L.ids||[]).length;
+    return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
+  }).join("") || "<li>(none)</li>";
+
+  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
 
   const lastSyncText = LAST_SYNC_AT
     ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
     : "never";
 
   res.type("html").send(`<!doctype html>
-<html class="dark">
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Admin</title>
-<script src="https://cdn.tailwindcss.com"></script>
 <style>
-  body { background-color: #0f172a; color: #e2e8f0; }
-  .scroll-bar::-webkit-scrollbar { width: 8px; height: 8px; }
-  .scroll-bar::-webkit-scrollbar-track { background: #1e293b; }
-  .scroll-bar::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
-  .thumb.dragging { opacity: 0.5; border: 2px dashed #6366f1; }
-  tr.dragging { opacity: 0.5; background: #1e293b; }
+  :root{
+    color-scheme:light;
+    --bg:#050415;
+    --bg2:#0f0d1a;
+    --card:#141129;
+    --muted:#9aa0b4;
+    --text:#f7f7fb;
+    --accent:#6c5ce7;
+    --accent2:#8b7cf7;
+    --accent-soft:rgba(108,92,231,.18);
+    --border:#262145;
+    --danger:#ff7675;
+  }
+  body{
+    font-family:system-ui,Segoe UI,Roboto,Arial;
+    margin:0;
+    background:radial-gradient(circle at top,#2f2165 0,#050415 48%,#02010a 100%);
+    color:var(--text);
+  }
+  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+  .hero{padding:20px 0 12px}
+  h1{margin:0 0 4px;font-weight:700;font-size:26px;letter-spacing:.01em}
+  .subtitle{color:var(--muted);font-size:14px}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr}
+  @media(min-width:980px){ .grid{grid-template-columns:1.1fr .9fr} }
+  .card{
+    border:1px solid var(--border);
+    border-radius:18px;
+    padding:16px 18px;
+    background:linear-gradient(145deg,rgba(17,14,39,.96),rgba(8,6,25,.98));
+    box-shadow:0 18px 40px rgba(0,0,0,.55);
+  }
+  h3{margin:0 0 8px;font-size:17px}
+  h4{margin:10px 0 4px;font-size:14px}
+  button{
+    padding:9px 14px;
+    border:0;
+    border-radius:999px;
+    background:var(--accent);
+    color:#fff;
+    cursor:pointer;
+    font-size:13px;
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    box-shadow:0 6px 16px rgba(108,92,231,.55);
+  }
+  button.btn2{background:var(--accent2);}
+  button:disabled{opacity:.5;cursor:default;box-shadow:none}
+  small{color:var(--muted)}
+  .code{
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+    background:#1c1837;
+    color:#d6d3ff;
+    padding:4px 6px;
+    border-radius:6px;
+    font-size:12px;
+    word-break:break-all;
+  }
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+  th,td{padding:8px 6px;border-bottom:1px solid rgba(38,33,69,.8);text-align:left;vertical-align:top}
+  th{font-weight:600;color:#d7d1ff;font-size:12px}
+  tr:hover td{background:rgba(17,14,40,.7);}
+  .muted{color:var(--muted)}
+  .chev{cursor:pointer;font-size:16px;line-height:1;user-select:none}
+  .drawer{background:#120f25}
+  .thumbs{
+    display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+    gap:10px;
+    margin:12px 0;
+    padding:0;
+    list-style:none;
+  }
+  .thumb{
+    position:relative;
+    display:flex;
+    gap:10px;
+    align-items:center;
+    border:1px solid var(--border);
+    background:#1a1636;
+    border-radius:12px;
+    padding:6px 8px;
+  }
+  .thumb-img{
+    object-fit:cover;
+    border-radius:6px;
+    background:#2a244e;
+    flex-shrink:0;
+  }
+  /* portrait vs landscape sizes */
+  .thumbs.shape-poster .thumb-img{
+    width:52px;
+    height:78px;
+  }
+  .thumbs.shape-landscape .thumb-img{
+    width:86px;
+    height:52px;
+  }
+  .thumb .title{font-size:14px}
+  .thumb .id{font-size:11px;color:var(--muted)}
+  .thumb[draggable="true"]{cursor:grab}
+  .thumb.dragging{opacity:.5}
+  .thumb .del{
+    position:absolute;
+    top:6px;
+    right:6px;
+    width:20px;
+    height:20px;
+    line-height:20px;
+    text-align:center;
+    border-radius:999px;
+    background:#3a2c2c;
+    color:#ffb4b4;
+    font-weight:700;
+    display:none;
+  }
+  .thumb:hover .del{display:block}
+  .thumb.add{
+    align-items:center;
+    justify-content:center;
+    border:1px dashed var(--border);
+    min-height:90px;
+  }
+  .addbox{width:100%;text-align:center}
+  .addbox input{
+    margin-top:6px;
+    width:100%;
+    box-sizing:border-box;
+    background:#1c1837;
+    color:var(--text);
+    border:1px solid var(--border);
+    border-radius:8px;
+    padding:8px;
+  }
+  .rowtools{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+    margin-bottom:8px;
+    margin-top:4px;
+  }
+  .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
+  .pill{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    background:#1c1837;
+    border:1px solid var(--border);
+    border-radius:999px;
+    padding:4px 9px;
+    color:#dcd8ff;
+    font-size:12px;
+    margin:2px 4px 2px 0;
+  }
+  .pill input{margin-right:4px}
+  .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
+  input[type="text"]{
+    background:#1c1837;
+    color:var(--text);
+    border:1px solid var(--border);
+    border-radius:8px;
+    padding:8px 9px;
+    width:100%;
+    font-size:13px;
+  }
+  .row{
+    display:grid;
+    gap:10px;
+    grid-template-columns:1fr 110px;
+    margin-bottom:8px;
+  }
+  .mini{font-size:12px}
+  a.link{color:#b1b9ff;text-decoration:none}
+  a.link:hover{text-decoration:underline}
+  .shapeBtn{
+    font-size:11px;
+    padding:4px 10px;
+    border-radius:999px;
+    background:var(--accent-soft);
+    border:1px solid rgba(159,143,254,.6);
+    color:#e2e0ff;
+    cursor:pointer;
+    display:inline-flex;
+    align-items:center;
+    gap:4px;
+  }
+  .shapeBtn span.dot{
+    width:6px;
+    height:10px;
+    border-radius:999px;
+    background:#f8c291;
+  }
+  .shapeBtn.land span.dot{
+    width:10px;
+    height:6px;
+  }
+  .shapeBtn.portrait span.dot{
+    width:6px;
+    height:10px;
+  }
+  .installRow{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+    margin-top:8px;
+  }
 </style>
-</head>
-<body class="min-h-screen p-4 md:p-8 font-sans">
+</head><body>
+<div class="wrap">
+  <div class="hero">
+    <h1>My Lists – Admin</h1>
+    <div class="subtitle">Last sync: ${lastSyncText}</div>
+  </div>
 
-  <div class="max-w-6xl mx-auto space-y-6">
-    <!-- Header -->
-    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
-      <div>
-        <h1 class="text-3xl font-bold text-white tracking-tight">My Lists <span class="text-indigo-400 text-lg font-normal">Admin</span></h1>
-        <p class="text-slate-400 text-sm mt-1">Last sync: <span id="lastSync">${lastSyncText}</span> (Auto: ${IMDB_SYNC_MINUTES} min)</p>
-      </div>
-      <div class="flex gap-3">
-        <button id="installBtn" class="bg-green-600 hover:bg-green-500 text-white font-medium px-4 py-2 rounded-lg shadow-lg transition flex items-center gap-2">
-          <span>🚀 Install to Stremio</span>
-        </button>
-        <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}" class="inline">
-          <button class="bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-2 rounded-lg shadow-lg transition">Sync Now</button>
+  <div class="grid">
+    <div class="card">
+      <h3>Current Snapshot</h3>
+      <ul>${rows}</ul>
+      <div class="rowtools">
+        <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
+          <button class="btn2" type="submit">🔁 Sync Lists Now</button>
         </form>
         <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge & re-sync everything?')">
-           <button class="bg-red-900/50 hover:bg-red-800 text-red-200 border border-red-800 font-medium px-3 py-2 rounded-lg transition text-sm h-full">Purge</button>
+          <button type="submit">🧹 Purge & Sync</button>
         </form>
+        <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
       </div>
+      <h4>Manifest URL</h4>
+      <p class="code">${manifestUrl}</p>
+      <div class="installRow">
+        <a href="${stremioInstallUrl}"><button type="button" class="btn2">⭐ Install to Stremio</button></a>
+        <span class="mini muted">If the button doesn’t work, copy the manifest URL into Stremio manually.</span>
+      </div>
+      <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, poster shapes or ordering change.</p>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <!-- Sources Card -->
-      <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6 shadow-xl lg:col-span-1 h-fit">
-        <h3 class="text-xl font-semibold text-white mb-4 border-b border-slate-700 pb-2">Sources & Discovery</h3>
-        
-        <div class="space-y-4">
-          <div>
-             <label class="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-1">Add IMDb User URL</label>
-             <div class="flex gap-2">
-               <input id="userInput" class="flex-1 bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" placeholder="https://imdb.com/user/ur.../lists/" />
-               <button id="addUser" class="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded text-sm">Add</button>
-             </div>
-          </div>
-
-          <div>
-             <label class="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-1">Add List URL (IMDb/Trakt)</label>
-             <div class="flex gap-2">
-               <input id="listInput" class="flex-1 bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" placeholder="IMDb ls... or Trakt URL" />
-               <button id="addList" class="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded text-sm">Add</button>
-             </div>
-          </div>
-
-          <div class="space-y-2 pt-2">
-            <div class="text-xs text-slate-500">Your Extra Sources:</div>
-            <div id="userPills" class="flex flex-wrap gap-2 text-sm"></div>
-            <div id="listPills" class="flex flex-wrap gap-2 text-sm"></div>
-          </div>
-
-          <div class="pt-4 border-t border-slate-700">
-             <div class="text-xs text-slate-500 mb-2">Discovered from sources:</div>
-             <ul class="space-y-2 max-h-40 overflow-y-auto scroll-bar pr-2">${disc}</ul>
-          </div>
-
-          <div class="pt-2">
-             <div class="text-xs text-slate-500 mb-2">Blocked Lists:</div>
-             <div id="blockedPills" class="flex flex-wrap gap-2 text-sm"></div>
-          </div>
-        </div>
+    <div class="card">
+      <h3>Discovered & Sources</h3>
+      <div style="margin-top:8px">
+        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+        <div id="blockedPills"></div>
       </div>
 
-      <!-- Main Lists Card -->
-      <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6 shadow-xl lg:col-span-2">
-        <div class="flex justify-between items-center mb-4 border-b border-slate-700 pb-2">
-           <h3 class="text-xl font-semibold text-white">Managed Lists</h3>
-           <button id="saveBtn" class="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-2 rounded-lg font-bold shadow-lg transition">Save All Changes</button>
+      <p class="mini muted" style="margin-top:6px;">We merge your main user (+ extras) and explicit list URLs/IDs. Removing a list also blocks it so it won’t re-appear on the next sync.</p>
+
+      <div class="row">
+        <div><label class="mini">Add IMDb <b>User /lists</b> URL</label>
+          <input id="userInput" placeholder="https://www.imdb.com/user/urXXXXXXX/lists/" />
         </div>
-        
-        <p class="text-sm text-slate-400 mb-4">
-          Drag to reorder. Use the toggle to switch between <b>Poster</b> and <b>Landscape</b> shapes in Stremio. 
-          Click <span class="text-indigo-400">▾</span> to customize content/sorting.
-        </p>
-
-        <div id="prefs" class="overflow-x-auto"></div>
-        <div id="saveMsg" class="text-center text-green-400 h-6 mt-2 text-sm font-medium"></div>
+        <div><button id="addUser" type="button">Add</button></div>
       </div>
-    </div>
+      <div class="row">
+        <div><label class="mini">Add IMDb/Trakt <b>List</b> URL</label>
+          <input id="listInput" placeholder="IMDb ls… or Trakt list URL" />
+        </div>
+        <div><button id="addList" type="button">Add</button></div>
+      </div>
 
-    <div class="text-center text-xs text-slate-600 pt-8 pb-4">
-      Manifest: <span class="font-mono select-all bg-slate-800 px-1 rounded">${manifestUrl}</span>
+      <div style="margin-top:10px">
+        <div class="mini muted">Your extra users:</div>
+        <div id="userPills"></div>
+      </div>
+      <div style="margin-top:8px">
+        <div class="mini muted">Your extra lists:</div>
+        <div id="listPills"></div>
+      </div>
+
+      <h4 style="margin-top:14px">Discovered</h4>
+      <ul>${disc}</ul>
     </div>
   </div>
 
+  <div class="card" style="margin-top:16px">
+    <h3>Customize (enable, order, sort, poster shape)</h3>
+    <p class="muted">Drag rows to reorder lists. Use <b>Poster</b> to switch between portrait and landscape artwork for each list. Click ▾ to open the drawer and tune sort options or custom order.</p>
+    <div id="prefs"></div>
+  </div>
+
+</div>
+
 <script>
 const ADMIN="${ADMIN_PASSWORD}";
-const SECRET="${SHARED_SECRET}";
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
-const HOST_URL = "${absoluteBase(req)}";
-
-// --- Install Button Logic ---
-document.getElementById('installBtn').onclick = (e) => {
-  e.preventDefault();
-  let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
-  if (SECRET) url += '?key=' + SECRET;
-  window.location.href = url;
-};
 
 async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
@@ -1301,20 +1506,28 @@ async function saveCustomOrder(lsid, order){
   return r.json();
 }
 
-// --- Helpers ---
 function normalizeUserListsUrl(v){
-  v = String(v||'').trim(); if (!v) return null;
+  v = String(v||'').trim();
+  if (!v) return null;
   if (/imdb\\.com\\/user\\/ur\\d+\\/lists/i.test(v)) return v;
-  const m = v.match(/ur\\d{6,}/i); return m ? 'https://www.imdb.com/user/'+m[0]+'/lists/' : null;
+  const m = v.match(/ur\\d{6,}/i);
+  return m ? 'https://www.imdb.com/user/'+m[0]+'/lists/' : null;
 }
 function normalizeListIdOrUrl2(v){
-  v = String(v||'').trim(); if (!v) return null;
+  v = String(v||'').trim();
+  if (!v) return null;
+  // Trakt lists
   if (/trakt\\.tv\\/users\\/[^/]+\\/lists\\/[^/?#]+/i.test(v)) return v;
+  // IMDb lists
   if (/imdb\\.com\\/list\\/ls\\d{6,}/i.test(v)) return v;
-  const m = v.match(/ls\\d{6,}/i); return m ? 'https://www.imdb.com/list/'+m[0]+'/' : null;
+  const m = v.match(/ls\\d{6,}/i);
+  return m ? 'https://www.imdb.com/list/'+m[0]+'/' : null;
 }
 async function addSources(payload){
-  await fetch('/api/add-sources?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  await fetch('/api/add-sources?admin='+ADMIN, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
 }
 function wireAddButtons(){
   const userBtn = document.getElementById('addUser');
@@ -1326,16 +1539,18 @@ function wireAddButtons(){
     e.preventDefault();
     const url = normalizeUserListsUrl(userInp.value);
     if (!url) { alert('Enter a valid IMDb user /lists URL or ur… id'); return; }
-    userBtn.disabled = true; userBtn.innerText = '...';
-    try { await addSources({ users:[url], lists:[] }); location.reload(); } finally { userBtn.disabled = false; }
+    userBtn.disabled = true;
+    try { await addSources({ users:[url], lists:[] }); location.reload(); }
+    finally { userBtn.disabled = false; }
   };
 
   listBtn.onclick = async (e) => {
     e.preventDefault();
     const url = normalizeListIdOrUrl2(listInp.value);
     if (!url) { alert('Enter a valid IMDb list URL, ls… id, or Trakt list URL'); return; }
-    listBtn.disabled = true; listBtn.innerText = '...';
-    try { await addSources({ users:[], lists:[url] }); location.reload(); } finally { listBtn.disabled = false; }
+    listBtn.disabled = true;
+    try { await addSources({ users:[], lists:[url] }); location.reload(); }
+    finally { listBtn.disabled = false; }
   };
 }
 
@@ -1344,356 +1559,456 @@ function el(tag, attrs={}, kids=[]) {
   for (const k in attrs) {
     if (k === "text") e.textContent = attrs[k];
     else if (k === "html") e.innerHTML = attrs[k];
-    else if (k.startsWith("on")) e.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
     else e.setAttribute(k, attrs[k]);
   }
   kids.forEach(ch => e.appendChild(ch));
   return e;
 }
+function isCtrl(node){
+  const t = (node && node.tagName || "").toLowerCase();
+  return t === "input" || t === "select" || t === "button" || t === "a" || t === "label" || t === "textarea";
+}
 
-function attachDnD(elem, selector, callback) {
-  let src = null;
-  elem.addEventListener('dragstart', e => {
-    const t = e.target.closest(selector);
-    if (!t || (t.tagName==='LI' && t.hasAttribute('data-add'))) return;
-    src = t; t.classList.add('dragging');
-    e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain','');
+// Row drag (table tbody)
+function attachRowDnD(tbody) {
+  let dragSrc = null;
+  tbody.addEventListener('dragstart', (e) => {
+    const tr = e.target.closest('tr[data-lsid]');
+    if (!tr || isCtrl(e.target)) return;
+    dragSrc = tr;
+    tr.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
   });
-  elem.addEventListener('dragend', () => { if(src) src.classList.remove('dragging'); src=null; if(callback) callback(); });
-  elem.addEventListener('dragover', e => {
-    e.preventDefault(); if(!src) return;
-    const over = e.target.closest(selector);
-    if(!over || over===src || (over.tagName==='LI' && over.hasAttribute('data-add'))) return;
+  tbody.addEventListener('dragend', () => { if (dragSrc) dragSrc.classList.remove('dragging'); dragSrc = null; });
+  tbody.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (!dragSrc) return;
+    const over = e.target.closest('tr[data-lsid]');
+    if (!over || over === dragSrc) return;
     const rect = over.getBoundingClientRect();
-    const next = (e.clientY - rect.top) > (rect.height/2);
-    over.parentNode.insertBefore(src, next ? over.nextSibling : over);
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
   });
 }
 
-// --- Rendering ---
+// Thumb drag (ul.thumbs)
+function attachThumbDnD(ul) {
+  let src = null;
+  ul.addEventListener('dragstart', (e)=>{
+    const li = e.target.closest('li.thumb'); if (!li || li.hasAttribute('data-add')) return;
+    src = li; li.classList.add('dragging');
+    e.dataTransfer.effectAllowed='move';
+    e.dataTransfer.setData('text/plain', li.dataset.id || '');
+  });
+  ul.addEventListener('dragend', ()=>{ if(src){src.classList.remove('dragging'); src=null;} });
+  ul.addEventListener('dragover', (e)=>{
+    e.preventDefault();
+    if (!src) return;
+    const over = e.target.closest('li.thumb'); if (!over || over===src || over.hasAttribute('data-add')) return;
+    const rect = over.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height/2;
+    over.parentNode.insertBefore(src, before ? over : over.nextSibling);
+  });
+}
+
+// client-side sort helpers (mirror server)
+function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(String(y)+'-01-01'); if(!Number.isNaN(t)) return t;} return null; }
+function stableSortClient(items, sortKey){
+  const s = String(sortKey||'name_asc').toLowerCase();
+  const dir = s.endsWith('_asc') ? 1 : -1;
+  const key = s.split('_')[0];
+  const cmpNullBottom = (a,b) => (a==null && b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0))));
+  return items.map((m,i)=>({m,i})).sort((A,B)=>{
+    const a=A.m,b=B.m; let c=0;
+    if (key==='date') c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
+    else if (key==='rating') c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    else if (key==='runtime') c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
+    else c = (a.name||'').localeCompare(b.name||'');
+    if (c===0){ c=(a.name||'').localeCompare(b.name||''); if(c===0) c=(a.id||'').localeCompare(b.id||''); if(c===0) c=A.i-B.i; }
+    return c*dir;
+  }).map(x=>x.m);
+}
+
 async function render() {
   const prefs = await getPrefs();
   const lists = await getLists();
-  
-  // Render Pills
-  const pillClass = "inline-flex items-center gap-2 bg-slate-900 border border-slate-600 rounded-full px-3 py-1 text-xs text-slate-300";
+  prefs.posterShape = prefs.posterShape || {};
+
   function renderPills(id, arr, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
-    if (!arr || !arr.length) { wrap.innerHTML = '<span class="text-slate-600 italic">(none)</span>'; return; }
-    arr.forEach((txt, idx)=>{
-      const pill = el('span', {class: pillClass}, [
-        el('span',{text:txt.length > 30 ? txt.slice(0,28)+'...' : txt}),
-        el('button',{class:'text-red-400 hover:text-red-300 font-bold', text:'✕', onclick:()=>onRemove(idx)})
+    (arr||[]).forEach((txt, idx)=>{
+      const pill = el('span', {class:'pill'}, [
+        el('span',{text:txt}),
+        el('span',{class:'x',text:'✕'})
       ]);
+      pill.querySelector('.x').onclick = ()=> onRemove(idx);
       wrap.appendChild(pill);
+      wrap.appendChild(document.createTextNode(' '));
     });
+    if (!arr || !arr.length) wrap.textContent = '(none)';
   }
-  renderPills('userPills', prefs.sources?.users || [], (i)=> { prefs.sources.users.splice(i,1); saveAll('Removed source'); });
-  renderPills('listPills', prefs.sources?.lists || [], (i)=> { prefs.sources.lists.splice(i,1); saveAll('Removed source'); });
-
-  // Blocked Pills
-  const blockedWrap = document.getElementById('blockedPills'); blockedWrap.innerHTML = '';
-  const blocked = prefs.blocked || [];
-  if (!blocked.length) blockedWrap.innerHTML = '<span class="text-slate-600 italic">(none)</span>';
-  blocked.forEach(lsid=>{
-     const pill = el('span', {class: pillClass + " border-red-900/50 bg-red-900/20"}, [
-        el('span',{text:lsid}),
-        el('button',{class:'text-green-400 hover:text-green-300 font-bold ml-1', text:'Unblock', onclick:async ()=>{
-           await fetch('/api/unblock-list?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
-           location.reload();
-        }})
-      ]);
-      blockedWrap.appendChild(pill);
+  renderPills('userPills', prefs.sources?.users || [], (i)=>{
+    prefs.sources.users.splice(i,1);
+    saveAll('Saved');
+  });
+  renderPills('listPills', prefs.sources?.lists || [], (i)=>{
+    prefs.sources.lists.splice(i,1);
+    saveAll('Saved');
   });
 
-  // --- Main Table ---
-  const container = document.getElementById('prefs'); container.innerHTML = "";
-  const table = el('table', {class: 'w-full text-left border-collapse'});
-  const thead = el('thead', {class: 'bg-slate-900/50 text-xs uppercase text-slate-500 font-medium'}, [
-     el('tr',{}, [
-       el('th',{class:'p-3 rounded-tl-lg', text:''}), // Drag
-       el('th',{class:'p-3', text:'Active'}),
-       el('th',{class:'p-3', text:'List Name'}),
-       el('th',{class:'p-3', text:'Count'}),
-       el('th',{class:'p-3', text:'Sort'}),
-       el('th',{class:'p-3', text:'Shape'}), // New
-       el('th',{class:'p-3 rounded-tr-lg', text:''}) // Remove
-     ])
-  ]);
-  const tbody = el('tbody', {class: 'text-sm divide-y divide-slate-700'});
-  table.appendChild(thead); table.appendChild(tbody);
+  // Blocked pills with Unblock action
+  {
+    const blockedWrap = document.getElementById('blockedPills');
+    blockedWrap.innerHTML = '';
+    const blocked = prefs.blocked || [];
+    if (!blocked.length) blockedWrap.textContent = '(none)';
+    blocked.forEach(lsid=>{
+      const pill = el('span',{class:'pill'},[
+        el('span',{text:lsid}),
+        el('span',{class:'x',text:'Unblock'})
+      ]);
+      pill.querySelector('.x').onclick = async ()=>{
+        await fetch('/api/unblock-list?admin='+ADMIN, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lsid })
+        });
+        location.reload();
+      };
+      blockedWrap.appendChild(pill);
+      blockedWrap.appendChild(document.createTextNode(' '));
+    });
+  }
 
-  // Ordering logic
+  const container = document.getElementById('prefs'); container.innerHTML = "";
+
   const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
   const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
-  const missing   = Object.keys(lists).filter(id => !baseOrder.includes(id)).sort((a,b)=>( (lists[a]?.name||a).localeCompare(lists[b]?.name||b) ));
+  const missing   = Object.keys(lists).filter(id => !baseOrder.includes(id))
+    .sort((a,b)=>( (lists[a]?.name||a).localeCompare(lists[b]?.name||b) ));
   const order = baseOrder.concat(missing);
 
-  function makeRow(lsid) {
-    const L = lists[lsid];
-    const tr = el('tr', {'data-lsid': lsid, class:'group hover:bg-slate-800/50 transition'});
+  const table = el('table');
+  const thead = el('thead', {}, [el('tr',{},[
+    el('th',{text:''}),
+    el('th',{text:'Enabled'}),
+    el('th',{text:'List (id)'}),
+    el('th',{text:'Items'}),
+    el('th',{text:'Poster'}),  // new column
+    el('th',{text:'Default sort'}),
+    el('th',{text:'Remove'})
+  ])]);
+  table.appendChild(thead);
+  const tbody = el('tbody');
 
-    // 1. Drag/Expand
-    const chev = el('button',{class:'text-xl text-slate-500 hover:text-indigo-400 transition px-2', text:'▸'});
-    const drag = el('span',{class:'cursor-grab text-slate-600 hover:text-slate-400 text-lg px-1 select-none', text:'⋮⋮'});
-    const td1 = el('td',{class:'p-3 w-12'}, [ el('div',{class:'flex items-center gap-1'},[drag, chev]) ]);
+  function makeDrawer(lsid) {
+    const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
+    const td = el('td',{colspan:'7'});
+    td.appendChild(el('div',{text:'Loading…'}));
+    tr.appendChild(td);
 
-    // 2. Checkbox
-    const cb = el('input', {type:'checkbox', class:'w-4 h-4 rounded border-slate-600 bg-slate-700 text-indigo-600 focus:ring-indigo-500'}); 
-    cb.checked = enabledSet.has(lsid);
-    cb.onchange = ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); };
-    const td2 = el('td',{class:'p-3 w-12 text-center'},[cb]);
+    getListItems(lsid).then(({items})=>{
+      td.innerHTML = '';
 
-    // 3. Name
-    const td3 = el('td',{class:'p-3'}, [
-      el('div',{class:'font-medium text-slate-200', text: L.name||lsid}),
-      el('div',{class:'text-xs text-slate-500 font-mono', text: lsid})
-    ]);
+      const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
+      const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
+      const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
 
-    // 4. Count
-    const count = (L.ids||[]).length;
-    const td4 = el('td',{class:'p-3 text-slate-400'}, [ el('span',{class:'bg-slate-800 px-2 py-1 rounded text-xs'},[text=String(count)]) ]);
+      const tools = el('div', {class:'rowtools'});
+      const saveBtn = el('button',{text:'Save order'});
+      const resetBtn = el('button',{text:'Reset order'});
+      const resetAllBtn = el('button',{text:'Full reset'});
+      tools.appendChild(saveBtn); tools.appendChild(resetBtn); tools.appendChild(resetAllBtn);
 
-    // 5. Sort Select
-    const sel = el('select', {class:'bg-slate-900 border border-slate-700 rounded text-xs py-1 px-2 focus:border-indigo-500 outline-none'});
-    SORT_OPTIONS.forEach(o => {
-      const opt = el('option',{value:o, text:o});
-      if (o === ((prefs.perListSort && prefs.perListSort[lsid]) || "name_asc")) opt.selected = true;
-      sel.appendChild(opt);
-    });
-    sel.onchange = () => {
-       prefs.perListSort = prefs.perListSort || {}; 
-       prefs.perListSort[lsid] = sel.value;
-       // Reset drawer if open
-       const drawer = document.querySelector('tr[data-drawer="'+lsid+'"]');
-       if (drawer && !drawer.hidden) drawer.querySelector('.reset-btn')?.click();
-    };
-    const td5 = el('td',{class:'p-3'},[sel]);
+      const optsWrap = el('div',{class:'rowtools'});
+      optsWrap.appendChild(el('span',{class:'mini muted', text:'Sort options shown in Stremio:'}));
+      const current = (prefs.sortOptions && prefs.sortOptions[lsid] && prefs.sortOptions[lsid].length) ? new Set(prefs.sortOptions[lsid]) : new Set(SORT_OPTIONS);
+      SORT_OPTIONS.forEach(opt=>{
+        const lab = el('label',{class:'pill'});
+        const cb = el('input',{type:'checkbox'}); cb.checked = current.has(opt);
+        cb.onchange = ()=>{
+          const arr = Array.from(optsWrap.querySelectorAll('input')).map((c,i)=>c.checked?SORT_OPTIONS[i]:null).filter(Boolean);
+          prefs.sortOptions = prefs.sortOptions || {};
+          prefs.sortOptions[lsid] = arr.length ? arr : SORT_OPTIONS.slice();
+        };
+        lab.appendChild(cb);
+        lab.appendChild(el('span',{text:opt}));
+        optsWrap.appendChild(lab);
+      });
 
-    // 6. Shape Toggle (New Feature)
-    const currentShape = (prefs.posterShapes && prefs.posterShapes[lsid]) || "poster";
-    const shapeBtn = el('button', {
-      class: 'bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs hover:bg-slate-800 transition flex items-center gap-2 w-24 justify-center',
-      title: 'Toggle between Poster (Portrait) and Landscape'
-    });
-    const updateShapeBtn = (s) => {
-       if (s === 'landscape') {
-         shapeBtn.innerHTML = '<span class="text-indigo-400 text-base">▬</span> <span>Land</span>';
-       } else {
-         shapeBtn.innerHTML = '<span class="text-indigo-400 text-base">▮</span> <span>Poster</span>';
-       }
-    };
-    updateShapeBtn(currentShape);
-    shapeBtn.onclick = (e) => {
-       e.preventDefault();
-       prefs.posterShapes = prefs.posterShapes || {};
-       const now = prefs.posterShapes[lsid] || 'poster';
-       const next = now === 'poster' ? 'landscape' : 'poster';
-       prefs.posterShapes[lsid] = next;
-       updateShapeBtn(next);
-    };
-    const td6 = el('td',{class:'p-3'},[shapeBtn]);
+      td.appendChild(tools);
+      td.appendChild(optsWrap);
 
-    // 7. Remove
-    const rmBtn = el('button',{class:'text-slate-500 hover:text-red-400 transition', title:'Remove List'}, [el('span',{text:'🗑'})]);
-    rmBtn.onclick = () => {
-       if (!confirm('Remove this list and block it from reappearing?')) return;
-       fetch('/api/remove-list?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })})
-         .then(()=> location.reload()).catch(()=> alert('Remove failed'));
-    };
-    const td7 = el('td',{class:'p-3 text-center'},[rmBtn]);
+      const shape = (prefs.posterShape && prefs.posterShape[lsid]) || 'poster';
+      const ul = el('ul',{class:'thumbs shape-'+shape});
+      td.appendChild(ul);
 
-    tr.append(td1, td2, td3, td4, td5, td6, td7);
+      function liFor(it){
+        const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
+        li.appendChild(el('div',{class:'del',text:'×'}));
+        li.querySelector('.del').onclick = async (e)=>{
+          e.stopPropagation();
+          if (!confirm('Remove this item from the list?')) return;
+          await fetch('/api/list-remove?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: it.id })});
+          await refresh();
+        };
+        const img = el('img',{src: it.poster || '', alt:'', class:'thumb-img'});
+        const wrap = el('div',{},[
+          el('div',{class:'title',text: it.name || it.id}),
+          el('div',{class:'id',text: it.id})
+        ]);
+        li.appendChild(img); li.appendChild(wrap);
+        return li;
+      }
 
-    // Drawer Logic
-    let drawerRow = null;
-    chev.onclick = () => {
-       if (drawerRow) {
-         const isHidden = drawerRow.classList.contains('hidden');
-         if (isHidden) { drawerRow.classList.remove('hidden'); chev.innerText = '▾'; } 
-         else { drawerRow.classList.add('hidden'); chev.innerText = '▸'; }
-       } else {
-         chev.innerText = '▾';
-         drawerRow = makeDrawer(lsid, L);
-         tr.after(drawerRow);
-       }
-    };
+      function addTile(){
+        const li = el('li',{class:'thumb add','data-add':'1'});
+        const box = el('div',{class:'addbox'},[
+          el('div',{text:'Add by IMDb ID (tt...)'}),
+          el('input',{type:'text',placeholder:'tt1234567 or IMDb URL', spellcheck:'false'})
+        ]);
+        li.appendChild(box);
+
+        const input = box.querySelector('input');
+
+        async function doAddReal(){
+          const v = (input.value || '').trim();
+          const m = v.match(/(tt\\d{7,})/i);
+          if (!m) { alert('Enter a valid IMDb id'); return; }
+          input.disabled = true;
+          try {
+            await fetch('/api/list-add?admin='+ADMIN, {
+              method: 'POST',
+              headers: { 'Content-Type':'application/json' },
+              body: JSON.stringify({ lsid, id: m[1] })
+            });
+            input.value = '';
+            await refresh();
+          } finally {
+            input.disabled = false;
+          }
+        }
+
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); doAddReal(); }
+        });
+        input.addEventListener('click', (e) => e.stopPropagation());
+
+        return li;
+      }
+
+      function renderList(arr){
+        ul.innerHTML = '';
+        arr.forEach(it => ul.appendChild(liFor(it)));
+        ul.appendChild(addTile());
+        attachThumbDnD(ul);
+      }
+
+      function orderFor(sortKey){
+        if (sortKey === 'custom' && prefs.customOrder && Array.isArray(prefs.customOrder[lsid]) && prefs.customOrder[lsid].length){
+          const pos = new Map(prefs.customOrder[lsid].map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=>{
+            const pa = pos.has(a.id)?pos.get(a.id):1e9;
+            const pb = pos.has(b.id)?pos.get(b.id):1e9;
+            return pa-pb;
+          });
+        } else if (sortKey === 'imdb') {
+          return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
+        } else if (sortKey === 'date_asc' && imdbDateAsc.length){
+          const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+        } else if (sortKey === 'date_desc' && imdbDateDesc.length){
+          const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+        } else {
+          return stableSortClient(items, sortKey);
+        }
+      }
+
+      const def = (prefs.perListSort && prefs.perListSort[lsid]) || 'name_asc';
+      renderList(orderFor(def));
+
+      saveBtn.onclick = async ()=>{
+        const ids = Array.from(ul.querySelectorAll('li.thumb[data-id]')).map(li=>li.getAttribute('data-id'));
+        saveBtn.disabled = true; resetBtn.disabled = true; resetAllBtn.disabled = true;
+        try {
+          await saveCustomOrder(lsid, ids);
+          const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+          if (rowSel) rowSel.value = 'custom';
+          prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = 'custom';
+          saveBtn.textContent = "Saved ✓";
+          setTimeout(()=> saveBtn.textContent = "Save order", 1500);
+        } catch(e) {
+          alert("Failed to save custom order");
+        } finally {
+          saveBtn.disabled = false; resetBtn.disabled = false; resetAllBtn.disabled = false;
+        }
+      };
+
+      resetBtn.onclick = ()=>{
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
+        renderList(orderFor(chosen));
+      };
+
+      resetAllBtn.onclick = async ()=>{
+        if (!confirm('Full reset: clear custom order and local add/remove edits for this list?')) return;
+        resetAllBtn.disabled = true;
+        try{
+          await fetch('/api/list-reset?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
+          await refresh();
+        } finally {
+          resetAllBtn.disabled = false;
+        }
+      };
+
+      async function refresh(){
+        const r = await getListItems(lsid);
+        items = r.items || [];
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
+        renderList(orderFor(chosen));
+      }
+    }).catch(()=>{ td.textContent = "Failed to load items."; });
 
     return tr;
   }
 
-  function makeDrawer(lsid, L) {
-    const tr = el('tr',{class:'bg-slate-900/30 border-b border-slate-800', 'data-drawer': lsid});
-    const td = el('td',{colspan: 7, class:'p-4'});
-    tr.appendChild(td);
-    
-    td.innerHTML = '<div class="text-center py-4 text-slate-500">Loading items...</div>';
+  function removeList(lsid){
+    if (!confirm('Remove this list and block it from reappearing?')) return;
+    fetch('/api/remove-list?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })})
+      .then(()=> location.reload())
+      .catch(()=> alert('Remove failed'));
+  }
 
-    getListItems(lsid).then(({items}) => {
-      td.innerHTML = '';
-      
-      // Controls
-      const controls = el('div',{class:'flex flex-wrap gap-4 items-center justify-between mb-4'});
-      
-      // Left: Sort Options
-      const optsDiv = el('div',{class:'flex items-center gap-2 text-sm'});
-      optsDiv.innerHTML = '<span class="text-slate-500">Stremio sort options:</span>';
-      const currentOpts = new Set((prefs.sortOptions && prefs.sortOptions[lsid]) || SORT_OPTIONS);
-      SORT_OPTIONS.forEach(opt => {
-         const lab = el('label',{class:'inline-flex items-center gap-1 bg-slate-800 px-2 py-1 rounded cursor-pointer select-none hover:bg-slate-700 border border-slate-700'});
-         const chk = el('input',{type:'checkbox', class:'rounded bg-slate-900 border-slate-600 text-indigo-500 focus:ring-0 w-3 h-3'});
-         chk.checked = currentOpts.has(opt);
-         chk.onchange = () => {
-            const all = Array.from(optsDiv.querySelectorAll('input')).map((c,i) => c.checked ? SORT_OPTIONS[i] : null).filter(Boolean);
-            prefs.sortOptions = prefs.sortOptions || {};
-            prefs.sortOptions[lsid] = all.length ? all : SORT_OPTIONS.slice();
-         };
-         lab.append(chk, el('span',{text:opt, class:'text-slate-300'}));
-         optsDiv.appendChild(lab);
-      });
-      
-      // Right: Actions
-      const actsDiv = el('div',{class:'flex gap-2'});
-      const saveOrderBtn = el('button',{class:'bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3 py-2 rounded shadow', text:'Save Custom Order'});
-      const resetOrderBtn = el('button',{class:'reset-btn bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-2 rounded', text:'Reset View'});
-      const resetAllBtn = el('button',{class:'bg-red-900/40 border border-red-800/50 text-red-300 hover:bg-red-900/60 text-xs px-3 py-2 rounded', text:'Hard Reset'});
-      actsDiv.append(saveOrderBtn, resetOrderBtn, resetAllBtn);
-      
-      controls.append(optsDiv, actsDiv);
-      td.appendChild(controls);
+  function makeRow(lsid) {
+    const L = lists[lsid];
+    const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
 
-      // Grid
-      const ul = el('ul',{class:'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3'});
-      td.appendChild(ul);
+    const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
+    const chevTd = el('td',{},[chev]);
 
-      const imdbIndex = new Map((L.ids || []).map((id,i)=>[id,i]));
+    const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
+    cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
-      function renderGrid(listItems) {
-         ul.innerHTML = '';
-         listItems.forEach(it => {
-            const li = el('li',{class:'thumb group relative aspect-[2/3] bg-slate-800 rounded overflow-hidden border border-slate-700 cursor-grab', 'data-id':it.id, draggable:true});
-            // Img
-            if (it.poster) li.appendChild(el('img',{src:it.poster, class:'w-full h-full object-cover opacity-80 group-hover:opacity-100 transition'}));
-            else li.appendChild(el('div',{class:'w-full h-full flex items-center justify-center text-slate-600 text-xs p-2 text-center', text:it.name}));
-            // Overlay
-            const over = el('div',{class:'absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition p-2 flex flex-col justify-end'});
-            over.append(el('div',{class:'text-white text-xs font-bold leading-tight line-clamp-2', text:it.name}));
-            over.append(el('div',{class:'text-slate-400 text-[10px] font-mono', text:it.id}));
-            li.appendChild(over);
-            // Delete
-            const del = el('button',{class:'absolute top-1 right-1 bg-black/50 hover:bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition', text:'×'});
-            del.onclick = async (e) => {
-               e.stopPropagation();
-               if(!confirm('Remove item?')) return;
-               await fetch('/api/list-remove?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: it.id })});
-               refreshDrawer();
-            };
-            li.appendChild(del);
-            ul.appendChild(li);
-         });
-         
-         // Add Tile
-         const addLi = el('li',{class:'aspect-[2/3] bg-slate-800/50 border-2 border-dashed border-slate-700 rounded flex flex-col items-center justify-center p-2 gap-2 hover:border-indigo-500 transition', 'data-add':true});
-         const inp = el('input',{class:'w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-center focus:border-indigo-500 outline-none', placeholder:'tt123...'});
-         inp.onkeydown = async (e) => {
-            if(e.key==='Enter'){
-               const v = inp.value.trim().match(/(tt\d{7,})/);
-               if(!v) return alert('Invalid ID');
-               inp.disabled=true;
-               await fetch('/api/list-add?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: v[1] })});
-               inp.value=''; inp.disabled=false; refreshDrawer();
-            }
-         };
-         addLi.append(el('span',{class:'text-2xl text-slate-600', text:'+'}), inp);
-         ul.appendChild(addLi);
-         
-         attachDnD(ul, 'li', null);
+    const nameCell = el('td',{}); 
+    nameCell.appendChild(el('div',{text:(L.name||lsid)}));
+    nameCell.appendChild(el('small',{text:lsid}));
+
+    const count = el('td',{text:String((L.ids||[]).length)});
+
+    // Poster shape toggle (Portrait <-> Landscape)
+    const shapeCell = el('td');
+    const currentShape = (prefs.posterShape && prefs.posterShape[lsid]) || 'poster';
+    const shapeBtn = el('button',{
+      class:'shapeBtn '+(currentShape==='landscape'?'land':'portrait'),
+      type:'button'
+    },[
+      el('span',{class:'dot'}),
+      el('span',{text: currentShape === 'landscape' ? 'Landscape' : 'Portrait'})
+    ]);
+    shapeBtn.onclick = ()=>{
+      const curr = (prefs.posterShape && prefs.posterShape[lsid]) || 'poster';
+      const next = curr === 'poster' ? 'landscape' : 'poster';
+      prefs.posterShape = prefs.posterShape || {};
+      prefs.posterShape[lsid] = next;
+      shapeBtn.className = 'shapeBtn ' + (next==='landscape'?'land':'portrait');
+      shapeBtn.querySelector('span:nth-child(2)').textContent = next === 'landscape' ? 'Landscape' : 'Portrait';
+
+      // also update drawer thumbnails if opened
+      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+      if (drawer) {
+        const ul = drawer.querySelector('ul.thumbs');
+        if (ul) {
+          ul.classList.remove('shape-poster','shape-landscape');
+          ul.classList.add('shape-'+next);
+        }
       }
+    };
+    shapeCell.appendChild(shapeBtn);
 
-      function getSorted(key) {
-         let arr = items.slice();
-         if (key==='custom' && prefs.customOrder?.[lsid]) {
-            const pos = new Map(prefs.customOrder[lsid].map((id,i)=>[id,i]));
-            arr.sort((a,b)=>(pos.get(a.id)??1e9) - (pos.get(b.id)??1e9));
-         } else if (key==='imdb') {
-            arr.sort((a,b)=>(imdbIndex.get(a.id)??1e9) - (imdbIndex.get(b.id)??1e9));
-         } else {
-            // simple client sort
-            const dir = key.endsWith('_desc')?-1:1;
-            const f = key.startsWith('date') ? 'releaseDate' : (key.startsWith('rating')?'imdbRating':'name');
-            arr.sort((a,b)=>{
-               const va=a[f]||(f==='releaseDate'?a.year:null), vb=b[f]||(f==='releaseDate'?b.year:null);
-               if(va==vb) return 0; if(!va) return 1; if(!vb) return -1;
-               return (va<vb?-1:1)*dir;
-            });
-         }
-         return arr;
+    const sortSel = el('select');
+    SORT_OPTIONS.forEach(o=>{
+      const opt = el('option',{value:o,text:o});
+      const def = (prefs.perListSort && prefs.perListSort[lsid]) || "name_asc";
+      if (o===def) opt.setAttribute('selected','');
+      sortSel.appendChild(opt);
+    });
+    sortSel.addEventListener('change', ()=>{
+      prefs.perListSort = prefs.perListSort || {}; 
+      prefs.perListSort[lsid] = sortSel.value;
+      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+      if (drawer && drawer.style.display !== "none") {
+        const resetBtn = drawer.querySelectorAll('button')[1];
+        if (resetBtn) resetBtn.click();
       }
+    });
 
-      // Init Grid
-      const activeSort = (prefs.perListSort?.[lsid]) || 'name_asc';
-      renderGrid(getSorted(activeSort));
+    const rmBtn = el('button',{text:'Remove', type:'button'});
+    rmBtn.onclick = ()=> removeList(lsid);
 
-      async function refreshDrawer() {
-         const r = await getListItems(lsid); items = r.items;
-         const cur = document.querySelector('tr[data-lsid="' + lsid + '"] select').value;
-         renderGrid(getSorted(cur));
+    tr.appendChild(chevTd);
+    tr.appendChild(el('td',{},[cb]));
+    tr.appendChild(nameCell);
+    tr.appendChild(count);
+    tr.appendChild(shapeCell);
+    tr.appendChild(el('td',{},[sortSel]));
+    tr.appendChild(el('td',{},[rmBtn]));
+
+    let drawer = null; let open = false;
+    chev.onclick = ()=>{
+      open = !open;
+      if (open) {
+        chev.textContent = "▴";
+        if (!drawer) {
+          drawer = makeDrawer(lsid);
+          tr.parentNode.insertBefore(drawer, tr.nextSibling);
+        } else {
+          drawer.style.display = "";
+        }
+      } else {
+        chev.textContent = "▾";
+        if (drawer) drawer.style.display = "none";
       }
-
-      saveOrderBtn.onclick = async () => {
-         const ids = Array.from(ul.querySelectorAll('li[data-id]')).map(l=>l.dataset.id);
-         saveOrderBtn.innerText = 'Saving...';
-         try { 
-            await saveCustomOrder(lsid, ids);
-            saveOrderBtn.innerText = 'Saved ✓'; setTimeout(()=>saveOrderBtn.innerText='Save Custom Order', 2000);
-            // Auto set select to custom
-            const sel = document.querySelector('tr[data-lsid="' + lsid + '"] select');
-            if(sel) { sel.value='custom'; sel.dispatchEvent(new Event('change')); }
-         } catch(e) { alert('Error'); saveOrderBtn.innerText='Error'; }
-      };
-
-      resetOrderBtn.onclick = () => {
-         const cur = document.querySelector('tr[data-lsid="' + lsid + '"] select').value;
-         renderGrid(getSorted(cur));
-      };
-      
-      resetAllBtn.onclick = async () => {
-        if(!confirm('Reset custom order and all added/removed items?')) return;
-        await fetch('/api/list-reset?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
-        refreshDrawer();
-      };
-
-    }).catch(e => td.innerHTML = '<div class="text-red-500 p-4">Failed to load items</div>');
+    };
 
     return tr;
   }
 
   order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
-  attachDnD(tbody, 'tr', () => saveAll('Reordered lists'));
-  
-  // Save All Logic
-  async function saveAll(msgText) {
-    const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.dataset.lsid);
+  table.appendChild(tbody);
+  attachRowDnD(tbody);
+
+  container.appendChild(table);
+
+  const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'});
+  const saveBtn = el('button',{text:'Save', type:'button'});
+  const msg = el('span',{class:'inline-note'});
+  saveWrap.appendChild(saveBtn); saveWrap.appendChild(msg);
+  container.appendChild(saveWrap);
+
+  async function saveAll(text){
+    const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
     const enabled = Array.from(enabledSet);
     const body = {
-      enabled, order: newOrder, defaultList: prefs.defaultList || enabled[0] || "",
-      perListSort: prefs.perListSort, sortOptions: prefs.sortOptions, posterShapes: prefs.posterShapes,
-      upgradeEpisodes: prefs.upgradeEpisodes, sources: prefs.sources, blocked: prefs.blocked, customOrder: prefs.customOrder
+      enabled,
+      order: newOrder,
+      defaultList: prefs.defaultList || (enabled[0] || ""),
+      perListSort: prefs.perListSort || {},
+      sortOptions: prefs.sortOptions || {},
+      posterShape: prefs.posterShape || {},        // include shapes
+      upgradeEpisodes: prefs.upgradeEpisodes || false,
+      sources: prefs.sources || {},
+      blocked: prefs.blocked || []
     };
-    const msg = document.getElementById('saveMsg');
-    msg.className = "text-center text-indigo-400 text-sm font-medium mt-2 h-6";
-    msg.innerText = "Saving...";
-    try {
-       await fetch('/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-       msg.className = "text-center text-green-400 text-sm font-medium mt-2 h-6";
-       msg.innerText = msgText || "All changes saved successfully.";
-       setTimeout(()=>msg.innerText='', 3000);
-    } catch(e) { 
-       msg.className = "text-center text-red-400 text-sm font-medium mt-2 h-6";
-       msg.innerText = "Save failed!"; 
-    }
+    msg.textContent = "Saving…";
+    const r = await fetch('/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const t = await r.text();
+    msg.textContent = text || t || "Saved.";
+    setTimeout(()=>{ msg.textContent = ""; }, 1800);
   }
-  document.getElementById('saveBtn').onclick = () => saveAll();
+
+  saveBtn.onclick = ()=> saveAll();
 }
 
 wireAddButtons();
