@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.3.1 + Trakt list support + per-list posterShape (portrait/landscape)
+ *  v12.3.2 – Trakt lists + per-list posterShape with real landscape posters
  */
 "use strict";
 const express = require("express");
@@ -34,7 +34,7 @@ const SNAP_LOCAL    = "data/snapshot.json";
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.1";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.2";
 const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -79,9 +79,9 @@ let PREFS = {
   order: [],              // listIds order in manifest
   defaultList: "",
   perListSort: {},        // { listId: 'date_asc' | ... | 'custom' }
-  sortOptions: {},        // { listId: ['custom', 'date_desc', ...] } -> controls Stremio dropdown
+  sortOptions: {},        // { listId: ['custom', 'date_desc', ...] }
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
-  posterShape: {},        // NEW: { listId: 'poster' | 'landscape' }
+  posterShape: {},        // { listId: 'poster' | 'landscape' }
   upgradeEpisodes: UPGRADE_EPISODES,
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
@@ -193,7 +193,7 @@ async function loadSnapshot() {
 function parseTraktListUrl(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
-  const m = s.match(/trakt\.tv\/users\/([^/]+)\/lists\/([^/?#]+)/i);
+  const m = s.match(/trakt\.tv\/users\/([^/]+)\/lists\/([^\/?#]+)/i);
   if (!m) return null;
   const user = decodeURIComponent(m[1]);
   const slug = decodeURIComponent(m[2]);
@@ -397,32 +397,44 @@ async function getBestMeta(imdbId) {
   meta = await fetchCinemeta("movie", imdbId);
   if (meta) { const rec = { kind: "movie", meta }; BEST.set(imdbId, rec); return rec; }
   const ld = await imdbJsonLd(imdbId);
-  let name, poster, released, year, type = "movie";
+  let name, poster, background, released, year, type = "movie";
   try {
     const node = Array.isArray(ld && ld["@graph"])
       ? ld["@graph"].find(x => x["@id"]?.includes(`/title/${imdbId}`)) || ld["@graph"][0]
       : ld;
     name = node?.name || node?.headline || ld?.name;
     poster = typeof node?.image === "string" ? node.image : (node?.image?.url || ld?.image);
+    background = poster; // we don't have separate background via ld; reuse poster
     released = node?.datePublished || node?.startDate || node?.releaseDate || undefined;
     year = released ? Number(String(released).slice(0,4)) : undefined;
     const t = Array.isArray(node?.["@type"]) ? node["@type"].join(",") : (node?.["@type"] || "");
     if (/Series/i.test(t)) type = "series";
     else if (/TVEpisode/i.test(t)) type = "episode";
   } catch {}
-  const rec = { kind: type === "series" ? "series" : "movie", meta: name ? { name, poster, released, year } : null };
+  const rec = { kind: type === "series" ? "series" : "movie", meta: name ? { name, poster, background, released, year } : null };
   BEST.set(imdbId, rec);
   if (name || poster) FALLBK.set(imdbId, { name, poster, releaseDate: released, year, type: rec.kind });
   return rec;
 }
+
+// central place to build a "card" for admin + catalogs
 function cardFor(imdbId) {
   const rec = BEST.get(imdbId) || { kind: null, meta: null };
-  const m = rec.meta || {}; const fb = FALLBK.get(imdbId) || {};
+  const m = rec.meta || {};
+  const fb = FALLBK.get(imdbId) || {};
+
+  const portrait = m.poster || fb.poster;
+  const landscape = m.background || m.backdrop || portrait || fb.poster;
+
   return {
     id: imdbId,
     type: rec.kind || fb.type || "movie",
     name: m.name || fb.name || imdbId,
-    poster: m.poster || fb.poster || undefined,
+    // default poster is portrait; we’ll swap to landscape for landscape lists
+    poster: portrait || landscape || undefined,
+    posterPortrait: portrait || landscape || undefined,
+    posterLandscape: landscape || portrait || undefined,
+    background: m.background || m.backdrop || undefined,
     imdbRating: m.imdbRating ?? undefined,
     runtime: m.runtime ?? undefined,
     year: m.year ?? fb.year ?? undefined,
@@ -430,6 +442,7 @@ function cardFor(imdbId) {
     description: m.description || undefined
   };
 }
+
 function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
 function stableSort(items, sortKey) {
   const s = String(sortKey || "name_asc").toLowerCase();
@@ -687,7 +700,10 @@ async function fullSync({ rediscover = true } = {}) {
     }
 
     // preload cards
-    for (const tt of idsToPreload) { await getBestMeta(tt); CARD.set(tt, cardFor(tt)); }
+    for (const tt of idsToPreload) {
+      await getBestMeta(tt);
+      CARD.set(tt, cardFor(tt));
+    }
 
     LISTS = next;
     LAST_SYNC_AT = Date.now();
@@ -767,7 +783,7 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.3.1",
+  version: "12.3.2",
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
@@ -791,7 +807,7 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-    type: "my lists", // exact match with manifest -> fixes Android sort menu
+    type: "my lists",
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
@@ -799,7 +815,7 @@ function catalogs(){
       { name:"search" }, { name:"skip" }, { name:"limit" },
       { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
     ],
-    posterShape: (PREFS.posterShape && PREFS.posterShape[lsid]) || "poster" // portrait/landscape per list
+    posterShape: (PREFS.posterShape && PREFS.posterShape[lsid]) || "poster" // per-list portrait/landscape
   }));
 }
 app.get("/manifest.json", (req,res)=>{
@@ -820,7 +836,6 @@ app.get("/configure", (req, res) => {
   const base = absoluteBase(req);
   const dest = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
 
-  // Works inside Stremio’s webview; also shows a manual link as fallback
   res.type("html").send(`
     <!doctype html><meta charset="utf-8">
     <title>Configure – My Lists</title>
@@ -883,6 +898,20 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
     } else metas = stableSort(metas, sort);
 
+    // apply poster shape at output time (Cinemeta background for landscape)
+    const shape = (PREFS.posterShape && PREFS.posterShape[lsid]) || "poster";
+    metas = metas.map(m => {
+      const rec = BEST.get(m.id);
+      const bg = rec && rec.meta && (rec.meta.background || rec.meta.backdrop);
+      const portrait = m.posterPortrait || m.poster || m.posterLandscape || bg;
+      const landscape = m.posterLandscape || bg || m.poster || m.posterPortrait;
+      if (shape === "landscape") {
+        return { ...m, poster: landscape || portrait };
+      } else {
+        return { ...m, poster: portrait || landscape };
+      }
+    });
+
     res.json({ metas: metas.slice(skip, skip+limit) });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
 });
@@ -902,7 +931,16 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
       const fb = FALLBK.get(imdbId) || {};
       return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
     }
-    res.json({ meta: { ...rec.meta, id: imdbId, type: rec.kind } });
+
+    // default meta = portrait poster; catalogs handle landscape swap
+    const m = rec.meta;
+    res.json({
+      meta: {
+        ...m,
+        id: imdbId,
+        type: rec.kind
+      }
+    });
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
 });
 
@@ -993,7 +1031,24 @@ app.get("/api/list-items", (req,res) => {
   const toAdd = (ed.added || []).filter(isImdb);
   for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
 
-  const items = ids.map(tt => CARD.get(tt) || cardFor(tt));
+  const items = ids.map(tt => {
+    let c = CARD.get(tt) || cardFor(tt);
+    // ensure portrait/landscape fields exist even for old snapshots
+    if (!c.posterPortrait || !c.posterLandscape) {
+      const rec = BEST.get(tt);
+      const bg = rec && rec.meta && (rec.meta.background || rec.meta.backdrop);
+      const portrait = c.posterPortrait || c.poster || c.posterLandscape || bg;
+      const landscape = c.posterLandscape || bg || c.poster || c.posterPortrait;
+      c = {
+        ...c,
+        posterPortrait: portrait || landscape,
+        posterLandscape: landscape || portrait
+      };
+      CARD.set(tt, c);
+    }
+    return c;
+  });
+
   res.json({ items });
 });
 
@@ -1010,9 +1065,10 @@ app.post("/api/list-add", async (req, res) => {
     PREFS.listEdits = PREFS.listEdits || {};
     const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
     if (!ed.added.includes(tt)) ed.added.push(tt);
-    ed.removed = (ed.removed || []).filter(x => x !== tt); // un-remove if it was removed
+    ed.removed = (ed.removed || []).filter(x => x !== tt);
 
-    await getBestMeta(tt); CARD.set(tt, cardFor(tt));
+    await getBestMeta(tt);
+    CARD.set(tt, cardFor(tt));
 
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
@@ -1191,7 +1247,7 @@ app.get("/admin", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   const base = absoluteBase(req);
   const manifestUrl = `${base}/manifest.json${SHARED_SECRET?`?key=${SHARED_SECRET}`:""}`;
-  const stremioInstallUrl = `stremio://addon/install/manifest?url=${encodeURIComponent(manifestUrl)}`;
+
   let discovered = [];
   try { discovered = await harvestSources(); } catch {}
 
@@ -1443,7 +1499,7 @@ app.get("/admin", async (req,res)=>{
       <h4>Manifest URL</h4>
       <p class="code">${manifestUrl}</p>
       <div class="installRow">
-        <a href="${stremioInstallUrl}"><button type="button" class="btn2">⭐ Install to Stremio</button></a>
+        <button type="button" class="btn2" id="installBtn">⭐ Install to Stremio</button>
         <span class="mini muted">If the button doesn’t work, copy the manifest URL into Stremio manually.</span>
       </div>
       <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, poster shapes or ordering change.</p>
@@ -1496,6 +1552,8 @@ app.get("/admin", async (req,res)=>{
 <script>
 const ADMIN="${ADMIN_PASSWORD}";
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
+const HOST_URL = ${JSON.stringify(base)};
+const SECRET = ${JSON.stringify(SHARED_SECRET)};
 
 async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
@@ -1505,6 +1563,19 @@ async function saveCustomOrder(lsid, order){
   if (!r.ok) throw new Error('save failed');
   return r.json();
 }
+
+// --- Install Button Logic ---
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('installBtn');
+  if (btn) {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
+      if (SECRET) url += '?key=' + SECRET;
+      window.location.href = url;
+    };
+  }
+});
 
 function normalizeUserListsUrl(v){
   v = String(v||'').trim();
@@ -1580,7 +1651,10 @@ function attachRowDnD(tbody) {
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
   });
-  tbody.addEventListener('dragend', () => { if (dragSrc) dragSrc.classList.remove('dragging'); dragSrc = null; });
+  tbody.addEventListener('dragend', () => {
+    if (dragSrc) dragSrc.classList.remove('dragging');
+    dragSrc = null;
+  });
   tbody.addEventListener('dragover', (e) => {
     e.preventDefault();
     if (!dragSrc) return;
@@ -1694,7 +1768,7 @@ async function render() {
     el('th',{text:'Enabled'}),
     el('th',{text:'List (id)'}),
     el('th',{text:'Items'}),
-    el('th',{text:'Poster'}),  // new column
+    el('th',{text:'Poster'}),
     el('th',{text:'Default sort'}),
     el('th',{text:'Remove'})
   ])]);
@@ -1752,7 +1826,12 @@ async function render() {
           await fetch('/api/list-remove?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: it.id })});
           await refresh();
         };
-        const img = el('img',{src: it.poster || '', alt:'', class:'thumb-img'});
+
+        const portrait = it.posterPortrait || it.poster || it.posterLandscape || it.background;
+        const landscape = it.posterLandscape || it.background || it.poster || it.posterPortrait;
+        const url = shape === 'landscape' ? (landscape || portrait) : (portrait || landscape);
+
+        const img = el('img',{src: url || '', alt:'', class:'thumb-img'});
         const wrap = el('div',{},[
           el('div',{class:'title',text: it.name || it.id}),
           el('div',{class:'id',text: it.id})
@@ -1915,7 +1994,7 @@ async function render() {
       shapeBtn.className = 'shapeBtn ' + (next==='landscape'?'land':'portrait');
       shapeBtn.querySelector('span:nth-child(2)').textContent = next === 'landscape' ? 'Landscape' : 'Portrait';
 
-      // also update drawer thumbnails if opened
+      // also update drawer thumbnails if opened (size only; images update on reopen)
       const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
       if (drawer) {
         const ul = drawer.querySelector('ul.thumbs');
@@ -1996,7 +2075,7 @@ async function render() {
       defaultList: prefs.defaultList || (enabled[0] || ""),
       perListSort: prefs.perListSort || {},
       sortOptions: prefs.sortOptions || {},
-      posterShape: prefs.posterShape || {},        // include shapes
+      posterShape: prefs.posterShape || {},
       upgradeEpisodes: prefs.upgradeEpisodes || false,
       sources: prefs.sources || {},
       blocked: prefs.blocked || []
@@ -2030,6 +2109,20 @@ render();
       MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
       LAST_SYNC_AT = snap.lastSyncAt || 0;
       LAST_MANIFEST_KEY = manifestKey();
+
+      // normalize old cards to have portrait/landscape fields
+      for (const [tt, c] of CARD.entries()) {
+        const rec = BEST.get(tt);
+        const bg = rec && rec.meta && (rec.meta.background || rec.meta.backdrop);
+        const portrait = c.posterPortrait || c.poster || c.posterLandscape || bg;
+        const landscape = c.posterLandscape || bg || c.poster || c.posterPortrait;
+        CARD.set(tt, {
+          ...c,
+          posterPortrait: portrait || landscape,
+          posterLandscape: landscape || portrait
+        });
+      }
+
       console.log("[BOOT] snapshot loaded");
     }
   } catch(e){ console.warn("[BOOT] load snapshot failed:", e.message); }
