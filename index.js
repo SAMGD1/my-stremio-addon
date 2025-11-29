@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.3.2 – Trakt lists + per-list posterShape with real landscape posters
+ *  v12.3.3 – Trakt lists + fixed multi-page IMDb lists (no portrait/landscape toggle)
  */
 "use strict";
 const express = require("express");
@@ -34,7 +34,7 @@ const SNAP_LOCAL    = "data/snapshot.json";
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.2";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.3";
 const REQ_HEADERS = {
   "User-Agent": UA,
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -81,7 +81,6 @@ let PREFS = {
   perListSort: {},        // { listId: 'date_asc' | ... | 'custom' }
   sortOptions: {},        // { listId: ['custom', 'date_desc', ...] }
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
-  posterShape: {},        // { listId: 'poster' | 'landscape' }
   upgradeEpisodes: UPGRADE_EPISODES,
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
@@ -317,44 +316,64 @@ function tconstsFromHtml(html) {
   while ((m = re2.exec(html))) if (!seen.has(m[1])) { seen.add(m[1]); out.push(m[1]); }
   return out;
 }
-function nextPageUrl(html) {
-  let m = html.match(/<a[^>]+rel=["']next["'][^>]+href=["']([^"']+)["']/i);
-  if (!m) m = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*class=["'][^"']*lister-page-next[^"']*["']/i);
-  if (!m) m = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*data-testid=["']pagination-next-page-button["'][^>]*>/i);
-  if (!m) return null;
-  try { return new URL(m[1], "https://www.imdb.com").toString(); } catch { return null; }
-}
+
+/**
+ * NEW multi-page implementation:
+ * we explicitly request ?page=1,2,3… instead of scraping the “Next” button.
+ */
 async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
-  // raw order (whatever the list currently displays by default)
-  const seen = new Set(); const ids = [];
-  let url = withParam(listUrl, "mode", "detail");
-  let pages = 0;
-  while (url && pages < maxPages) {
-    let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
+  const seen = new Set();
+  const ids = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    let url = withParam(listUrl, "mode", "detail");
+    url = withParam(url, "page", String(page));
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
     const found = tconstsFromHtml(html);
     let added = 0;
-    for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); added++; }
-    pages++;
-    const next = nextPageUrl(html);
-    if (!next || !added) break;
-    url = next;
+    for (const tt of found) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added++;
+      }
+    }
+    if (!added) break;
     await sleep(80);
   }
   return ids;
 }
-// fetch order IMDb shows when sorted a certain way
+
+// fetch order IMDb shows when sorted a certain way – also using explicit ?page=N
 async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, maxPages = 80) {
-  const seen = new Set(); const ids = [];
-  let url = withParam(withParam(listUrl, "mode", "detail"), "sort", sortSpec);
-  let pages = 0;
-  while (url && pages < maxPages) {
-    let html; try { html = await fetchText(withParam(url, "_", Date.now())); } catch { break; }
+  const seen = new Set();
+  const ids = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    let url = withParam(listUrl, "mode", "detail");
+    url = withParam(url, "sort", sortSpec);
+    url = withParam(url, "page", String(page));
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
     const found = tconstsFromHtml(html);
-    for (const tt of found) if (!seen.has(tt)) { seen.add(tt); ids.push(tt); }
-    pages++;
-    const next = nextPageUrl(html);
-    if (!next) break;
-    url = next;
+    let added = 0;
+    for (const tt of found) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added++;
+      }
+    }
+    if (!added) break;
     await sleep(80);
   }
   return ids;
@@ -423,18 +442,15 @@ function cardFor(imdbId) {
   const m = rec.meta || {};
   const fb = FALLBK.get(imdbId) || {};
 
-  const portrait = m.poster || fb.poster;
-  const landscape = m.background || m.backdrop || portrait || fb.poster;
+  const poster = m.poster || fb.poster || m.background || m.backdrop;
+  const background = m.background || m.backdrop || poster || fb.poster;
 
   return {
     id: imdbId,
     type: rec.kind || fb.type || "movie",
     name: m.name || fb.name || imdbId,
-    // default poster is portrait; we’ll swap to landscape for landscape lists
-    poster: portrait || landscape || undefined,
-    posterPortrait: portrait || landscape || undefined,
-    posterLandscape: landscape || portrait || undefined,
-    background: m.background || m.backdrop || undefined,
+    poster: poster || undefined,
+    background: background || undefined,
     imdbRating: m.imdbRating ?? undefined,
     runtime: m.runtime ?? undefined,
     year: m.year ?? fb.year ?? undefined,
@@ -490,10 +506,9 @@ function manifestKey() {
   const perSort = JSON.stringify(PREFS.perListSort || {});
   const perOpts = JSON.stringify(PREFS.sortOptions || {});
   const custom  = Object.keys(PREFS.customOrder || {}).length;
-  const shapes  = JSON.stringify(PREFS.posterShape || {});   // include poster shapes
   const order   = (PREFS.order || []).join(",");
 
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}#sh${shapes}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}`;
 }
 
 async function harvestSources() {
@@ -783,7 +798,7 @@ app.get("/health", (_,res)=>res.status(200).send("ok"));
 // ------- Manifest -------
 const baseManifest = {
   id: "org.mylists.snapshot",
-  version: "12.3.2",
+  version: "12.3.3",
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
@@ -814,8 +829,8 @@ function catalogs(){
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
       { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
-    ],
-    posterShape: (PREFS.posterShape && PREFS.posterShape[lsid]) || "poster" // per-list portrait/landscape
+    ]
+    // no posterShape – Stremio uses default poster style
   }));
 }
 app.get("/manifest.json", (req,res)=>{
@@ -898,20 +913,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
     } else metas = stableSort(metas, sort);
 
-    // apply poster shape at output time (Cinemeta background for landscape)
-    const shape = (PREFS.posterShape && PREFS.posterShape[lsid]) || "poster";
-    metas = metas.map(m => {
-      const rec = BEST.get(m.id);
-      const bg = rec && rec.meta && (rec.meta.background || rec.meta.backdrop);
-      const portrait = m.posterPortrait || m.poster || m.posterLandscape || bg;
-      const landscape = m.posterLandscape || bg || m.poster || m.posterPortrait;
-      if (shape === "landscape") {
-        return { ...m, poster: landscape || portrait };
-      } else {
-        return { ...m, poster: portrait || landscape };
-      }
-    });
-
+    // No poster-shape swap; meta already has a single poster field
     res.json({ metas: metas.slice(skip, skip+limit) });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
 });
@@ -932,7 +934,6 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
       return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
     }
 
-    // default meta = portrait poster; catalogs handle landscape swap
     const m = rec.meta;
     res.json({
       meta: {
@@ -964,14 +965,6 @@ app.post("/api/prefs", async (req,res) => {
     PREFS.sortOptions     = body.sortOptions && typeof body.sortOptions === "object"
       ? Object.fromEntries(Object.entries(body.sortOptions).map(([k,v])=>[k,clampSortOptions(v)]))
       : (PREFS.sortOptions || {});
-
-    // NEW: per-list posterShape
-    PREFS.posterShape = body.posterShape && typeof body.posterShape === "object"
-      ? Object.fromEntries(
-          Object.entries(body.posterShape)
-            .filter(([k,v]) => isListId(k) && (v === "poster" || v === "landscape"))
-        )
-      : (PREFS.posterShape || {});
 
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
 
@@ -1031,23 +1024,7 @@ app.get("/api/list-items", (req,res) => {
   const toAdd = (ed.added || []).filter(isImdb);
   for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
 
-  const items = ids.map(tt => {
-    let c = CARD.get(tt) || cardFor(tt);
-    // ensure portrait/landscape fields exist even for old snapshots
-    if (!c.posterPortrait || !c.posterLandscape) {
-      const rec = BEST.get(tt);
-      const bg = rec && rec.meta && (rec.meta.background || rec.meta.backdrop);
-      const portrait = c.posterPortrait || c.poster || c.posterLandscape || bg;
-      const landscape = c.posterLandscape || bg || c.poster || c.posterPortrait;
-      c = {
-        ...c,
-        posterPortrait: portrait || landscape,
-        posterLandscape: landscape || portrait
-      };
-      CARD.set(tt, c);
-    }
-    return c;
-  });
+  const items = ids.map(tt => CARD.get(tt) || cardFor(tt));
 
   res.json({ items });
 });
@@ -1242,7 +1219,7 @@ app.get("/api/debug-imdb", async (req,res)=>{
   }catch(e){ res.type("text").status(500).send("Fetch failed: "+e.message); }
 });
 
-// ------- Admin page (revamped UI + poster shape toggle + install button) -------
+// ------- Admin page (simplified UI: no poster shape) -------
 app.get("/admin", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   const base = absoluteBase(req);
@@ -1355,15 +1332,8 @@ app.get("/admin", async (req,res)=>{
     border-radius:6px;
     background:#2a244e;
     flex-shrink:0;
-  }
-  /* portrait vs landscape sizes */
-  .thumbs.shape-poster .thumb-img{
     width:52px;
     height:78px;
-  }
-  .thumbs.shape-landscape .thumb-img{
-    width:86px;
-    height:52px;
   }
   .thumb .title{font-size:14px}
   .thumb .id{font-size:11px;color:var(--muted)}
@@ -1442,32 +1412,6 @@ app.get("/admin", async (req,res)=>{
   .mini{font-size:12px}
   a.link{color:#b1b9ff;text-decoration:none}
   a.link:hover{text-decoration:underline}
-  .shapeBtn{
-    font-size:11px;
-    padding:4px 10px;
-    border-radius:999px;
-    background:var(--accent-soft);
-    border:1px solid rgba(159,143,254,.6);
-    color:#e2e0ff;
-    cursor:pointer;
-    display:inline-flex;
-    align-items:center;
-    gap:4px;
-  }
-  .shapeBtn span.dot{
-    width:6px;
-    height:10px;
-    border-radius:999px;
-    background:#f8c291;
-  }
-  .shapeBtn.land span.dot{
-    width:10px;
-    height:6px;
-  }
-  .shapeBtn.portrait span.dot{
-    width:6px;
-    height:10px;
-  }
   .installRow{
     display:flex;
     flex-wrap:wrap;
@@ -1502,7 +1446,7 @@ app.get("/admin", async (req,res)=>{
         <button type="button" class="btn2" id="installBtn">⭐ Install to Stremio</button>
         <span class="mini muted">If the button doesn’t work, copy the manifest URL into Stremio manually.</span>
       </div>
-      <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, poster shapes or ordering change.</p>
+      <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, or ordering change.</p>
     </div>
 
     <div class="card">
@@ -1542,8 +1486,8 @@ app.get("/admin", async (req,res)=>{
   </div>
 
   <div class="card" style="margin-top:16px">
-    <h3>Customize (enable, order, sort, poster shape)</h3>
-    <p class="muted">Drag rows to reorder lists. Use <b>Poster</b> to switch between portrait and landscape artwork for each list. Click ▾ to open the drawer and tune sort options or custom order.</p>
+    <h3>Customize (enable, order, sort)</h3>
+    <p class="muted">Drag rows to reorder lists. Click ▾ to open the drawer and tune sort options or custom order.</p>
     <div id="prefs"></div>
   </div>
 
@@ -1707,7 +1651,6 @@ function stableSortClient(items, sortKey){
 async function render() {
   const prefs = await getPrefs();
   const lists = await getLists();
-  prefs.posterShape = prefs.posterShape || {};
 
   function renderPills(id, arr, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
@@ -1768,7 +1711,6 @@ async function render() {
     el('th',{text:'Enabled'}),
     el('th',{text:'List (id)'}),
     el('th',{text:'Items'}),
-    el('th',{text:'Poster'}),
     el('th',{text:'Default sort'}),
     el('th',{text:'Remove'})
   ])]);
@@ -1777,7 +1719,7 @@ async function render() {
 
   function makeDrawer(lsid) {
     const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
-    const td = el('td',{colspan:'7'});
+    const td = el('td',{colspan:'6'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
 
@@ -1813,8 +1755,7 @@ async function render() {
       td.appendChild(tools);
       td.appendChild(optsWrap);
 
-      const shape = (prefs.posterShape && prefs.posterShape[lsid]) || 'poster';
-      const ul = el('ul',{class:'thumbs shape-'+shape});
+      const ul = el('ul',{class:'thumbs'});
       td.appendChild(ul);
 
       function liFor(it){
@@ -1827,11 +1768,8 @@ async function render() {
           await refresh();
         };
 
-        const portrait = it.posterPortrait || it.poster || it.posterLandscape || it.background;
-        const landscape = it.posterLandscape || it.background || it.poster || it.posterPortrait;
-        const url = shape === 'landscape' ? (landscape || portrait) : (portrait || landscape);
-
-        const img = el('img',{src: url || '', alt:'', class:'thumb-img'});
+        const url = it.poster || it.background || '';
+        const img = el('img',{src: url, alt:'', class:'thumb-img'});
         const wrap = el('div',{},[
           el('div',{class:'title',text: it.name || it.id}),
           el('div',{class:'id',text: it.id})
@@ -1976,36 +1914,6 @@ async function render() {
 
     const count = el('td',{text:String((L.ids||[]).length)});
 
-    // Poster shape toggle (Portrait <-> Landscape)
-    const shapeCell = el('td');
-    const currentShape = (prefs.posterShape && prefs.posterShape[lsid]) || 'poster';
-    const shapeBtn = el('button',{
-      class:'shapeBtn '+(currentShape==='landscape'?'land':'portrait'),
-      type:'button'
-    },[
-      el('span',{class:'dot'}),
-      el('span',{text: currentShape === 'landscape' ? 'Landscape' : 'Portrait'})
-    ]);
-    shapeBtn.onclick = ()=>{
-      const curr = (prefs.posterShape && prefs.posterShape[lsid]) || 'poster';
-      const next = curr === 'poster' ? 'landscape' : 'poster';
-      prefs.posterShape = prefs.posterShape || {};
-      prefs.posterShape[lsid] = next;
-      shapeBtn.className = 'shapeBtn ' + (next==='landscape'?'land':'portrait');
-      shapeBtn.querySelector('span:nth-child(2)').textContent = next === 'landscape' ? 'Landscape' : 'Portrait';
-
-      // also update drawer thumbnails if opened (size only; images update on reopen)
-      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
-      if (drawer) {
-        const ul = drawer.querySelector('ul.thumbs');
-        if (ul) {
-          ul.classList.remove('shape-poster','shape-landscape');
-          ul.classList.add('shape-'+next);
-        }
-      }
-    };
-    shapeCell.appendChild(shapeBtn);
-
     const sortSel = el('select');
     SORT_OPTIONS.forEach(o=>{
       const opt = el('option',{value:o,text:o});
@@ -2030,7 +1938,6 @@ async function render() {
     tr.appendChild(el('td',{},[cb]));
     tr.appendChild(nameCell);
     tr.appendChild(count);
-    tr.appendChild(shapeCell);
     tr.appendChild(el('td',{},[sortSel]));
     tr.appendChild(el('td',{},[rmBtn]));
 
@@ -2075,7 +1982,6 @@ async function render() {
       defaultList: prefs.defaultList || (enabled[0] || ""),
       perListSort: prefs.perListSort || {},
       sortOptions: prefs.sortOptions || {},
-      posterShape: prefs.posterShape || {},
       upgradeEpisodes: prefs.upgradeEpisodes || false,
       sources: prefs.sources || {},
       blocked: prefs.blocked || []
@@ -2109,19 +2015,6 @@ render();
       MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
       LAST_SYNC_AT = snap.lastSyncAt || 0;
       LAST_MANIFEST_KEY = manifestKey();
-
-      // normalize old cards to have portrait/landscape fields
-      for (const [tt, c] of CARD.entries()) {
-        const rec = BEST.get(tt);
-        const bg = rec && rec.meta && (rec.meta.background || rec.meta.backdrop);
-        const portrait = c.posterPortrait || c.poster || c.posterLandscape || bg;
-        const landscape = c.posterLandscape || bg || c.poster || c.posterPortrait;
-        CARD.set(tt, {
-          ...c,
-          posterPortrait: portrait || landscape,
-          posterLandscape: landscape || portrait
-        });
-      }
 
       console.log("[BOOT] snapshot loaded");
     }
