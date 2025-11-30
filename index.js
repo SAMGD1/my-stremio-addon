@@ -2746,6 +2746,6 @@ app.get("/admin", (req, res) => {
   }
 
   app.listen(PORT, HOST, () => {
-    console.log(\`My Lists addon listening on \${HOST}:\${PORT}\`);
+    console.log("My Lists addon listening on " + HOST + ":" + PORT);
   });
 })();
