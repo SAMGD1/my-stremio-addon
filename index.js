@@ -1445,7 +1445,7 @@ app.get("/admin", async (req, res) => {
     --border:#262145;
     --danger:#ff7675;
   }
-  *{box-sizing:border-box}
+  *{box-sizing:border-box;}
   body{
     font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;
     margin:0;
@@ -1456,6 +1456,7 @@ app.get("/admin", async (req, res) => {
   .hero{padding:16px 0 8px}
   h1{margin:0 0 4px;font-weight:700;font-size:26px;letter-spacing:.01em}
   .subtitle{color:var(--muted);font-size:13px}
+
   .navtabs{
     margin:10px 0 16px;
     display:flex;
@@ -1477,6 +1478,7 @@ app.get("/admin", async (req, res) => {
     border-color:var(--accent2);
     box-shadow:0 6px 18px rgba(108,92,231,.6);
   }
+
   .card{
     border:1px solid var(--border);
     border-radius:18px;
@@ -1487,6 +1489,9 @@ app.get("/admin", async (req, res) => {
   }
   h3{margin:0 0 8px;font-size:17px}
   h4{margin:12px 0 4px;font-size:14px}
+  ul{margin:8px 0 0 18px;padding:0}
+  ul li{margin-bottom:4px}
+
   button{
     padding:9px 14px;
     border:0;
@@ -1501,18 +1506,9 @@ app.get("/admin", async (req, res) => {
     box-shadow:0 6px 16px rgba(108,92,231,.55);
   }
   button.btn2{background:var(--accent2);}
+  button.danger{background:var(--danger);box-shadow:0 6px 18px rgba(255,118,117,.45);}
   button:disabled{opacity:.5;cursor:default;box-shadow:none}
-  button.movebtn{
-    padding:4px 7px;
-    font-size:11px;
-    box-shadow:none;
-    background:#1c1837;
-  }
-  button.danger{
-    background:var(--danger);
-    box-shadow:0 6px 18px rgba(255,118,117,.45);
-  }
-  small{color:var(--muted)}
+
   .mini{font-size:12px}
   .muted{color:var(--muted)}
   .code{
@@ -1524,8 +1520,6 @@ app.get("/admin", async (req, res) => {
     font-size:12px;
     word-break:break-all;
   }
-  ul{margin:8px 0 0 18px;padding:0}
-  ul li{margin-bottom:4px}
   .installRow{
     display:flex;
     flex-wrap:wrap;
@@ -1533,36 +1527,26 @@ app.get("/admin", async (req, res) => {
     align-items:center;
     margin-top:8px;
   }
-  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
-  th,td{padding:8px 6px;border-bottom:1px solid rgba(38,33,69,.8);text-align:left;vertical-align:top}
-  th{font-weight:600;color:#d7d1ff;font-size:12px}
-  tr:hover td{background:rgba(17,14,40,.7);}
-  input[type="checkbox"]{transform:translateY(1px);}
-  input[type="text"]{
-    background:#1c1837;
-    color:var(--text);
-    border:1px solid var(--border);
-    border-radius:8px;
-    padding:8px 9px;
-    width:100%;
-    font-size:13px;
-  }
-  select{
-    background:#1c1837;
-    color:var(--text);
-    border:1px solid var(--border);
-    border-radius:8px;
-    padding:6px 8px;
-    font-size:13px;
-  }
   .rowtools{
     display:flex;
     flex-wrap:wrap;
     gap:8px;
     align-items:center;
-    margin-top:8px;
-    margin-bottom:8px;
+    margin:8px 0;
   }
+  input[type="text"], select{
+    background:#1c1837;
+    color:var(--text);
+    border:1px solid var(--border);
+    border-radius:8px;
+    padding:7px 9px;
+    font-size:13px;
+  }
+  input[type="text"]{width:100%;}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+  th,td{padding:8px 6px;border-bottom:1px solid rgba(38,33,69,.8);text-align:left;vertical-align:top}
+  th{font-weight:600;color:#d7d1ff;font-size:12px}
+  tr:hover td{background:rgba(17,14,40,.7);}
   .pill{
     display:inline-flex;
     align-items:center;
@@ -1580,16 +1564,14 @@ app.get("/admin", async (req, res) => {
     color:#ffb4b4;
     font-size:11px;
   }
-  .chevCell{width:18px;font-size:16px;color:var(--muted);}
-  .chevIcon{opacity:.7;}
-  .btnRow{
-    margin-top:10px;
-    display:flex;
-    flex-wrap:wrap;
-    gap:8px;
-    align-items:center;
+  button.movebtn{
+    padding:4px 7px;
+    font-size:11px;
+    box-shadow:none;
+    background:#1c1837;
   }
-  /* simple "page" toggles */
+
+  /* simple tab "pages" */
   body.view-snapshot .card.snapshot{display:block;}
   body.view-snapshot .card.sources,
   body.view-snapshot .card.customize{display:none;}
@@ -1608,7 +1590,6 @@ app.get("/admin", async (req, res) => {
   <div class="hero">
     <h1>My Lists – Admin</h1>
     <div class="subtitle">Last sync: ${lastSyncText}</div>
-
     <div class="navtabs">
       <button type="button" class="navtab active" data-view="snapshot">Snapshot</button>
       <button type="button" class="navtab" data-view="sources">Add lists</button>
@@ -1623,7 +1604,6 @@ app.get("/admin", async (req, res) => {
       <button type="button" id="goCustom">🎛 Customize layout</button>
     </div>
     <ul>${rows}</ul>
-
     <div class="rowtools">
       <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
         <button class="btn2" type="submit">🔁 Sync Lists Now</button>
@@ -1633,7 +1613,6 @@ app.get("/admin", async (req, res) => {
       </form>
       <span class="mini muted">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
     </div>
-
     <h4>Manifest URL</h4>
     <p class="code">${manifestUrl}</p>
     <div class="installRow">
@@ -1645,7 +1624,6 @@ app.get("/admin", async (req, res) => {
 
   <div class="card sources">
     <h3>Discovered & Sources</h3>
-
     <div class="mini muted" style="margin-top:4px;">Blocked lists (won't re-add on sync):</div>
     <div id="blockedPills" style="margin-bottom:6px;"></div>
 
@@ -1654,7 +1632,7 @@ app.get("/admin", async (req, res) => {
     <div class="rowtools">
       <div style="flex:1;min-width:220px;">
         <div class="mini muted">Add IMDb/Trakt <b>User lists</b> URL</div>
-        <input id="userInput" placeholder="IMDb or Trakt user /lists page">
+        <input id="userInput" placeholder="Full /user/.../lists URL">
       </div>
       <button id="addUser" type="button">Add</button>
     </div>
@@ -1662,7 +1640,7 @@ app.get("/admin", async (req, res) => {
     <div class="rowtools">
       <div style="flex:1;min-width:220px;">
         <div class="mini muted">Add IMDb/Trakt <b>List</b> URL</div>
-        <input id="listInput" placeholder="IMDb ls… or chart/search, or Trakt list URL">
+        <input id="listInput" placeholder="IMDb list / chart / search, or Trakt list URL">
       </div>
       <button id="addList" type="button">Add</button>
     </div>
@@ -1679,38 +1657,28 @@ app.get("/admin", async (req, res) => {
 
   <div class="card customize">
     <h3>Customize (enable, order, sort)</h3>
-    <p class="mini muted">Drag rows to reorder lists, or use the ↑ / ↓ buttons if you don’t have a mouse. Default sort affects how the catalog opens in Stremio.</p>
+    <p class="mini muted">Use the checkboxes to enable lists, ↑ / ↓ to reorder, and choose a default sort. Click Save at the bottom.</p>
     <div id="prefs"></div>
   </div>
 </div>
 
 <script>
-  // server config for client script
-  const ADMIN = "${ADMIN_PASSWORD}";
-  const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
+  const ADMIN = ${JSON.stringify(ADMIN_PASSWORD)};
   const HOST_URL = ${JSON.stringify(base)};
   const SECRET = ${JSON.stringify(SHARED_SECRET)};
+  const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 </script>
 <script>
 (function(){
   function setView(view){
     document.body.classList.remove('view-snapshot','view-sources','view-custom');
-    if(view === 'snapshot'){ document.body.classList.add('view-snapshot'); }
-    else if(view === 'sources'){ document.body.classList.add('view-sources'); }
-    else { document.body.classList.add('view-custom'); }
-    var tabs = document.querySelectorAll('.navtab');
-    for(var i=0;i<tabs.length;i++){
-      tabs[i].classList.toggle('active', tabs[i].getAttribute('data-view') === view);
-    }
-  }
-
-  function fetchJson(url){
-    return fetch(url).then(function(r){
-      if(!r.ok) throw new Error('HTTP '+r.status);
-      return r.json();
+    document.body.classList.add('view-'+view);
+    document.querySelectorAll('.navtab').forEach(function(btn){
+      btn.classList.toggle('active', btn.getAttribute('data-view') === view);
     });
   }
 
+  function fetchJson(url){ return fetch(url).then(r => { if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }); }
   function postJson(url, body){
     return fetch(url, {
       method:'POST',
@@ -1719,78 +1687,27 @@ app.get("/admin", async (req, res) => {
     });
   }
 
-  function normalizeUserListsUrl(v){
-    v = (v || '').trim();
-    if(!v) return null;
-    // Trakt user
-    if(/trakt\\.tv\\/users\\/[^/]+\\/lists/i.test(v)) return v;
-    if(/trakt\\.tv\\/users\\/[^/]+\\/?$/i.test(v)) return v.replace(/\\/?$/,'/lists');
-    // IMDb user
-    if(/imdb\\.com\\/user\\/ur\\d+\\/lists/i.test(v)) return v;
-    var m = v.match(/ur\\d{6,}/i);
-    if(m) return 'https://www.imdb.com/user/'+m[0]+'/lists/';
-    return null;
-  }
-
-  function normalizeListIdOrUrl(v){
-    v = (v || '').trim();
-    if(!v) return null;
-    if(/trakt\\.tv\\/users\\/[^/]+\\/lists\\/[^/?#]+/i.test(v)) return v;
-    if(/trakt\\.tv\\/lists\\//i.test(v)) return v;
-    if(/imdb\\.com\\/list\\//i.test(v)) return v;
-    if(/imdb\\.com\\/(chart|search)\\//i.test(v)) return v;
-    var m = v.match(/ls\\d{6,}/i);
-    if(m) return 'https://www.imdb.com/list/'+m[0]+'/';
-    return null;
-  }
-
   function renderPills(containerId, arr, onRemove){
-    var el = document.getElementById(containerId);
-    if(!el) return;
+    const el = document.getElementById(containerId);
+    if (!el) return;
     el.innerHTML = '';
-    if(!arr || !arr.length){
+    if (!arr || !arr.length){
       el.textContent = '(none)';
       return;
     }
-    arr.forEach(function(txt, idx){
-      var span = document.createElement('span');
-      span.className = 'pill';
-      var s1 = document.createElement('span');
+    arr.forEach((txt, idx) => {
+      const pill = document.createElement('span');
+      pill.className = 'pill';
+      const s1 = document.createElement('span');
       s1.textContent = txt;
-      var s2 = document.createElement('span');
+      const s2 = document.createElement('span');
       s2.className = 'x';
       s2.textContent = '✕';
-      s2.addEventListener('click', function(){
-        onRemove(idx);
-      });
-      span.appendChild(s1);
-      span.appendChild(s2);
-      el.appendChild(span);
+      s2.addEventListener('click', () => onRemove(idx));
+      pill.appendChild(s1);
+      pill.appendChild(s2);
+      el.appendChild(pill);
       el.appendChild(document.createTextNode(' '));
-    });
-  }
-
-  function attachRowDrag(tbody){
-    var dragSrc = null;
-    tbody.addEventListener('dragstart', function(e){
-      var tr = e.target.closest('tr[data-lsid]');
-      if(!tr) return;
-      dragSrc = tr;
-      tr.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', tr.getAttribute('data-lsid') || '');
-    });
-    tbody.addEventListener('dragend', function(){
-      if(dragSrc){ dragSrc.classList.remove('dragging'); dragSrc = null; }
-    });
-    tbody.addEventListener('dragover', function(e){
-      e.preventDefault();
-      if(!dragSrc) return;
-      var over = e.target.closest('tr[data-lsid]');
-      if(!over || over === dragSrc) return;
-      var rect = over.getBoundingClientRect();
-      var before = (e.clientY - rect.top) < rect.height / 2;
-      over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
     });
   }
 
@@ -1798,43 +1715,38 @@ app.get("/admin", async (req, res) => {
     Promise.all([
       fetchJson('/api/prefs?admin='+ADMIN),
       fetchJson('/api/lists?admin='+ADMIN)
-    ]).then(function(results){
-      var prefs = results[0] || {};
-      var lists = results[1] || {};
-
-      // sources tab
+    ]).then(([prefs, lists]) => {
+      prefs = prefs || {};
       prefs.sources = prefs.sources || { users:[], lists:[] };
       prefs.sources.users = prefs.sources.users || [];
       prefs.sources.lists = prefs.sources.lists || [];
       prefs.blocked = prefs.blocked || [];
 
-      renderPills('userPills', prefs.sources.users, function(idx){
-        prefs.sources.users.splice(idx,1);
-        postJson('/api/prefs?admin='+ADMIN, prefs).then(function(){ buildSourcesAndCustomize(); });
+      // sources tab
+      renderPills('userPills', prefs.sources.users, (i) => {
+        prefs.sources.users.splice(i,1);
+        postJson('/api/prefs?admin='+ADMIN, prefs).then(buildSourcesAndCustomize);
       });
-      renderPills('listPills', prefs.sources.lists, function(idx){
-        prefs.sources.lists.splice(idx,1);
-        postJson('/api/prefs?admin='+ADMIN, prefs).then(function(){ buildSourcesAndCustomize(); });
+      renderPills('listPills', prefs.sources.lists, (i) => {
+        prefs.sources.lists.splice(i,1);
+        postJson('/api/prefs?admin='+ADMIN, prefs).then(buildSourcesAndCustomize);
       });
 
-      // blocked pills
-      var blockedWrap = document.getElementById('blockedPills');
+      const blockedWrap = document.getElementById('blockedPills');
       blockedWrap.innerHTML = '';
-      if(!prefs.blocked.length){
+      if (!prefs.blocked.length){
         blockedWrap.textContent = '(none)';
       } else {
-        prefs.blocked.forEach(function(lsid){
-          var pill = document.createElement('span');
+        prefs.blocked.forEach(lsid => {
+          const pill = document.createElement('span');
           pill.className = 'pill';
-          var s1 = document.createElement('span');
+          const s1 = document.createElement('span');
           s1.textContent = lsid;
-          var s2 = document.createElement('span');
+          const s2 = document.createElement('span');
           s2.className = 'x';
           s2.textContent = 'Unblock';
-          s2.addEventListener('click', function(){
-            postJson('/api/unblock-list?admin='+ADMIN, { lsid: lsid }).then(function(){
-              location.reload();
-            });
+          s2.addEventListener('click', () => {
+            postJson('/api/unblock-list?admin='+ADMIN, { lsid }).then(() => location.reload());
           });
           pill.appendChild(s1);
           pill.appendChild(s2);
@@ -1843,33 +1755,32 @@ app.get("/admin", async (req, res) => {
         });
       }
 
-      // add buttons
-      var userBtn = document.getElementById('addUser');
-      var listBtn = document.getElementById('addList');
-      var userInp = document.getElementById('userInput');
-      var listInp = document.getElementById('listInput');
+      // add-source buttons – send raw URL, let server interpret
+      const userBtn = document.getElementById('addUser');
+      const listBtn = document.getElementById('addList');
+      const userInp = document.getElementById('userInput');
+      const listInp = document.getElementById('listInput');
 
-      if(userBtn){
-        userBtn.onclick = function(e){
+      if (userBtn){
+        userBtn.onclick = (e) => {
           e.preventDefault();
-          var url = normalizeUserListsUrl(userInp.value);
-          if(!url){ alert('Enter a valid IMDb or Trakt user /lists URL'); return; }
+          const url = (userInp.value || '').trim();
+          if (!url){ alert('Enter a user /lists URL'); return; }
           userBtn.disabled = true;
           postJson('/api/add-sources?admin='+ADMIN, { users:[url], lists:[] })
-            .then(function(){ location.reload(); })
-            .finally(function(){ userBtn.disabled = false; });
+            .then(() => location.reload())
+            .finally(() => { userBtn.disabled = false; });
         };
       }
-
-      if(listBtn){
-        listBtn.onclick = function(e){
+      if (listBtn){
+        listBtn.onclick = (e) => {
           e.preventDefault();
-          var url = normalizeListIdOrUrl(listInp.value);
-          if(!url){ alert('Enter a valid IMDb or Trakt list URL'); return; }
+          const url = (listInp.value || '').trim();
+          if (!url){ alert('Enter a list URL'); return; }
           listBtn.disabled = true;
           postJson('/api/add-sources?admin='+ADMIN, { users:[], lists:[url] })
-            .then(function(){ location.reload(); })
-            .finally(function(){ listBtn.disabled = false; });
+            .then(() => location.reload())
+            .finally(() => { listBtn.disabled = false; });
         };
       }
 
@@ -1878,195 +1789,167 @@ app.get("/admin", async (req, res) => {
       prefs.order = Array.isArray(prefs.order) ? prefs.order : [];
       prefs.perListSort = prefs.perListSort || {};
 
-      var enabledSet = new Set(prefs.enabled.length ? prefs.enabled : Object.keys(lists));
-      var baseOrder = prefs.order.filter(function(id){ return !!lists[id]; });
-      var allIds = Object.keys(lists);
-      var missing = allIds.filter(function(id){ return baseOrder.indexOf(id) === -1; })
-        .sort(function(a,b){
-          var na = (lists[a] && lists[a].name) || a;
-          var nb = (lists[b] && lists[b].name) || b;
-          return na.localeCompare(nb);
-        });
-      var order = baseOrder.concat(missing);
+      const enabledSet = new Set(prefs.enabled.length ? prefs.enabled : Object.keys(lists));
+      const baseOrder = prefs.order.filter(id => !!lists[id]);
+      const allIds = Object.keys(lists);
+      const missing = allIds.filter(id => !baseOrder.includes(id))
+        .sort((a,b) => ((lists[a]?.name || a).localeCompare(lists[b]?.name || b)));
+      const order = baseOrder.concat(missing);
 
-      var prefsContainer = document.getElementById('prefs');
-      prefsContainer.innerHTML = '';
-      if(!order.length){
-        prefsContainer.textContent = 'No lists discovered yet.';
+      const prefsDiv = document.getElementById('prefs');
+      prefsDiv.innerHTML = '';
+      if (!order.length){
+        prefsDiv.textContent = 'No lists discovered yet.';
         return;
       }
 
-      var table = document.createElement('table');
-      var thead = document.createElement('thead');
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
       thead.innerHTML = '<tr>' +
-        '<th class="chevCell"></th>' +
         '<th>Enabled</th>' +
         '<th>List (id)</th>' +
         '<th>Items</th>' +
         '<th>Default sort</th>' +
         '<th>Move</th>' +
         '<th>Remove</th>' +
-        '</tr>';
+      '</tr>';
       table.appendChild(thead);
-
-      var tbody = document.createElement('tbody');
+      const tbody = document.createElement('tbody');
       table.appendChild(tbody);
 
-      order.forEach(function(lsid){
-        var L = lists[lsid];
-        if(!L) return;
-        var tr = document.createElement('tr');
-        tr.setAttribute('data-lsid', lsid);
-        tr.draggable = true;
+      order.forEach(lsid => {
+        const L = lists[lsid];
+        if (!L) return;
+        const tr = document.createElement('tr');
+        tr.dataset.lsid = lsid;
 
-        var tdChev = document.createElement('td');
-        tdChev.className = 'chevCell';
-        tdChev.innerHTML = '<span class="chevIcon">⋮⋮</span>';
-        tr.appendChild(tdChev);
-
-        var tdEn = document.createElement('td');
-        var cb = document.createElement('input');
+        const tdEn = document.createElement('td');
+        const cb = document.createElement('input');
         cb.type = 'checkbox';
         cb.className = 'en';
         cb.checked = enabledSet.has(lsid);
         tdEn.appendChild(cb);
         tr.appendChild(tdEn);
 
-        var tdName = document.createElement('td');
-        var d1 = document.createElement('div');
-        d1.textContent = (L.name || lsid);
-        var d2 = document.createElement('div');
+        const tdName = document.createElement('td');
+        const d1 = document.createElement('div');
+        d1.textContent = L.name || lsid;
+        const d2 = document.createElement('div');
         d2.className = 'mini muted';
         d2.textContent = lsid;
         tdName.appendChild(d1);
         tdName.appendChild(d2);
         tr.appendChild(tdName);
 
-        var tdItems = document.createElement('td');
+        const tdItems = document.createElement('td');
         tdItems.textContent = String((L.ids && L.ids.length) || 0);
         tr.appendChild(tdItems);
 
-        var tdSort = document.createElement('td');
-        var sel = document.createElement('select');
-        var currentSort = prefs.perListSort[lsid] || 'name_asc';
-        SORT_OPTIONS.forEach(function(opt){
-          var o = document.createElement('option');
+        const tdSort = document.createElement('td');
+        const sel = document.createElement('select');
+        const currentSort = prefs.perListSort[lsid] || 'name_asc';
+        SORT_OPTIONS.forEach(opt => {
+          const o = document.createElement('option');
           o.value = opt;
           o.textContent = opt;
-          if(opt === currentSort) o.selected = true;
+          if (opt === currentSort) o.selected = true;
           sel.appendChild(o);
         });
         sel.className = 'sortSel';
         tdSort.appendChild(sel);
         tr.appendChild(tdSort);
 
-        var tdMove = document.createElement('td');
-        var upBtn = document.createElement('button');
-        upBtn.type = 'button';
-        upBtn.className = 'movebtn';
-        upBtn.textContent = '↑';
-        var downBtn = document.createElement('button');
-        downBtn.type = 'button';
-        downBtn.className = 'movebtn';
-        downBtn.textContent = '↓';
-        upBtn.addEventListener('click', function(){
-          var prev = tr.previousElementSibling;
-          if(prev && prev.hasAttribute('data-lsid')){
-            tbody.insertBefore(tr, prev);
-          }
-        });
-        downBtn.addEventListener('click', function(){
-          var next = tr.nextElementSibling;
-          if(next && next.hasAttribute('data-lsid')){
-            tbody.insertBefore(next, tr);
-          }
-        });
-        tdMove.appendChild(upBtn);
-        tdMove.appendChild(downBtn);
+        const tdMove = document.createElement('td');
+        const up = document.createElement('button');
+        up.type = 'button';
+        up.className = 'movebtn';
+        up.textContent = '↑';
+        const down = document.createElement('button');
+        down.type = 'button';
+        down.className = 'movebtn';
+        down.textContent = '↓';
+        up.onclick = () => {
+          const prev = tr.previousElementSibling;
+          if (prev && prev.dataset.lsid) tbody.insertBefore(tr, prev);
+        };
+        down.onclick = () => {
+          const next = tr.nextElementSibling;
+          if (next && next.dataset.lsid) tbody.insertBefore(next, tr);
+        };
+        tdMove.appendChild(up);
+        tdMove.appendChild(down);
         tr.appendChild(tdMove);
 
-        var tdRem = document.createElement('td');
-        var remBtn = document.createElement('button');
-        remBtn.type = 'button';
-        remBtn.className = 'danger';
-        remBtn.textContent = 'Remove';
-        remBtn.addEventListener('click', function(){
-          if(!confirm('Remove this list and block it from future syncs?')) return;
-          postJson('/api/remove-list?admin='+ADMIN, { lsid: lsid }).then(function(){
-            tr.remove();
-          });
-        });
-        tdRem.appendChild(remBtn);
+        const tdRem = document.createElement('td');
+        const rem = document.createElement('button');
+        rem.type = 'button';
+        rem.className = 'danger';
+        rem.textContent = 'Remove';
+        rem.onclick = () => {
+          if (!confirm('Remove this list and block it from future syncs?')) return;
+          postJson('/api/remove-list?admin='+ADMIN, { lsid }).then(() => tr.remove());
+        };
+        tdRem.appendChild(rem);
         tr.appendChild(tdRem);
 
         tbody.appendChild(tr);
       });
 
-      attachRowDrag(tbody);
-      prefsContainer.appendChild(table);
-
-      var saveRow = document.createElement('div');
-      saveRow.className = 'btnRow';
-      var saveBtn = document.createElement('button');
+      const saveRow = document.createElement('div');
+      saveRow.className = 'rowtools';
+      const saveBtn = document.createElement('button');
       saveBtn.type = 'button';
       saveBtn.textContent = '💾 Save';
-      var note = document.createElement('span');
+      const note = document.createElement('span');
       note.className = 'mini muted';
-      note.textContent = 'Saving updates enabled lists, list order and default sort.';
-      saveBtn.addEventListener('click', function(){
-        var rows2 = tbody.querySelectorAll('tr[data-lsid]');
-        var newOrder = [];
-        var newEnabled = [];
-        var newSort = {};
-        rows2.forEach(function(row){
-          var id = row.getAttribute('data-lsid');
+      note.textContent = 'Saving updates enabled lists, their order and default sort.';
+      saveBtn.onclick = () => {
+        const rows2 = tbody.querySelectorAll('tr[data-lsid]');
+        const newOrder = [];
+        const newEnabled = [];
+        const newSort = {};
+        rows2.forEach(row => {
+          const id = row.dataset.lsid;
           newOrder.push(id);
-          var cbox = row.querySelector('input.en');
-          if(cbox && cbox.checked) newEnabled.push(id);
-          var s = row.querySelector('select.sortSel');
-          if(s) newSort[id] = s.value;
+          const cbox = row.querySelector('input.en');
+          if (cbox && cbox.checked) newEnabled.push(id);
+          const s = row.querySelector('select.sortSel');
+          if (s) newSort[id] = s.value;
         });
         prefs.order = newOrder;
         prefs.enabled = newEnabled;
         prefs.perListSort = newSort;
-        postJson('/api/prefs?admin='+ADMIN, prefs).then(function(){
-          alert('Saved. If catalogs changed, Stremio will see a new manifest version.');
-        }).catch(function(err){
-          alert('Failed to save: '+err);
-        });
-      });
+        postJson('/api/prefs?admin='+ADMIN, prefs)
+          .then(() => alert('Saved. If catalogs changed, Stremio will see a new manifest version.'))
+          .catch(err => alert('Failed to save: '+err));
+      };
       saveRow.appendChild(saveBtn);
       saveRow.appendChild(note);
-      prefsContainer.appendChild(saveRow);
-    }).catch(function(err){
+
+      prefsDiv.appendChild(table);
+      prefsDiv.appendChild(saveRow);
+    }).catch(err => {
       console.error('Admin load failed', err);
-      var prefsContainer = document.getElementById('prefs');
-      if(prefsContainer) prefsContainer.textContent = 'Failed to load prefs: '+err;
+      const prefsDiv = document.getElementById('prefs');
+      if (prefsDiv) prefsDiv.textContent = 'Failed to load prefs: '+err;
     });
   }
 
-  document.addEventListener('DOMContentLoaded', function(){
-    // nav buttons
-    var tabs = document.querySelectorAll('.navtab');
-    for(var i=0;i<tabs.length;i++){
-      (function(btn){
-        btn.addEventListener('click', function(){
-          setView(btn.getAttribute('data-view'));
-        });
-      })(tabs[i]);
-    }
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('.navtab').forEach(btn => {
+      btn.addEventListener('click', () => setView(btn.getAttribute('data-view')));
+    });
+    const quickAdd = document.getElementById('goAdd');
+    if (quickAdd) quickAdd.onclick = () => setView('sources');
+    const quickCustom = document.getElementById('goCustom');
+    if (quickCustom) quickCustom.onclick = () => setView('custom');
 
-    var quickAdd = document.getElementById('goAdd');
-    if(quickAdd){ quickAdd.onclick = function(){ setView('sources'); }; }
-    var quickCustom = document.getElementById('goCustom');
-    if(quickCustom){ quickCustom.onclick = function(){ setView('custom'); }; }
-
-    var installBtn = document.getElementById('installBtn');
-    if(installBtn){
-      installBtn.onclick = function(e){
+    const installBtn = document.getElementById('installBtn');
+    if (installBtn){
+      installBtn.onclick = (e) => {
         e.preventDefault();
-        var url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
-        if(SECRET) url += '?key=' + SECRET;
+        let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
+        if (SECRET) url += '?key='+SECRET;
         window.location.href = url;
       };
     }
@@ -2078,4 +1961,3 @@ app.get("/admin", async (req, res) => {
 </body>
 </html>`);
 });
-
