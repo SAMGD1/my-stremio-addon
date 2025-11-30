@@ -2259,3 +2259,52 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 </script>
 </body></html>
+`);
+});
+
+// ------------ Startup ------------
+(async () => {
+  try {
+    const snap = await loadSnapshot();
+    if (snap) {
+      LAST_SYNC_AT  = snap.lastSyncAt  || 0;
+      MANIFEST_REV  = snap.manifestRev || MANIFEST_REV;
+      LISTS         = snap.lists      || LISTS;
+      PREFS         = { ...PREFS, ...(snap.prefs || {}) };
+
+      if (snap.fallback) {
+        for (const [k, v] of Object.entries(snap.fallback)) {
+          FALLBK.set(k, v);
+        }
+      }
+      if (snap.cards) {
+        for (const [k, v] of Object.entries(snap.cards)) {
+          CARD.set(k, v);
+        }
+      }
+      if (snap.ep2ser) {
+        for (const [k, v] of Object.entries(snap.ep2ser)) {
+          EP2SER.set(k, v);
+        }
+      }
+
+      console.log("[INIT] snapshot loaded.");
+    } else {
+      console.log("[INIT] no snapshot.json found – fresh sync will run.");
+    }
+  } catch (e) {
+    console.error("[INIT] error loading snapshot:", e);
+  }
+
+  // Do an initial sync if needed, then schedule background sync
+  if (!Object.keys(LISTS).length) {
+    await fullSync({ rediscover: true });
+  } else {
+    maybeBackgroundSync();
+  }
+  scheduleNextSync();
+
+  app.listen(PORT, HOST, () => {
+    console.log(`My Lists addon v12.4.1 listening on ${HOST}:${PORT}`);
+  });
+})();
