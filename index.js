@@ -2043,8 +2043,8 @@ async function render() {
           prefs.sortOptions = prefs.sortOptions || {};
           prefs.sortOptions[lsid] = arr.length ? arr : SORT_OPTIONS.slice();
         };
-        lab.appendChild(cb);
-        lab.appendChild(el('span',{text:opt}));
+               lab.appendChild(cb);
+        lab.appendChild(el('span', { text: opt }));
         optsWrap.appendChild(lab);
       });
       td.appendChild(optsWrap);
@@ -2053,45 +2053,45 @@ async function render() {
       const shapeRow = el('div', { class: 'rowtools' });
       shapeRow.appendChild(el('span', { class: 'mini muted', text: 'Poster shape:' }));
       const currentShape = prefs.posterShape[lsid] || 'poster';
-      const ul = el('ul', { class: 'thumbs shape-' + currentShape });
 
-      ['poster', 'landscape'].forEach(shape => {
-        const lab = el('label', { class: 'pill' });
-        const rb = el('input', { type: 'radio', name: 'shape-' + lsid });
-        rb.checked = currentShape === shape;
-        rb.onchange = () => {
-          if (rb.checked) {
-            prefs.posterShape[lsid] = shape;
-            ul.className = 'thumbs shape-' + shape;
-          }
-        };
-        lab.appendChild(rb);
-        lab.appendChild(el('span', { text: shape }));
-        shapeRow.appendChild(lab);
-      });
+      const shapePoster = el('button', { type: 'button', class: 'movebtn', text: 'Poster' });
+      const shapeLandscape = el('button', { type: 'button', class: 'movebtn', text: 'Landscape' });
+
+      function updateShapeButtons(shape) {
+        shapePoster.disabled = (shape === 'poster');
+        shapeLandscape.disabled = (shape === 'landscape');
+        ul.className = 'thumbs shape-' + shape;
+      }
+
+      shapePoster.onclick = () => {
+        prefs.posterShape[lsid] = 'poster';
+        updateShapeButtons('poster');
+      };
+      shapeLandscape.onclick = () => {
+        prefs.posterShape[lsid] = 'landscape';
+        updateShapeButtons('landscape');
+      };
+
+      shapeRow.appendChild(shapePoster);
+      shapeRow.appendChild(shapeLandscape);
       td.appendChild(shapeRow);
 
-      // Items grid
-      const shapeNow = prefs.posterShape[lsid] || 'poster';
+      // Thumbs list
+      const ul = el('ul', { class: 'thumbs shape-' + currentShape });
+      attachThumbDnD(ul);
+      updateShapeButtons(currentShape);
 
-      items.forEach(it => {
+      function addThumb(it) {
         const li = el('li', { class: 'thumb', draggable: 'true', 'data-id': it.id });
-        const imgSrc = shapeNow === 'landscape'
-          ? (it.posterLandscape || it.posterPortrait || it.poster)
-          : (it.posterPortrait || it.posterLandscape || it.poster);
-        if (imgSrc) {
-          li.appendChild(el('img', { class: 'thumb-img', src: imgSrc, alt: it.name || it.id }));
-        }
-        const info = el('div', {}, [
+        const img = el('img', { class: 'thumb-img', src: it.posterPortrait || it.posterLandscape || '', alt: it.name || it.id });
+        const box = el('div', {}, [
           el('div', { class: 'title', text: it.name || it.id }),
           el('div', { class: 'id', text: it.id })
         ]);
-        li.appendChild(info);
-
-        const del = el('div', { class: 'del', text: '×' });
-        del.onclick = async (ev) => {
-          ev.stopPropagation();
-          if (!confirm('Remove ' + (it.name || it.id) + ' from this list?')) return;
+        const del = el('span', { class: 'del', text: '×' });
+        del.onclick = async (e) => {
+          e.stopPropagation();
+          if (!confirm('Remove this item from the list (in addon, not IMDb/Trakt)?')) return;
           await fetch('/api/list-remove?admin=' + ADMIN, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2099,23 +2099,27 @@ async function render() {
           });
           li.remove();
         };
+        li.appendChild(img);
+        li.appendChild(box);
         li.appendChild(del);
-
         ul.appendChild(li);
-      });
+      }
 
-      // Add box
+      // initial thumbs (IMDb raw order)
+      items = items || [];
+      items.forEach(addThumb);
+
+      // Add-tile
       const addLi = el('li', { class: 'thumb add', 'data-add': '1' });
       const addBox = el('div', { class: 'addbox' });
-      addBox.appendChild(el('div', { class: 'mini muted', text: 'Add an IMDb tt… to this list (local only)' }));
-      const addInput = el('input', { placeholder: 'tt1234567 or full URL…' });
-      addBox.appendChild(addInput);
-      const addBtn = el('button', { type: 'button', text: 'Add' });
-      addBtn.style.marginTop = '6px';
+      addBox.appendChild(el('div', { class: 'mini muted', text: 'Add item by IMDb id (tt… or URL):' }));
+      const addInput = el('input', { type: 'text', placeholder: 'tt1234567 or IMDb URL' });
+      const addBtn = el('button', { type: 'button', class: 'movebtn', text: 'Add' });
       addBtn.onclick = async () => {
         const v = String(addInput.value || '').trim();
+        if (!v) return;
         const m = v.match(/tt\d{7,}/i);
-        if (!m) { alert('Enter a valid tt id'); return; }
+        if (!m) { alert('Enter a valid IMDb id'); return; }
         addBtn.disabled = true;
         try {
           await fetch('/api/list-add?admin=' + ADMIN, {
@@ -2123,187 +2127,157 @@ async function render() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ lsid, id: m[0] })
           });
+          // easiest: reload the drawer
           location.reload();
         } finally {
           addBtn.disabled = false;
         }
       };
+      addBox.appendChild(addInput);
       addBox.appendChild(addBtn);
       addLi.appendChild(addBox);
       ul.appendChild(addLi);
 
       td.appendChild(ul);
-      attachThumbDnD(ul);
 
-      // Save / reset handlers
+      // tools wiring
       saveBtn.onclick = async () => {
         const ids = Array.from(ul.querySelectorAll('li.thumb[data-id]')).map(li => li.dataset.id);
         saveBtn.disabled = true;
         try {
           await saveCustomOrder(lsid, ids);
           alert('Custom order saved for this list.');
-        } catch (e) {
-          console.error(e);
-          alert('Failed to save order.');
         } finally {
           saveBtn.disabled = false;
         }
       };
 
       resetBtn.onclick = () => {
-        if (!confirm('Reset custom order for this list?\n(This keeps add / remove edits.)')) return;
-        // Just clear customOrder + perListSort for this list and save prefs
-        prefs.customOrder = prefs.customOrder || {};
-        delete prefs.customOrder[lsid];
-        if (prefs.perListSort && prefs.perListSort[lsid] === 'custom') {
-          delete prefs.perListSort[lsid];
-        }
-        saveAll();
+        // restore IMDb order (with added items pushed to the end)
+        const byId = new Map();
+        Array.from(ul.querySelectorAll('li.thumb[data-id]')).forEach(li => byId.set(li.dataset.id, li));
+        const added = [];
+        byId.forEach((li, id) => { if (!imdbIndex.has(id)) added.push(li); });
+
+        const orderedIds = Array.from(imdbIndex.keys());
+        orderedIds.forEach(id => {
+          const li = byId.get(id);
+          if (li) ul.insertBefore(li, addLi);
+        });
+        added.forEach(li => ul.insertBefore(li, addLi));
       };
 
       resetAllBtn.onclick = async () => {
         if (!confirm('Full reset: clear custom order and all add/remove edits for this list?')) return;
-        await fetch('/api/list-reset?admin=' + ADMIN, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ lsid })
-        });
-        location.reload();
+        resetAllBtn.disabled = true;
+        try {
+          await fetch('/api/list-reset?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid })
+          });
+          location.reload();
+        } finally {
+          resetAllBtn.disabled = false;
+        }
       };
 
-      td.insertBefore(tools, td.firstChild);
+      td.prepend(tools);
     });
 
     return tr;
   }
 
-  function closeAllDrawers() {
-    container.querySelectorAll('tr.drawer').forEach(r => r.remove());
-    container.querySelectorAll('.chev').forEach(c => c.classList.remove('open'));
-  }
+  // ===== main table =====
+  const container = document.getElementById('prefs');
+  container.innerHTML = "";
 
-  // Save all prefs (enabled, order, sorts, poster shapes, sources, etc.)
-  async function saveAll(msg) {
-    const body = {
-      enabled: [],
-      order: [],
-      defaultList: prefs.defaultList || '',
-      perListSort: prefs.perListSort || {},
-      sortOptions: prefs.sortOptions || {},
-      posterShape: prefs.posterShape || {},
-      upgradeEpisodes: prefs.upgradeEpisodes,
-      sources: prefs.sources || { users: [], lists: [] },
-      customOrder: prefs.customOrder || {},
-      blocked: prefs.blocked || []
-    };
+  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
+  const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
+  const missing = Object.keys(lists)
+    .filter(id => !baseOrder.includes(id))
+    .sort((a, b) => ((lists[a]?.name || a).localeCompare(lists[b]?.name || b)));
+  const order = baseOrder.concat(missing);
 
-    const trs = Array.from(tbody.querySelectorAll('tr[data-lsid]'));
-    trs.forEach(tr => {
-      const id = tr.dataset.lsid;
-      body.order.push(id);
-      const cb = tr.querySelector('input[type="checkbox"][data-role="enabled"]');
-      if (!cb || cb.checked) body.enabled.push(id);
-    });
+  const table = el('table');
+  const thead = el('thead', {}, [el('tr', {}, [
+    el('th', { text: '' }),
+    el('th', { text: 'Enabled' }),
+    el('th', { text: 'List (id)' }),
+    el('th', { text: 'Items' }),
+    el('th', { text: 'Default sort' }),
+    el('th', { text: 'Move' }),
+    el('th', { text: 'Remove' })
+  ])]);
+  table.appendChild(thead);
+  const tbody = el('tbody');
+  table.appendChild(tbody);
+  tbodyRef = tbody; // for saveAll()
+  const rowInfo = {};
 
-    const chkUp = document.getElementById('chkUpgrade');
-    if (chkUp) body.upgradeEpisodes = chkUp.checked;
-
-    const r = await fetch('/api/prefs?admin=' + ADMIN, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    if (!r.ok) {
-      alert('Failed to save preferences.');
-      return;
-    }
-    if (msg) alert(msg);
-    location.reload();
-  }
-
-  // Build table rows
   order.forEach(lsid => {
     const L = lists[lsid];
-    const count = (L && L.ids && L.ids.length) || 0;
     const tr = el('tr', { 'data-lsid': lsid, draggable: 'true' });
 
-    // Chev / drawer toggler
-    const tdChev = el('td');
+    // chevron
+    const chevTd = el('td');
     const chev = el('span', { class: 'chev', text: '▾' });
-    chev.onclick = () => {
-      const existing = tbody.querySelector('tr.drawer[data-drawer-for="' + lsid + '"]');
-      if (existing) {
-        existing.remove();
-        chev.classList.remove('open');
-        return;
-      }
-      // Close others
-      closeAllDrawers();
-      chev.classList.add('open');
-      const drawer = makeDrawer(lsid);
-      tbody.insertBefore(drawer, tr.nextSibling);
-    };
-    tdChev.appendChild(chev);
-    tr.appendChild(tdChev);
+    chevTd.appendChild(chev);
+    tr.appendChild(chevTd);
 
-    // Enabled checkbox
-    const tdEn = el('td');
-    const cb = el('input', { type: 'checkbox', 'data-role': 'enabled' });
-    cb.checked = enabledSet.has(lsid);
-    tdEn.appendChild(cb);
-    tr.appendChild(tdEn);
+    // enabled
+    const enTd = el('td');
+    const enCb = el('input', { type: 'checkbox' });
+    enCb.checked = enabledSet.has(lsid);
+    enTd.appendChild(enCb);
+    tr.appendChild(enTd);
 
-    // Name + id
-    const tdName = el('td');
-    const nameDiv = el('div', { text: (L && L.name) || lsid });
-    const idSmall = el('div', { class: 'muted mini', text: lsid });
-    const origin = lsid.startsWith('trakt:')
-      ? 'Trakt user list'
-      : (lsid.startsWith('traktlist:')
-          ? 'Trakt global list'
-          : (lsid.startsWith('imdburl:')
-              ? 'IMDb URL / chart / search'
-              : 'IMDb list'));
-    const originDiv = el('div', { class: 'mini muted', text: origin });
-    tdName.appendChild(nameDiv);
-    tdName.appendChild(idSmall);
-    tdName.appendChild(originDiv);
-    tr.appendChild(tdName);
+    // name/id
+    const infoTd = el('td');
+    infoTd.innerHTML = `
+      <div>${L.name || lsid}</div>
+      <div class="mini muted">${lsid}</div>
+      ${L.url ? `<div class="mini"><a class="link" href="${L.url}" target="_blank" rel="noopener">open</a></div>` : ''}`;
+    tr.appendChild(infoTd);
 
-    // Items
-    const tdCount = el('td', { text: String(count) });
-    tr.appendChild(tdCount);
+    // items
+    const countTd = el('td', { text: String((L.ids || []).length) });
+    tr.appendChild(countTd);
 
-    // Default sort
-    const tdSort = el('td');
-    const sel = el('select', { name: 'sort' });
+    // default sort
+    const sortTd = el('td');
+    const sel = el('select');
+    const currentSort = (prefs.perListSort && prefs.perListSort[lsid]) || 'custom';
     SORT_OPTIONS.forEach(opt => {
-      const o = el('option', { value: opt, text: opt });
+      const o = document.createElement('option');
+      o.value = opt;
+      o.textContent = opt;
+      if (opt === currentSort) o.selected = true;
       sel.appendChild(o);
     });
-    sel.value = (prefs.perListSort && prefs.perListSort[lsid]) || 'name_asc';
     sel.onchange = () => {
       prefs.perListSort = prefs.perListSort || {};
       prefs.perListSort[lsid] = sel.value;
     };
-    tdSort.appendChild(sel);
-    tr.appendChild(tdSort);
+    sortTd.appendChild(sel);
+    tr.appendChild(sortTd);
 
-    // Move buttons
-    const tdMove = el('td');
+    // move arrows
+    const moveTd = el('td');
     const upBtn = el('button', { type: 'button', class: 'movebtn', text: '↑' });
     const downBtn = el('button', { type: 'button', class: 'movebtn', text: '↓' });
-    upBtn.onclick = () => { moveRow(tr, -1); };
-    downBtn.onclick = () => { moveRow(tr, 1); };
-    tdMove.appendChild(upBtn);
-    tdMove.appendChild(downBtn);
-    tr.appendChild(tdMove);
+    upBtn.onclick = (e) => { e.preventDefault(); moveRow(tr, -1); };
+    downBtn.onclick = (e) => { e.preventDefault(); moveRow(tr, +1); };
+    moveTd.appendChild(upBtn);
+    moveTd.appendChild(downBtn);
+    tr.appendChild(moveTd);
 
-    // Remove list
-    const tdRem = el('td');
+    // remove
+    const rmTd = el('td');
     const rmBtn = el('button', { type: 'button', text: 'Remove' });
-    rmBtn.onclick = async () => {
-      if (!confirm('Remove this list from the addon (and block it from being auto-added again)?')) return;
+    rmBtn.onclick = async (e) => {
+      e.preventDefault();
+      if (!confirm('Remove & block this list from future syncs?')) return;
       rmBtn.disabled = true;
       try {
         await fetch('/api/remove-list?admin=' + ADMIN, {
@@ -2316,94 +2290,98 @@ async function render() {
         rmBtn.disabled = false;
       }
     };
-    tdRem.appendChild(rmBtn);
-    tr.appendChild(tdRem);
+    rmTd.appendChild(rmBtn);
+    tr.appendChild(rmTd);
+
+    // drawer toggle
+    let drawerVisible = false;
+    let drawerTr = null;
+    chev.onclick = () => {
+      drawerVisible = !drawerVisible;
+      chev.textContent = drawerVisible ? '▴' : '▾';
+      if (drawerVisible) {
+        if (!drawerTr) {
+          drawerTr = makeDrawer(lsid);
+          tr.parentNode.insertBefore(drawerTr, tr.nextSibling);
+        } else {
+          drawerTr.style.display = '';
+        }
+      } else if (drawerTr) {
+        drawerTr.style.display = 'none';
+      }
+    };
 
     tbody.appendChild(tr);
+    rowInfo[lsid] = { tr, enabled: enCb, sort: sel };
   });
 
-  table.appendChild(tbody);
-  container.appendChild(table);
   attachRowDnD(tbody);
 
-  // Footer: upgrade episodes & Save button
-  const footer = el('div', { style: 'margin-top:10px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;' });
+  const saveRow = el('div', { style: 'margin-top:10px;' }, [
+    el('button', { type: 'button', text: 'Save' })
+  ]);
+  saveRow.querySelector('button').onclick = (e) => {
+    e.preventDefault();
+    saveAll('Saved.');
+  };
 
-  const upWrap = el('label', { class: 'mini' });
-  const chkUp = el('input', { type: 'checkbox', id: 'chkUpgrade' });
-  chkUp.checked = !!prefs.upgradeEpisodes;
-  upWrap.appendChild(chkUp);
-  upWrap.appendChild(document.createTextNode(' Try to upgrade episodes to series (where possible)'));
-  footer.appendChild(upWrap);
-
-  const saveBtn = el('button', { type: 'button', text: 'Save' });
-  saveBtn.onclick = () => saveAll('Saved. Manifest will bump automatically if needed.');
-  footer.appendChild(saveBtn);
-
-  container.appendChild(footer);
-
-  wireAddButtons();
+  container.appendChild(table);
+  container.appendChild(saveRow);
 }
 
-render().catch(console.error);
+// kick off initial wiring
+document.addEventListener('DOMContentLoaded', () => {
+  wireAddButtons();
+  render().catch(err => console.error(err));
+});
 </script>
-
-</body>
-</html>
-`);
+</body></html>
+  `);
 });
 
-// ------- Bootstrap -------
-
-async function bootstrap() {
+// ----------------- BOOT -----------------
+(async () => {
   try {
     const snap = await loadSnapshot();
     if (snap) {
-      LISTS = snap.lists || LISTS;
-      // Merge prefs with defaults so new keys are present
-      if (snap.prefs && typeof snap.prefs === "object") {
-        PREFS = {
-          ...PREFS,
-          ...snap.prefs,
-          sources: {
-            users: (snap.prefs.sources && snap.prefs.sources.users) || (PREFS.sources && PREFS.sources.users) || [],
-            lists: (snap.prefs.sources && snap.prefs.sources.lists) || (PREFS.sources && PREFS.sources.lists) || []
-          }
-        };
+      console.log("[BOOT] Loaded snapshot.");
+      if (snap.lists) LISTS = snap.lists;
+
+      if (snap.prefs) {
+        // merge with defaults so new fields don't disappear
+        PREFS = { ...PREFS, ...snap.prefs };
+        PREFS.sources = PREFS.sources || { users: [], lists: [] };
+        PREFS.blocked = PREFS.blocked || [];
+        PREFS.posterShape = PREFS.posterShape || {};
       }
-      LAST_SYNC_AT = snap.lastSyncAt || LAST_SYNC_AT;
+
+      LAST_SYNC_AT = snap.lastSyncAt || 0;
       MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
 
       if (snap.fallback) {
+        FALLBK.clear();
         for (const [k, v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
       }
       if (snap.cards) {
+        CARD.clear();
         for (const [k, v] of Object.entries(snap.cards)) CARD.set(k, v);
       }
       if (snap.ep2ser) {
+        EP2SER.clear();
         for (const [k, v] of Object.entries(snap.ep2ser)) EP2SER.set(k, v);
       }
-      console.log("[BOOT] Loaded snapshot with", Object.keys(LISTS).length, "lists.");
     } else {
       console.log("[BOOT] No snapshot found, will run initial sync.");
+      await fullSync({ rediscover: true });
     }
 
-    LAST_MANIFEST_KEY = manifestKey();
-
-    // Initial sync (rediscover on first run or if no snapshot)
-    await fullSync({ rediscover: !snap });
     scheduleNextSync();
 
     app.listen(PORT, HOST, () => {
-      console.log(`[BOOT] My Lists addon v12.4.0 listening on http://${HOST}:${PORT}`);
+      console.log(`[BOOT] Listening on ${HOST}:${PORT}`);
     });
   } catch (e) {
-    console.error("[BOOT] Failed during startup:", e);
-    app.listen(PORT, HOST, () => {
-      console.log(`[BOOT] My Lists addon v12.4.0 listening on http://${HOST}:${PORT} (startup error, running with current state)`);
-    });
+    console.error("[BOOT] Fatal error:", e);
+    process.exit(1);
   }
-}
-
-bootstrap();
-
+})();
