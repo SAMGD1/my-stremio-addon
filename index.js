@@ -1,7 +1,8 @@
-/*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.4.1 – Trakt user-lists + global lists + IMDb chart/search pages + UI tabs + row drag + up/down buttons
+/*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, Trakt, UI tabs, up/down reorder)
+ *  v12.4.1
  */
 "use strict";
+
 const express = require("express");
 const fs = require("fs/promises");
 
@@ -16,17 +17,14 @@ const IMDB_USER_URL = process.env.IMDB_USER_URL || ""; // https://www.imdb.com/u
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 const UPGRADE_EPISODES = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
 
-// fetch IMDb’s own release-date page order so our date sort matches IMDb exactly
 const IMDB_FETCH_RELEASE_ORDERS =
   String(process.env.IMDB_FETCH_RELEASE_ORDERS || "true").toLowerCase() !== "false";
 
-// Optional fallback: comma-separated ls ids
 const IMDB_LIST_IDS = (process.env.IMDB_LIST_IDS || "")
   .split(/[,\s]+/)
   .map((s) => s.trim())
   .filter((s) => /^ls\d{6,}$/i.test(s));
 
-// Optional GitHub snapshot persistence
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
 const GITHUB_REPO = process.env.GITHUB_REPO || "";
@@ -34,7 +32,7 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL = "data/snapshot.json";
 
-// NEW: Trakt support (public API key / client id)
+// Trakt
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.4.1";
@@ -62,43 +60,24 @@ const SORT_OPTIONS = [
 const VALID_SORT = new Set(SORT_OPTIONS);
 
 // ----------------- STATE -----------------
-/** LISTS = {
- *   [listId]: {
- *     id, name, url,
- *     ids:[tt...],                 // default order (= IMDb/Trakt raw order after episode→series upgrade)
- *     orders: {                    // optional IMDb-backed orders we keep (for IMDb lists)
- *        imdb:[tt...],
- *        date_asc:[tt...],
- *        date_desc:[tt...]
- *     }
- *   }
- * }
- *
- * listId is one of:
- *   - IMDb list:      "ls123456789"
- *   - IMDb chart/url: "imdburl:<encoded full URL>"
- *   - Trakt user list:"trakt:<user>:<slug>"
- *   - Trakt global:   "traktlist:<id-or-slug>"
- */
-let LISTS = Object.create(null);
 
+let LISTS = Object.create(null);
 /** PREFS saved to snapshot */
 let PREFS = {
-  listEdits: {}, // { [listId]: { added: ["tt..."], removed: ["tt..."] } }
-  enabled: [], // listIds shown in Stremio
-  order: [], // listIds order in manifest
+  listEdits: {},
+  enabled: [],
+  order: [],
   defaultList: "",
-  perListSort: {}, // { listId: 'date_asc' | ... | 'custom' }
-  sortOptions: {}, // { listId: ['custom', 'date_desc', ...] }
-  customOrder: {}, // { listId: [ 'tt...', 'tt...' ] }
-  posterShape: {}, // kept for backwards-compat; not used any more
+  perListSort: {},
+  sortOptions: {},
+  customOrder: {},
+  posterShape: {},
   upgradeEpisodes: UPGRADE_EPISODES,
   sources: {
-    // extra sources you add in the UI
-    users: [], // array of IMDb / Trakt user /lists URLs
-    lists: [], // array of list URLs (IMDb or Trakt) or lsids
+    users: [],
+    lists: [],
   },
-  blocked: [], // listIds you removed/blocked (IMDb or Trakt)
+  blocked: [],
 };
 
 const BEST = new Map(); // Map<tt, { kind, meta }>
@@ -114,6 +93,7 @@ let MANIFEST_REV = 1;
 let LAST_MANIFEST_KEY = "";
 
 // ----------------- UTILS -----------------
+
 const isImdb = (v) => /^tt\d{7,}$/i.test(String(v || ""));
 
 const isImdbListId = (v) => /^ls\d{6,}$/i.test(String(v || ""));
@@ -167,6 +147,7 @@ const withParam = (u, k, v) => {
 };
 
 // ---- GitHub snapshot (optional) ----
+
 async function gh(method, path, bodyObj) {
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${path}`;
   const r = await fetch(url, {
@@ -199,35 +180,28 @@ async function ghGetSha(path) {
   }
 }
 async function saveSnapshot(obj) {
-  // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
     await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {
     /* ignore */
   }
-  // GitHub (if enabled)
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
   const path = "data/snapshot.json";
   const sha = await ghGetSha(path);
-  const body = {
-    message: "Update snapshot.json",
-    content,
-    branch: GITHUB_BRANCH,
-  };
+  const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
   if (sha) body.sha = sha;
   await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
 }
 async function loadSnapshot() {
-  // try GitHub first
   if (GH_ENABLED) {
     try {
       const data = await gh(
         "GET",
-        `/contents/${encodeURIComponent(
-          "data/snapshot.json"
-        )}?ref=${encodeURIComponent(GITHUB_BRANCH)}`
+        `/contents/${encodeURIComponent("data/snapshot.json")}?ref=${encodeURIComponent(
+          GITHUB_BRANCH
+        )}`
       );
       const buf = Buffer.from(data.content, "base64").toString("utf8");
       return JSON.parse(buf);
@@ -235,7 +209,6 @@ async function loadSnapshot() {
       /* ignore */
     }
   }
-  // local
   try {
     const txt = await fs.readFile(SNAP_LOCAL, "utf8");
     return JSON.parse(txt);
@@ -245,6 +218,7 @@ async function loadSnapshot() {
 }
 
 // ----------------- TRAKT HELPERS -----------------
+
 function parseTraktListUrl(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
@@ -255,7 +229,6 @@ function parseTraktListUrl(raw) {
   return { user, slug };
 }
 
-// NEW: global / official lists like /lists/2435487 or /lists/official/john-wick-collection
 function parseTraktGlobalListUrl(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
@@ -300,8 +273,6 @@ async function fetchTraktListMeta(user, slug) {
     return null;
   }
 }
-
-// NEW: global lists meta
 async function fetchTraktGlobalListMeta(id) {
   try {
     const data = await traktJson(`/lists/${encodeURIComponent(id)}`);
@@ -347,7 +318,6 @@ async function fetchTraktListImdbIds(user, slug) {
         const ids = obj && obj.ids;
         let imdb = ids && ids.imdb;
 
-        // For episodes, fall back to show imdb if needed
         if (!imdb && key === "episodes" && it.show && it.show.ids && it.show.ids.imdb) {
           imdb = it.show.ids.imdb;
         }
@@ -363,11 +333,9 @@ async function fetchTraktListImdbIds(user, slug) {
       await sleep(80);
     }
   }
-
   return out;
 }
 
-// NEW: global lists items
 async function fetchTraktGlobalListImdbIds(id) {
   const types = [
     { key: "movies", prop: "movie" },
@@ -411,11 +379,9 @@ async function fetchTraktGlobalListImdbIds(id) {
       await sleep(80);
     }
   }
-
   return out;
 }
 
-// NEW: discover all public lists from a Trakt user /lists page
 async function discoverTraktUserLists(userListsUrl) {
   if (!TRAKT_CLIENT_ID) {
     console.warn("[TRAKT] discoverTraktUserLists called without TRAKT_CLIENT_ID");
@@ -447,24 +413,21 @@ async function discoverTraktUserLists(userListsUrl) {
 }
 
 // ----------------- IMDb DISCOVERY -----------------
+
 function normalizeListIdOrUrl(s) {
   if (!s) return null;
   s = String(s).trim();
 
-  // classic IMDb list id
   const m = s.match(/ls\d{6,}/i);
   if (m) return { id: m[0], url: `https://www.imdb.com/list/${m[0]}/` };
 
-  // explicit list URL
   if (/imdb\.com\/list\//i.test(s)) return { id: null, url: s };
 
-  // NEW: treat chart/search pages as "lists"
   if (/imdb\.com\/(chart|search)\//i.test(s)) {
     const url = s.startsWith("http") ? s : `https://www.imdb.com${s}`;
     const enc = encodeURIComponent(url);
     return { id: `imdburl:${enc}`, url };
   }
-
   return null;
 }
 
@@ -503,34 +466,19 @@ async function fetchListName(listUrl) {
   for (const rx of tries) {
     const m = html.match(rx);
     if (m)
-      return m[1]
-        .replace(/<[^>]+>/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
+      return m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
   }
   const t = html.match(/<title>(.*?)<\/title>/i);
-  return t
-    ? t[1]
-        .replace(/\s+\-\s*IMDb.*$/i, "")
-        .trim()
-    : listUrl;
+  return t ? t[1].replace(/\s+\-\s*IMDb.*$/i, "").trim() : listUrl;
 }
 function tconstsFromHtml(html) {
   const out = [];
   const seen = new Set();
   let m;
   const re1 = /data-tconst=["'](tt\d{7,})["']/gi;
-  while ((m = re1.exec(html)))
-    if (!seen.has(m[1])) {
-      seen.add(m[1]);
-      out.push(m[1]);
-    }
+  while ((m = re1.exec(html))) if (!seen.has(m[1])) { seen.add(m[1]); out.push(m[1]); }
   const re2 = /\/title\/(tt\d{7,})\//gi;
-  while ((m = re2.exec(html)))
-    if (!seen.has(m[1])) {
-      seen.add(m[1]);
-      out.push(m[1]);
-    }
+  while ((m = re2.exec(html))) if (!seen.has(m[1])) { seen.add(m[1]); out.push(m[1]); }
   return out;
 }
 function nextPageUrl(html) {
@@ -553,7 +501,6 @@ function nextPageUrl(html) {
   }
 }
 async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
-  // raw order (whatever the list currently displays by default)
   const seen = new Set();
   const ids = [];
   let url = withParam(listUrl, "mode", "detail");
@@ -581,8 +528,7 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
   }
   return ids;
 }
-// fetch order IMDb shows when sorted a certain way
-async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, maxPages = 80) {
+async function fetchImdbOrder(listUrl, sortSpec, maxPages = 80) {
   const seen = new Set();
   const ids = [];
   let url = withParam(withParam(listUrl, "mode", "detail"), "sort", sortSpec);
@@ -610,6 +556,7 @@ async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, m
 }
 
 // ----------------- METADATA -----------------
+
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -627,9 +574,7 @@ async function imdbJsonLd(imdbId) {
     if (m) {
       try {
         return JSON.parse(m[1]);
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
     const t = html.match(
       /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i
@@ -655,17 +600,12 @@ async function episodeParentSeries(imdbId) {
       (node.partOfSeries ||
         node.partOfTVSeries ||
         (node.partOfSeason && node.partOfSeason.partOfSeries));
-    const url =
-      typeof part === "string"
-        ? part
-        : part && (part.url || part.sameAs || part["@id"]);
+    const url = typeof part === "string" ? part : part && (part.url || part.sameAs || part["@id"]);
     if (url) {
       const m = String(url).match(/tt\d{7,}/i);
       if (m) seriesId = m[0];
     }
-  } catch {
-    /* ignore */
-  }
+  } catch {}
   if (seriesId) EP2SER.set(imdbId, seriesId);
   return seriesId;
 }
@@ -692,8 +632,7 @@ async function getBestMeta(imdbId) {
     type = "movie";
   try {
     const node = Array.isArray(ld && ld["@graph"])
-      ? ld["@graph"].find((x) => x["@id"]?.includes(`/title/${imdbId}`)) ||
-        ld["@graph"][0]
+      ? ld["@graph"].find((x) => x["@id"]?.includes(`/title/${imdbId}`)) || ld["@graph"][0]
       : ld;
     name = node?.name || node?.headline || ld?.name;
     poster =
@@ -709,14 +648,10 @@ async function getBestMeta(imdbId) {
       : node?.["@type"] || "";
     if (/Series/i.test(t)) type = "series";
     else if (/TVEpisode/i.test(t)) type = "episode";
-  } catch {
-    /* ignore */
-  }
+  } catch {}
   const rec = {
     kind: type === "series" ? "series" : "movie",
-    meta: name
-      ? { name, poster, background, released, year }
-      : null,
+    meta: name ? { name, poster, background, released, year } : null,
   };
   BEST.set(imdbId, rec);
   if (name || poster)
@@ -729,15 +664,13 @@ async function getBestMeta(imdbId) {
     });
   return rec;
 }
-
-// central place to build a "card" for admin + catalogs
 function cardFor(imdbId) {
   const rec = BEST.get(imdbId) || { kind: null, meta: null };
   const m = rec.meta || {};
   const fb = FALLBK.get(imdbId) || {};
 
   const portrait = m.poster || fb.poster;
-  const landscape = m.background || portrait || fb.poster;
+  const landscape = m.background || m.backdrop || portrait || fb.poster;
 
   return {
     id: imdbId,
@@ -746,11 +679,11 @@ function cardFor(imdbId) {
     poster: portrait || landscape || undefined,
     posterPortrait: portrait || landscape || undefined,
     posterLandscape: landscape || portrait || undefined,
-    background: m.background || undefined,
+    background: m.background || m.backdrop || undefined,
     imdbRating: m.imdbRating ?? undefined,
     runtime: m.runtime ?? undefined,
     year: m.year ?? fb.year ?? undefined,
-    releaseDate: m.released || fb.releaseDate || undefined,
+    releaseDate: m.released || m.releaseInfo || fb.releaseDate || undefined,
     description: m.description || undefined,
   };
 }
@@ -805,7 +738,8 @@ function stableSort(items, sortKey) {
     .map((x) => x.m);
 }
 function applyCustomOrder(metas, lsid) {
-  const order = (PREFS.customOrder && PREFS.customOrder[lsid]) || [];
+  const order =
+    (PREFS.customOrder && PREFS.customOrder[lsid]) || [];
   if (!order || !order.length) return metas.slice();
   const pos = new Map(order.map((id, i) => [id, i]));
   return metas.slice().sort((a, b) => {
@@ -815,27 +749,31 @@ function applyCustomOrder(metas, lsid) {
     return (a.name || "").localeCompare(b.name || "");
   });
 }
-// order helper (imdb/date_asc/date_desc) backed by LISTS[lsid].orders
 function sortByOrderKey(metas, lsid, key) {
   const list = LISTS[lsid];
   if (!list) return metas.slice();
   const arr =
-    list.orders && Array.isArray(list.orders[key]) && list.orders[key].length
+    list.orders &&
+    Array.isArray(list.orders[key]) &&
+    list.orders[key].length
       ? list.orders[key]
       : key === "imdb"
       ? list.ids || []
       : null;
   if (!arr) return metas.slice();
   const pos = new Map(arr.map((id, i) => [id, i]));
-  return metas.slice().sort(
-    (a, b) => (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9)
-  );
+  return metas
+    .slice()
+    .sort((a, b) => (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
 }
 
 // ----------------- SYNC -----------------
+
 function manifestKey() {
   const enabled =
-    PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : Object.keys(LISTS);
+    PREFS.enabled && PREFS.enabled.length
+      ? PREFS.enabled
+      : Object.keys(LISTS);
   const names = enabled
     .map((id) => LISTS[id]?.name || id)
     .sort()
@@ -845,14 +783,12 @@ function manifestKey() {
   const custom = Object.keys(PREFS.customOrder || {}).length;
   const shapes = JSON.stringify(PREFS.posterShape || {});
   const order = (PREFS.order || []).join(",");
-
   return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}#sh${shapes}`;
 }
 
 async function harvestSources() {
   const blocked = new Set(PREFS.blocked || []);
   const map = new Map();
-
   const add = (d) => {
     if (!d || !d.id) return;
     if (blocked.has(d.id)) return;
@@ -860,7 +796,7 @@ async function harvestSources() {
     map.set(d.id, d);
   };
 
-  // 1) IMDb main user /lists (auto-discovery)
+  // main imdb
   if (IMDB_USER_URL) {
     try {
       const arr = await discoverFromUserLists(IMDB_USER_URL);
@@ -870,7 +806,7 @@ async function harvestSources() {
     }
   }
 
-  // 2) extra IMDb / Trakt user /lists URLs from prefs
+  // extra user URLs (IMDb + Trakt)
   const users = Array.from(
     new Set(
       (PREFS.sources?.users || [])
@@ -881,11 +817,9 @@ async function harvestSources() {
   for (const u of users) {
     try {
       if (/trakt\.tv/i.test(u)) {
-        // Trakt user lists
         const arr = await discoverTraktUserLists(u);
         arr.forEach(add);
       } else {
-        // IMDb user lists
         const arr = await discoverFromUserLists(u);
         arr.forEach(add);
       }
@@ -895,13 +829,12 @@ async function harvestSources() {
     await sleep(80);
   }
 
-  // 3) explicit list URLs or IDs (IMDb or Trakt) + IMDB_LIST_IDS fallback
+  // explicit lists
   const addlRaw = (PREFS.sources?.lists || []).concat(IMDB_LIST_IDS || []);
   for (const raw of addlRaw) {
     const val = String(raw || "").trim();
     if (!val) continue;
 
-    // ---- Trakt user lists ----
     const tinfo = parseTraktListUrl(val);
     if (tinfo) {
       if (!TRAKT_CLIENT_ID) {
@@ -935,7 +868,6 @@ async function harvestSources() {
       continue;
     }
 
-    // ---- Trakt global / official lists ----
     const ginfo = parseTraktGlobalListUrl(val);
     if (ginfo) {
       if (!TRAKT_CLIENT_ID) {
@@ -969,27 +901,23 @@ async function harvestSources() {
       continue;
     }
 
-    // ---- IMDb lists / charts / searches ----
     const norm = normalizeListIdOrUrl(val);
     if (!norm) continue;
     let { id, url } = norm;
     if (!id) {
-      const m2 = String(url).match(/ls\d{6,}/i);
-      if (m2) id = m2[0];
+      const m = String(url).match(/ls\d{6,}/i);
+      if (m) id = m[0];
     }
     if (!id) continue;
 
     let name = id;
     try {
       name = await fetchListName(url);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
 
     add({ id, url, name });
     await sleep(60);
   }
-
   return Array.from(map.values());
 }
 
@@ -999,9 +927,8 @@ async function fullSync({ rediscover = true } = {}) {
   const started = Date.now();
   try {
     let discovered = [];
-    if (rediscover) {
-      discovered = await harvestSources();
-    }
+    if (rediscover) discovered = await harvestSources();
+
     if ((!discovered || !discovered.length) && IMDB_LIST_IDS.length) {
       discovered = IMDB_LIST_IDS.map((id) => ({
         id,
@@ -1025,12 +952,12 @@ async function fullSync({ rediscover = true } = {}) {
       };
       seen.add(d.id);
     }
+
     const blocked = new Set(PREFS.blocked || []);
     for (const id of Object.keys(LISTS)) {
       if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
     }
 
-    // pull items for each list (IMDb or Trakt)
     const uniques = new Set();
     for (const id of Object.keys(next)) {
       const list = next[id];
@@ -1105,7 +1032,6 @@ async function fullSync({ rediscover = true } = {}) {
       await sleep(60);
     }
 
-    // episode → series (optional)
     let idsToPreload = Array.from(uniques);
     if (PREFS.upgradeEpisodes) {
       const up = new Set();
@@ -1153,7 +1079,6 @@ async function fullSync({ rediscover = true } = {}) {
       }
     }
 
-    // preload cards
     for (const tt of idsToPreload) {
       await getBestMeta(tt);
       CARD.set(tt, cardFor(tt));
@@ -1162,7 +1087,6 @@ async function fullSync({ rediscover = true } = {}) {
     LISTS = next;
     LAST_SYNC_AT = Date.now();
 
-    // ensure prefs.order stability
     const allIds = Object.keys(LISTS);
     const keep = Array.isArray(PREFS.order)
       ? PREFS.order.filter((id) => LISTS[id])
@@ -1201,9 +1125,9 @@ async function fullSync({ rediscover = true } = {}) {
       `[SYNC] ok – ${Object.values(LISTS).reduce(
         (n, L) => n + (L.ids?.length || 0),
         0
-      )} items across ${Object.keys(LISTS).length} lists in ${minutes(
-        Date.now() - started
-      )} min`
+      )} items across ${
+        Object.keys(LISTS).length
+      } lists in ${minutes(Date.now() - started)} min`
     );
   } catch (e) {
     console.error("[SYNC] failed:", e);
@@ -1211,23 +1135,25 @@ async function fullSync({ rediscover = true } = {}) {
     syncInProgress = false;
   }
 }
+
 function scheduleNextSync() {
   if (syncTimer) clearTimeout(syncTimer);
   if (IMDB_SYNC_MINUTES <= 0) return;
   syncTimer = setTimeout(
-    () => fullSync({ rediscover: true }).then(scheduleNextSync),
+    () =>
+      fullSync({ rediscover: true }).then(() => scheduleNextSync()),
     IMDB_SYNC_MINUTES * 60 * 1000
   );
 }
 function maybeBackgroundSync() {
   if (IMDB_SYNC_MINUTES <= 0) return;
-  const stale =
-    Date.now() - LAST_SYNC_AT > IMDB_SYNC_MINUTES * 60 * 1000;
+  const stale = Date.now() - LAST_SYNC_AT > IMDB_SYNC_MINUTES * 60 * 1000;
   if (stale && !syncInProgress)
-    fullSync({ rediscover: true }).then(scheduleNextSync);
+    fullSync({ rediscover: true }).then(() => scheduleNextSync());
 }
 
 // ----------------- SERVER -----------------
+
 const app = express();
 app.use((_, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1253,9 +1179,10 @@ const absoluteBase = (req) => {
   return `${proto}://${host}`;
 };
 
-app.get("/health", (_req, res) => res.status(200).send("ok"));
+app.get("/health", (_, res) => res.status(200).send("ok"));
 
 // ------- Manifest -------
+
 const baseManifest = {
   id: "org.mylists.snapshot",
   version: "12.4.1",
@@ -1275,9 +1202,10 @@ function getEnabledOrderedIds() {
   const enabled = new Set(
     PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds
   );
-  const base = PREFS.order && PREFS.order.length
-    ? PREFS.order.filter((id) => LISTS[id])
-    : [];
+  const base =
+    PREFS.order && PREFS.order.length
+      ? PREFS.order.filter((id) => LISTS[id])
+      : [];
   const missing = allIds
     .filter((id) => !base.includes(id))
     .sort((a, b) =>
@@ -1286,39 +1214,31 @@ function getEnabledOrderedIds() {
   const ordered = base.concat(missing);
   return ordered.filter((id) => enabled.has(id));
 }
-
 function catalogs() {
   const ids = getEnabledOrderedIds();
-  return ids.map((lsid) => {
-    const baseOpts =
-      PREFS.sortOptions &&
-      PREFS.sortOptions[lsid] &&
-      PREFS.sortOptions[lsid].length
-        ? PREFS.sortOptions[lsid]
-        : SORT_OPTIONS;
-
-    const def =
-      (PREFS.perListSort && PREFS.perListSort[lsid]) || "name_asc";
-
-    const options = Array.from(
-      new Set([def].concat(baseOpts.filter((o) => o !== def)))
-    );
-
-    return {
-      type: "my lists",
-      id: `list:${lsid}`,
-      name: `🗂 ${LISTS[lsid]?.name || lsid}`,
-      extraSupported: ["search", "skip", "limit", "sort"],
-      extra: [
-        { name: "search" },
-        { name: "skip" },
-        { name: "limit" },
-        { name: "sort", options },
-      ],
-      posterShape: "poster",
-    };
-  });
+  return ids.map((lsid) => ({
+    type: "my lists",
+    id: `list:${lsid}`,
+    name: `🗂 ${LISTS[lsid]?.name || lsid}`,
+    extraSupported: ["search", "skip", "limit", "sort"],
+    extra: [
+      { name: "search" },
+      { name: "skip" },
+      { name: "limit" },
+      {
+        name: "sort",
+        options:
+          PREFS.sortOptions &&
+          PREFS.sortOptions[lsid] &&
+          PREFS.sortOptions[lsid].length
+            ? PREFS.sortOptions[lsid]
+            : SORT_OPTIONS,
+      },
+    ],
+    posterShape: (PREFS.posterShape && PREFS.posterShape[lsid]) || "poster",
+  }));
 }
+
 app.get("/manifest.json", (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
@@ -1341,25 +1261,26 @@ app.get("/configure", (req, res) => {
   const dest = `${base}/admin?admin=${encodeURIComponent(
     ADMIN_PASSWORD
   )}`;
-
-  res.type("html").send(`
-    <!doctype html><meta charset="utf-8">
-    <title>Configure – My Lists</title>
-    <meta http-equiv="refresh" content="0; url='${dest}'">
-    <style>
-      body{font-family:system-ui; background:#0f0d1a; color:#f7f7fb;
-           display:grid; place-items:center; height:100vh; margin:0}
-      a{color:#9aa0b4;}
-    </style>
-    <p>Opening admin… <a href="${dest}">continue</a></p>
-  `);
+  res
+    .type("html")
+    .send(`<!doctype html><meta charset="utf-8">
+<title>Configure – My Lists</title>
+<meta http-equiv="refresh" content="0; url='${dest}'">
+<style>
+body{font-family:system-ui; background:#0f0d1a; color:#f7f7fb;
+display:grid; place-items:center; height:100vh; margin:0}
+a{color:#9aa0b4;}
+</style>
+<p>Opening admin… <a href="${dest}">continue</a></p>`);
 });
 
 // ------- Catalog -------
+
 function parseExtra(extraStr, qObj) {
   const p = new URLSearchParams(extraStr || "");
   return { ...Object.fromEntries(p.entries()), ...(qObj || {}) };
 }
+
 app.get("/catalog/:type/:id/:extra?.json", (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
@@ -1380,7 +1301,6 @@ app.get("/catalog/:type/:id/:extra?.json", (req, res) => {
     const skip = Math.max(0, Number(extra.skip || 0));
     const limit = Math.min(Number(extra.limit || 100), 200);
 
-    // apply per-list edits (immediate effect)
     let ids = (list.ids || []).slice();
     const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
     const removed = new Set((ed.removed || []).filter(isImdb));
@@ -1411,13 +1331,17 @@ app.get("/catalog/:type/:id/:extra?.json", (req, res) => {
         : stableSort(metas, sort);
     } else metas = stableSort(metas, sort);
 
-    // Always use portrait posters in Stremio
+    const shape = (PREFS.posterShape && PREFS.posterShape[lsid]) || "poster";
     metas = metas.map((m) => {
       const rec = BEST.get(m.id);
       const bg = rec && rec.meta && (rec.meta.background || rec.meta.backdrop);
       const portrait = m.posterPortrait || m.poster || m.posterLandscape || bg;
       const landscape = m.posterLandscape || bg || m.poster || m.posterPortrait;
-      return { ...m, poster: portrait || landscape };
+      if (shape === "landscape") {
+        return { ...m, poster: landscape || portrait };
+      } else {
+        return { ...m, poster: portrait || landscape };
+      }
     });
 
     res.json({ metas: metas.slice(skip, skip + limit) });
@@ -1428,6 +1352,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req, res) => {
 });
 
 // ------- Meta -------
+
 app.get("/meta/:type/:id.json", async (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
@@ -1452,7 +1377,6 @@ app.get("/meta/:type/:id.json", async (req, res) => {
         },
       });
     }
-
     const m = rec.meta;
     res.json({
       meta: {
@@ -1467,7 +1391,8 @@ app.get("/meta/:type/:id.json", async (req, res) => {
   }
 });
 
-// ------- Admin JSON APIs -------
+// ------- Admin APIs -------
+
 app.get("/api/lists", (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   res.json(LISTS);
@@ -1476,6 +1401,7 @@ app.get("/api/prefs", (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   res.json(PREFS);
 });
+
 app.post("/api/prefs", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1531,11 +1457,9 @@ app.post("/api/prefs", async (req, res) => {
       ? body.blocked.filter(isListId)
       : PREFS.blocked || [];
 
-    const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) {
-      LAST_MANIFEST_KEY = key;
-      MANIFEST_REV++;
-    }
+    // always bump manifest version on prefs save
+    LAST_MANIFEST_KEY = manifestKey();
+    MANIFEST_REV++;
 
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
@@ -1554,7 +1478,6 @@ app.post("/api/prefs", async (req, res) => {
   }
 });
 
-// unblock a previously removed list
 app.post("/api/unblock-list", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1570,7 +1493,6 @@ app.post("/api/unblock-list", async (req, res) => {
   }
 });
 
-// return cards for one list (for the drawer) — includes edits
 app.get("/api/list-items", (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   const lsid = String(req.query.lsid || "");
@@ -1589,10 +1511,8 @@ app.get("/api/list-items", (req, res) => {
     if (!c.posterPortrait || !c.posterLandscape) {
       const rec = BEST.get(tt);
       const bg = rec && rec.meta && (rec.meta.background || rec.meta.backdrop);
-      const portrait =
-        c.posterPortrait || c.poster || c.posterLandscape || bg;
-      const landscape =
-        c.posterLandscape || bg || c.poster || c.posterPortrait;
+      const portrait = c.posterPortrait || c.poster || c.posterLandscape || bg;
+      const landscape = c.posterLandscape || bg || c.poster || c.posterPortrait;
       c = {
         ...c,
         posterPortrait: portrait || landscape,
@@ -1606,7 +1526,6 @@ app.get("/api/list-items", (req, res) => {
   res.json({ items });
 });
 
-// add an item (tt...) to a list
 app.post("/api/list-add", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1643,7 +1562,6 @@ app.post("/api/list-add", async (req, res) => {
   }
 });
 
-// remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1678,7 +1596,6 @@ app.post("/api/list-remove", async (req, res) => {
   }
 });
 
-// clear custom order and all add/remove edits for a list
 app.post("/api/list-reset", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1704,40 +1621,29 @@ app.post("/api/list-reset", async (req, res) => {
   }
 });
 
-// save a per-list custom order; mode: set / clear
 app.post("/api/custom-order", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
     const lsid = String(req.body.lsid || "");
-    const mode = String(req.body.mode || "set");
+    const order = Array.isArray(req.body.order)
+      ? req.body.order.filter(isImdb)
+      : [];
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
     const list = LISTS[lsid];
     if (!list) return res.status(404).send("List not found");
 
+    const set = new Set(
+      list.ids.concat(PREFS.listEdits?.[lsid]?.added || [])
+    );
+    const clean = order.filter((id) => set.has(id));
+
     PREFS.customOrder = PREFS.customOrder || {};
+    PREFS.customOrder[lsid] = clean;
     PREFS.perListSort = PREFS.perListSort || {};
+    PREFS.perListSort[lsid] = "custom";
 
-    if (mode === "clear") {
-      delete PREFS.customOrder[lsid];
-      delete PREFS.perListSort[lsid];
-    } else {
-      const order = Array.isArray(req.body.order)
-        ? req.body.order.filter(isImdb)
-        : [];
-      const set = new Set(
-        list.ids.concat(PREFS.listEdits?.[lsid]?.added || [])
-      );
-      const clean = order.filter((id) => set.has(id));
-
-      PREFS.customOrder[lsid] = clean;
-      PREFS.perListSort[lsid] = "custom";
-    }
-
-    const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) {
-      LAST_MANIFEST_KEY = key;
-      MANIFEST_REV++;
-    }
+    LAST_MANIFEST_KEY = manifestKey();
+    MANIFEST_REV++;
 
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
@@ -1756,7 +1662,6 @@ app.post("/api/custom-order", async (req, res) => {
   }
 });
 
-// add sources quickly then sync
 app.post("/api/add-sources", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1782,7 +1687,6 @@ app.post("/api/add-sources", async (req, res) => {
   }
 });
 
-// remove/block a list
 app.post("/api/remove-list", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1791,10 +1695,13 @@ app.post("/api/remove-list", async (req, res) => {
     delete LISTS[lsid];
     PREFS.enabled = (PREFS.enabled || []).filter((id) => id !== lsid);
     PREFS.order = (PREFS.order || []).filter((id) => id !== lsid);
-    PREFS.blocked = Array.from(new Set([...(PREFS.blocked || []), lsid]));
+    PREFS.blocked = Array.from(
+      new Set([...(PREFS.blocked || []), lsid])
+    );
 
     LAST_MANIFEST_KEY = "";
-    MANIFEST_REV++; // force bump
+    MANIFEST_REV++;
+
     await saveSnapshot({
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
@@ -1826,6 +1733,7 @@ app.post("/api/sync", async (req, res) => {
     res.status(500).send(String(e));
   }
 });
+
 app.post("/api/purge-sync", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
@@ -1863,10 +1771,10 @@ app.get("/api/debug-imdb", async (req, res) => {
   }
 });
 
-// ------- Admin page (tabs + drawers + drag + arrows) -------
+// ------- Admin Page -------
+
 app.get("/admin", async (req, res) => {
-  if (!adminAllowed(req))
-    return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
   const base = absoluteBase(req);
   const manifestUrl = `${base}/manifest.json${
     SHARED_SECRET ? `?key=${SHARED_SECRET}` : ""
@@ -1875,19 +1783,16 @@ app.get("/admin", async (req, res) => {
   let discovered = [];
   try {
     discovered = await harvestSources();
-  } catch {
-    /* ignore */
-  }
+  } catch {}
 
-  const rows = Object.keys(LISTS)
-    .map((id) => {
-      const L = LISTS[id];
-      const count = (L.ids || []).length;
-      return `<li><b>${L.name || id}</b> <small>(${count} items)</small><br/><small>${
-        L.url || ""
-      }</small></li>`;
-    })
-    .join("") || "<li>(none)</li>";
+  const rows =
+    Object.keys(LISTS)
+      .map((id) => {
+        const L = LISTS[id];
+        const count = (L.ids || []).length;
+        return `<li><b>${L.name || id}</b> <small>(${count} items)</small><br/><small>${L.url || ""}</small></li>`;
+      })
+      .join("") || "<li>(none)</li>";
 
   const disc =
     discovered
@@ -1905,231 +1810,235 @@ app.get("/admin", async (req, res) => {
     : "never";
 
   res.type("html").send(`<!doctype html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Admin</title>
 <style>
-  :root{
-    color-scheme:light;
-    --bg:#050415;
-    --bg2:#0f0d1a;
-    --card:#141129;
-    --muted:#9aa0b4;
-    --text:#f7f7fb;
-    --accent:#6c5ce7;
-    --accent2:#8b7cf7;
-    --accent-soft:rgba(108,92,231,.18);
-    --border:#262145;
-    --danger:#ff7675;
-  }
-  body{
-    font-family:system-ui,Segoe UI,Roboto,Arial;
-    margin:0;
-    background:radial-gradient(circle at top,#2f2165 0,#050415 48%,#02010a 100%);
-    color:var(--text);
-  }
-  .wrap{max-width:1300px;margin:24px auto;padding:0 16px}
-  .hero{padding:20px 0 8px}
-  h1{margin:0 0 4px;font-weight:700;font-size:26px;letter-spacing:.01em}
-  .subtitle{color:var(--muted);font-size:14px}
+:root{
+  color-scheme:light;
+  --bg:#050415;
+  --bg2:#0f0d1a;
+  --card:#141129;
+  --muted:#9aa0b4;
+  --text:#f7f7fb;
+  --accent:#6c5ce7;
+  --accent2:#8b7cf7;
+  --accent-soft:rgba(108,92,231,.18);
+  --border:#262145;
+  --danger:#ff7675;
+}
+body{
+  font-family:system-ui,Segoe UI,Roboto,Arial;
+  margin:0;
+  background:radial-gradient(circle at top,#2f2165 0,#050415 48%,#02010a 100%);
+  color:var(--text);
+}
+.wrap{max-width:1200px;margin:24px auto;padding:0 16px}
+.hero{padding:12px 0 4px}
+h1{margin:0 0 4px;font-weight:700;font-size:28px;letter-spacing:.01em}
+.subtitle{color:var(--muted);font-size:13px}
 
-  .navtabs{
-    margin:8px 0 16px;
-    display:flex;
-    flex-wrap:wrap;
-    gap:8px;
-  }
-  .navtab{
-    padding:6px 14px;
-    border-radius:999px;
-    border:1px solid var(--border);
-    background:rgba(10,8,30,.9);
-    color:var(--muted);
-    cursor:pointer;
-    font-size:13px;
-  }
-  .navtab.active{
-    background:var(--accent);
-    color:#fff;
-    border-color:var(--accent2);
-  }
+.navtabs{
+  margin:8px 0 16px;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+}
+.navtab{
+  padding:6px 14px;
+  border-radius:999px;
+  border:1px solid var(--border);
+  background:rgba(10,8,30,.9);
+  color:var(--muted);
+  cursor:pointer;
+  font-size:13px;
+}
+.navtab.active{
+  background:var(--accent);
+  color:#fff;
+  border-color:var(--accent2);
+}
 
-  .grid{display:grid;gap:16px;grid-template-columns:1fr}
-  @media(min-width:980px){ .grid{grid-template-columns:1.1fr .9fr} }
-  .card{
-    border:1px solid var(--border);
-    border-radius:18px;
-    padding:16px 18px;
-    background:linear-gradient(145deg,rgba(17,14,39,.96),rgba(8,6,25,.98));
-    box-shadow:0 18px 40px rgba(0,0,0,.55);
-  }
-  h3{margin:0 0 8px;font-size:17px}
-  h4{margin:10px 0 4px;font-size:14px}
-  button{
-    padding:9px 14px;
-    border:0;
-    border-radius:999px;
-    background:var(--accent);
-    color:#fff;
-    cursor:pointer;
-    font-size:13px;
-    display:inline-flex;
-    align-items:center;
-    gap:6px;
-    box-shadow:0 6px 16px rgba(108,92,231,.55);
-  }
-  button.btn2{background:var(--accent2);}
-  button:disabled{opacity:.5;cursor:default;box-shadow:none}
-  small{color:var(--muted)}
-  .code{
-    font-family:ui-monospace,Menlo,Consolas,monospace;
-    background:#1c1837;
-    color:#d6d3ff;
-    padding:4px 6px;
-    border-radius:6px;
-    font-size:12px;
-    word-break:break-all;
-  }
-  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
-  th,td{padding:8px 6px;border-bottom:1px solid rgba(38,33,69,.8);text-align:left;vertical-align:top}
-  th{font-weight:600;color:#d7d1ff;font-size:12px}
-  tr:hover td{background:rgba(17,14,40,.7);}
-  .muted{color:var(--muted)}
-  .chev{cursor:pointer;font-size:16px;line-height:1;user-select:none}
-  .drawer{background:#120f25}
-  .thumbs{
-    display:grid;
-    grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
-    gap:10px;
-    margin:12px 0;
-    padding:0;
-    list-style:none;
-  }
-  .thumb{
-    position:relative;
-    display:flex;
-    gap:10px;
-    align-items:center;
-    border:1px solid var(--border);
-    background:#1a1636;
-    border-radius:12px;
-    padding:6px 8px;
-  }
-  .thumb-img{
-    object-fit:cover;
-    border-radius:6px;
-    background:#2a244e;
-    flex-shrink:0;
-    width:52px;
-    height:78px;
-  }
-  .thumb .title{font-size:14px}
-  .thumb .id{font-size:11px;color:var(--muted)}
-  .thumb[draggable="true"]{cursor:grab}
-  .thumb.dragging{opacity:.5}
-  .thumb .del{
-    position:absolute;
-    top:6px;
-    right:6px;
-    width:20px;
-    height:20px;
-    line-height:20px;
-    text-align:center;
-    border-radius:999px;
-    background:#3a2c2c;
-    color:#ffb4b4;
-    font-weight:700;
-    display:none;
-  }
-  .thumb:hover .del{display:block}
-  .thumb.add{
-    align-items:center;
-    justify-content:center;
-    border:1px dashed var(--border);
-    min-height:90px;
-  }
-  .addbox{width:100%;text-align:center}
-  .addbox input{
-    margin-top:6px;
-    width:100%;
-    box-sizing:border-box;
-    background:#1c1837;
-    color:var(--text);
-    border:1px solid var(--border);
-    border-radius:8px;
-    padding:8px;
-  }
-  .rowtools{
-    display:flex;
-    flex-wrap:wrap;
-    gap:8px;
-    align-items:center;
-    margin-bottom:8px;
-    margin-top:4px;
-  }
-  .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
-  .pill{
-    display:inline-flex;
-    align-items:center;
-    gap:8px;
-    background:#1c1837;
-    border:1px solid var(--border);
-    border-radius:999px;
-    padding:4px 9px;
-    color:#dcd8ff;
-    font-size:12px;
-    margin:2px 4px 2px 0;
-  }
-  .pill input{margin-right:4px}
-  .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
-  input[type="text"]{
-    background:#1c1837;
-    color:var(--text);
-    border:1px solid var(--border);
-    border-radius:8px;
-    padding:8px 9px;
-    width:100%;
-    font-size:13px;
-  }
-  .row{
-    display:grid;
-    gap:10px;
-    grid-template-columns:1fr 110px;
-    margin-bottom:8px;
-  }
-  .mini{font-size:12px}
-  a.link{color:#b1b9ff;text-decoration:none}
-  a.link:hover{text-decoration:underline}
+/* stack cards full width */
+.grid{
+  display:block;
+  margin-top:8px;
+}
 
-  .installRow{
-    display:flex;
-    flex-wrap:wrap;
-    gap:8px;
-    align-items:center;
-    margin-top:8px;
-  }
+.card{
+  border:1px solid var(--border);
+  border-radius:18px;
+  padding:16px 18px;
+  background:linear-gradient(145deg,rgba(17,14,39,.96),rgba(8,6,25,.98));
+  box-shadow:0 18px 40px rgba(0,0,0,.55);
+  margin-bottom:16px;
+}
+h3{margin:0 0 8px;font-size:18px}
+h4{margin:10px 0 4px;font-size:14px}
+button{
+  padding:9px 14px;
+  border:0;
+  border-radius:999px;
+  background:var(--accent);
+  color:#fff;
+  cursor:pointer;
+  font-size:13px;
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  box-shadow:0 6px 16px rgba(108,92,231,.55);
+}
+button.btn2{background:var(--accent2);}
+button:disabled{opacity:.5;cursor:default;box-shadow:none}
+small{color:var(--muted)}
+.code{
+  font-family:ui-monospace,Menlo,Consolas,monospace;
+  background:#1c1837;
+  color:#d6d3ff;
+  padding:4px 6px;
+  border-radius:6px;
+  font-size:12px;
+  word-break:break-all;
+}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+th,td{padding:8px 6px;border-bottom:1px solid rgba(38,33,69,.8);text-align:left;vertical-align:top}
+th{font-weight:600;color:#d7d1ff;font-size:12px}
+tr:hover td{background:rgba(17,14,40,.7);}
+.muted{color:var(--muted)}
+.chev{cursor:pointer;font-size:16px;line-height:1;user-select:none}
+.drawer{background:#120f25}
+.thumbs{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+  gap:10px;
+  margin:12px 0;
+  padding:0;
+  list-style:none;
+}
+.thumb{
+  position:relative;
+  display:flex;
+  gap:10px;
+  align-items:center;
+  border:1px solid var(--border);
+  background:#1a1636;
+  border-radius:12px;
+  padding:6px 8px;
+}
+.thumb-img{
+  object-fit:cover;
+  border-radius:6px;
+  background:#2a244e;
+  flex-shrink:0;
+}
+.thumbs.shape-poster .thumb-img{width:52px;height:78px}
+.thumbs.shape-landscape .thumb-img{width:86px;height:52px}
+.thumb .title{font-size:14px}
+.thumb .id{font-size:11px;color:var(--muted)}
+.thumb[draggable="true"]{cursor:grab}
+.thumb.dragging{opacity:.5}
+.thumb .del{
+  position:absolute;
+  top:6px;
+  right:6px;
+  width:20px;
+  height:20px;
+  line-height:20px;
+  text-align:center;
+  border-radius:999px;
+  background:#3a2c2c;
+  color:#ffb4b4;
+  font-weight:700;
+  display:none;
+}
+.thumb:hover .del{display:block}
+.thumb.add{
+  align-items:center;
+  justify-content:center;
+  border:1px dashed var(--border);
+  min-height:90px;
+}
+.addbox{width:100%;text-align:center}
+.addbox input{
+  margin-top:6px;
+  width:100%;
+  box-sizing:border-box;
+  background:#1c1837;
+  color:var(--text);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:8px;
+}
+.rowtools{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+  margin-bottom:8px;
+  margin-top:4px;
+}
+.inline-note{font-size:12px;color:var(--muted);margin-left:8px}
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  background:#1c1837;
+  border:1px solid var(--border);
+  border-radius:999px;
+  padding:4px 9px;
+  color:#dcd8ff;
+  font-size:12px;
+  margin:2px 4px 2px 0;
+}
+.pill input{margin-right:4px}
+.pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
+input[type="text"]{
+  background:#1c1837;
+  color:var(--text);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:8px 9px;
+  width:100%;
+  font-size:13px;
+}
+.row{
+  display:grid;
+  gap:10px;
+  grid-template-columns:1fr 110px;
+  margin-bottom:8px;
+}
+.mini{font-size:12px}
+a.link{color:#b1b9ff;text-decoration:none}
+a.link:hover{text-decoration:underline}
+.installRow{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+  margin-top:8px;
+}
+.movebtn{
+  background:#1c1837;
+  box-shadow:none;
+  padding:4px 7px;
+  font-size:11px;
+  margin:0 2px;
+}
 
-  .movebtn{
-    background:#1c1837;
-    box-shadow:none;
-    padding:4px 7px;
-    font-size:11px;
-    margin:0 2px;
-  }
+/* simple "pages" */
+body.view-snapshot .card.snapshot{display:block;}
+body.view-snapshot .card.sources,
+body.view-snapshot .card.customize{display:none;}
 
-  /* simple "pages" */
-  body.view-snapshot .card.snapshot{display:block;}
-  body.view-snapshot .card.sources,
-  body.view-snapshot .card.customize{display:none;}
+body.view-sources .card.sources{display:block;}
+body.view-sources .card.snapshot,
+body.view-sources .card.customize{display:none;}
 
-  body.view-sources .card.sources{display:block;}
-  body.view-sources .card.snapshot,
-  body.view-sources .card.customize{display:none;}
+body.view-custom .card.customize{display:block;}
+body.view-custom .card.snapshot,
+body.view-custom .card.sources{display:none;}
 
-  body.view-custom .card.customize{display:block;}
-  body.view-custom .card.snapshot,
-  body.view-custom .card.sources{display:none;}
+.statusText{margin-left:8px;font-size:12px;color:var(--muted);}
+.statusText.ok{color:#7bed9f;}
 </style>
 </head>
 <body class="view-snapshot">
@@ -2148,12 +2057,10 @@ app.get("/admin", async (req, res) => {
   <div class="grid">
     <div class="card snapshot">
       <h3>Current Snapshot</h3>
-
       <div class="rowtools">
         <button type="button" class="btn2" id="goAdd">➕ Add lists</button>
         <button type="button" id="goCustom">🎛 Customize layout</button>
       </div>
-
       <ul>${rows}</ul>
       <div class="rowtools">
         <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
@@ -2170,610 +2077,609 @@ app.get("/admin", async (req, res) => {
         <button type="button" class="btn2" id="installBtn">⭐ Install to Stremio</button>
         <span class="mini muted">If the button doesn’t work, copy the manifest URL into Stremio manually.</span>
       </div>
-      <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting or ordering change.</p>
+      <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, poster shapes or ordering change.</p>
     </div>
 
+    <!-- Sources / Add lists -->
     <div class="card sources">
-      <h3>Discovered & Sources</h3>
-      <div style="margin-top:8px">
-        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
-        <div id="blockedPills"></div>
-      </div>
+      <h3>Add lists</h3>
+      <p class="mini muted">Add IMDb or Trakt sources, then click <b>Sync Lists Now</b> to pull them in.</p>
 
-      <p class="mini muted" style="margin-top:6px;">We merge your main user (+ extras) and explicit list URLs/IDs. Removing a list also blocks it so it won’t re-appear on the next sync.</p>
-
+      <h4>Source pages</h4>
+      <p class="mini muted">Examples: IMDb user lists page, Trakt user lists page.</p>
       <div class="row">
-        <div><label class="mini">Add IMDb/Trakt <b>User lists</b> URL</label>
-          <input id="userInput" placeholder="IMDb or Trakt user /lists page" />
+        <div>
+          <input id="srcUsers" type="text" placeholder="One URL per line (IMDb/Trakt user lists pages)" />
         </div>
-        <div><button id="addUser" type="button">Add</button></div>
       </div>
+
+      <h4>Explicit lists</h4>
+      <p class="mini muted">Examples: <code class="code">https://www.imdb.com/list/lsXXXXXXXXX/</code>, <code class="code">lsXXXXXXXXX</code>, Trakt list URLs.</p>
       <div class="row">
-        <div><label class="mini">Add IMDb/Trakt <b>List</b> URL</label>
-          <input id="listInput" placeholder="IMDb ls… or chart/search, or Trakt list URL" />
+        <div>
+          <input id="srcLists" type="text" placeholder="One URL or ID per line (IMDb lists, charts, Trakt lists)" />
         </div>
-        <div><button id="addList" type="button">Add</button></div>
       </div>
 
-      <div style="margin-top:10px">
-        <div class="mini muted">Your extra users:</div>
-        <div id="userPills"></div>
-      </div>
-      <div style="margin-top:8px">
-        <div class="mini muted">Your extra lists:</div>
-        <div id="listPills"></div>
+      <div class="rowtools">
+        <button type="button" class="btn2" id="btnAddSources">💾 Save sources &amp; sync</button>
+        <span class="statusText" id="sourcesStatus"></span>
       </div>
 
-      <h4 style="margin-top:14px">Discovered</h4>
+      <h4>Currently discovered sources</h4>
       <ul>${disc}</ul>
     </div>
-  </div>
 
-  <div class="card customize" style="margin-top:16px">
-    <h3>Customize (enable, order, sort)</h3>
-    <p class="muted">Drag rows to reorder lists, or use the ↑ / ↓ buttons if you don’t have a mouse. Click ▾ to open the drawer and tune sort options or custom order.</p>
-    <div id="prefs"></div>
-  </div>
+    <!-- Customize layout -->
+    <div class="card customize" id="customCard">
+      <h3>Customize (enable, order, sort)</h3>
+      <p class="mini muted">Use the checkboxes to enable lists, ↑ / ↓ to reorder, and choose a default sort. Click <b>Save</b> at the bottom.</p>
 
+      <table>
+        <thead>
+          <tr>
+            <th style="width:40px;">Enabled</th>
+            <th>List (id)</th>
+            <th style="width:70px;">Items</th>
+            <th style="width:140px;">Default sort</th>
+            <th style="width:90px;">Move</th>
+            <th style="width:90px;">Remove</th>
+          </tr>
+        </thead>
+        <tbody id="listsTbody">
+          <!-- filled by JS -->
+        </tbody>
+      </table>
+
+      <div style="margin-top:12px;">
+        <button type="button" id="btnSavePrefs">💾 Save layout</button>
+        <span class="statusText" id="prefsStatus"></span>
+      </div>
+
+      <hr style="margin:16px 0;border:0;border-top:1px solid var(--border);">
+
+      <div id="listEditor">
+        <p class="mini muted">Select a list above to edit its poster shape, custom order and items.</p>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
-const ADMIN="${ADMIN_PASSWORD}";
-const SORT_OPTIONS=${JSON.stringify(SORT_OPTIONS)};
-const HOST_URL=${JSON.stringify(base)};
-const SECRET=${JSON.stringify(SHARED_SECRET)};
+(function(){
+  const ADMIN = ${JSON.stringify(ADMIN_PASSWORD)};
+  const MANIFEST_URL = ${JSON.stringify(manifestUrl)};
+  const ALL_SORTS = ${JSON.stringify(SORT_OPTIONS)};
 
-function setView(view){
-  document.body.classList.remove('view-snapshot','view-sources','view-custom');
-  document.body.classList.add('view-'+view);
-  document.querySelectorAll('.navtab').forEach(btn=>{
-    btn.classList.toggle('active', btn.dataset.view===view);
-  });
-}
+  function qs(sel){ return document.querySelector(sel); }
+  function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
 
-async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
-async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
-async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
-async function saveCustomOrder(lsid, order){
-  const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
-  if (!r.ok) throw new Error('save failed');
-  return r.json();
-}
-async function clearCustomOrder(lsid){
-  const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, mode:'clear' })});
-  if (!r.ok) throw new Error('clear failed');
-  return r.json();
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  const btn = document.getElementById('installBtn');
-  if (btn) {
-    btn.onclick = (e) => {
-      e.preventDefault();
-      let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
-      if (SECRET) url += '?key=' + SECRET;
-      window.location.href = url;
-    };
-  }
-
-  document.querySelectorAll('.navtab').forEach(b=>{
-    b.addEventListener('click', ()=> setView(b.dataset.view));
-  });
-
-  const quickAdd = document.getElementById('goAdd');
-  if (quickAdd) quickAdd.onclick = ()=> setView('sources');
-  const quickCustom = document.getElementById('goCustom');
-  if (quickCustom) quickCustom.onclick = ()=> setView('custom');
-
-  wireAddButtons();
-  render();
-});
-
-function normalizeUserListsUrl(v){
-  v = String(v||'').trim();
-  if (!v) return null;
-
-  // Trakt: /users/<user>/lists or /users/<user>
-  if (/trakt\\.tv\\/users\\/[^/]+\\/lists/i.test(v)) return v;
-  if (/trakt\\.tv\\/users\\/[^/]+\\/?$/i.test(v)) {
-    return v.replace(/\\/?$/, '/lists');
-  }
-
-  // IMDb: /user/urXXXX/lists or bare ur id
-  if (/imdb\\.com\\/user\\/ur\\d+\\/lists/i.test(v)) return v;
-  const m = v.match(/ur\\d{6,}/i);
-  if (m) return 'https://www.imdb.com/user/'+m[0]+'/lists/';
-  return null;
-}
-function normalizeListIdOrUrl2(v){
-  v = String(v||'').trim();
-  if (!v) return null;
-  // Trakt lists (user or global)
-  if (/trakt\\.tv\\/users\\/[^/]+\\/lists\\/[^/?#]+/i.test(v)) return v;
-  if (/trakt\\.tv\\/lists\\//i.test(v)) return v;
-  // IMDb lists / charts / search
-  if (/imdb\\.com\\/list\\//i.test(v)) return v;
-  if (/imdb\\.com\\/(chart|search)\\//i.test(v)) return v;
-  const m = v.match(/ls\\d{6,}/i);
-  if (m) return 'https://www.imdb.com/list/'+m[0]+'/';
-  return null;
-}
-async function addSources(payload){
-  await fetch('/api/add-sources?admin='+ADMIN, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(payload)
-  });
-}
-function wireAddButtons(){
-  const userBtn = document.getElementById('addUser');
-  const listBtn = document.getElementById('addList');
-  const userInp = document.getElementById('userInput');
-  const listInp = document.getElementById('listInput');
-
-  if (!userBtn || !listBtn) return;
-
-  userBtn.onclick = async (e) => {
-    e.preventDefault();
-    const url = normalizeUserListsUrl(userInp.value);
-    if (!url) { alert('Enter a valid IMDb or Trakt user /lists URL'); return; }
-    userBtn.disabled = true;
-    try { await addSources({ users:[url], lists:[] }); location.reload(); }
-    finally { userBtn.disabled = false; }
-  };
-
-  listBtn.onclick = async (e) => {
-    e.preventDefault();
-    const url = normalizeListIdOrUrl2(listInp.value);
-    if (!url) { alert('Enter a valid IMDb or Trakt list URL'); return; }
-    listBtn.disabled = true;
-    try { await addSources({ users:[], lists:[url] }); location.reload(); }
-    finally { listBtn.disabled = false; }
-  };
-}
-
-function el(tag, attrs={}, kids=[]){
-  const e = document.createElement(tag);
-  for (const k in attrs) {
-    if (k === 'text') e.textContent = attrs[k];
-    else if (k === 'html') e.innerHTML = attrs[k];
-    else e.setAttribute(k, attrs[k]);
-  }
-  kids.forEach(ch => e.appendChild(ch));
-  return e;
-}
-function isCtrl(node){
-  const t = (node && node.tagName || '').toLowerCase();
-  return t === 'input' || t === 'select' || t === 'button' || t === 'a' || t === 'label' || t === 'textarea';
-}
-
-// Row drag (table tbody)
-function attachRowDnD(tbody) {
-  let dragSrc = null;
-  tbody.addEventListener('dragstart', (e) => {
-    const tr = e.target.closest('tr[data-lsid]');
-    if (!tr || isCtrl(e.target)) return;
-    dragSrc = tr;
-    tr.classList.add('dragging');
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
-  });
-  tbody.addEventListener('dragend', () => {
-    if (dragSrc) dragSrc.classList.remove('dragging');
-    dragSrc = null;
-  });
-  tbody.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    if (!dragSrc) return;
-    const over = e.target.closest('tr[data-lsid]');
-    if (!over || over === dragSrc) return;
-    const rect = over.getBoundingClientRect();
-    const before = (e.clientY - rect.top) < rect.height / 2;
-    over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
-  });
-}
-
-// Thumb drag (ul.thumbs)
-function attachThumbDnD(ul) {
-  let src = null;
-  ul.addEventListener('dragstart', (e)=>{
-    const li = e.target.closest('li.thumb'); if (!li || li.hasAttribute('data-add')) return;
-    src = li; li.classList.add('dragging');
-    e.dataTransfer.effectAllowed='move';
-    e.dataTransfer.setData('text/plain', li.dataset.id || '');
-  });
-  ul.addEventListener('dragend', ()=>{ if(src){src.classList.remove('dragging'); src=null;} });
-  ul.addEventListener('dragover', (e)=>{
-    e.preventDefault();
-    if (!src) return;
-    const over = e.target.closest('li.thumb'); if (!over || over===src || over.hasAttribute('data-add')) return;
-    const rect = over.getBoundingClientRect();
-    const before = (e.clientY - rect.top) < rect.height/2;
-    over.parentNode.insertBefore(src, before ? over : over.nextSibling);
-  });
-}
-
-// client-side sort helpers (mirror server)
-function toTsClient(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(String(y)+'-01-01'); if(!Number.isNaN(t)) return t;} return null; }
-function stableSortClient(items, sortKey){
-  const s = String(sortKey||'name_asc').toLowerCase();
-  const dir = s.endsWith('_asc') ? 1 : -1;
-  const key = s.split('_')[0];
-  const cmpNullBottom = (a,b) => (a==null && b==null)?0 : (a==null?1 : (b==null?-1 : (a<b?-1:(a>b?1:0))));
-  return items.map((m,i)=>({m,i})).sort((A,B)=>{
-    const a=A.m,b=B.m; let c=0;
-    if (key==='date') c = cmpNullBottom(toTsClient(a.releaseDate,a.year), toTsClient(b.releaseDate,b.year));
-    else if (key==='rating') c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
-    else if (key==='runtime') c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
-    else c = (a.name||'').localeCompare(b.name||'');
-    if (c===0){ c=(a.name||'').localeCompare(b.name||''); if(c===0) c=(a.id||'').localeCompare(b.id||''); if(c===0) c=A.i-B.i; }
-    return c*dir;
-  }).map(x=>x.m);
-}
-
-async function render() {
-  const prefs = await getPrefs();
-  const lists = await getLists();
-  prefs.posterShape = prefs.posterShape || {};
-  prefs.sources = prefs.sources || { users:[], lists:[] };
-
-  function renderPills(id, arr, onRemove){
-    const wrap = document.getElementById(id); if (!wrap) return;
-    wrap.innerHTML = '';
-    (arr||[]).forEach((txt, idx)=>{
-      const pill = el('span', {class:'pill'}, [
-        el('span',{text:txt}),
-        el('span',{class:'x',text:'✕'})
-      ]);
-      pill.querySelector('.x').onclick = ()=> onRemove(idx);
-      wrap.appendChild(pill);
-      wrap.appendChild(document.createTextNode(' '));
+  function escapeHtml(str){
+    return String(str || "").replace(/[&<>"]/g,function(c){
+      return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
     });
-    if (!arr || !arr.length) wrap.textContent = '(none)';
-  }
-  renderPills('userPills', prefs.sources.users || [], (i)=>{
-    prefs.sources.users.splice(i,1);
-    saveAll();
-  });
-  renderPills('listPills', prefs.sources.lists || [], (i)=>{
-    prefs.sources.lists.splice(i,1);
-    saveAll();
-  });
-
-  // Blocked pills with Unblock action
-  {
-    const blockedWrap = document.getElementById('blockedPills');
-    if (blockedWrap) {
-      blockedWrap.innerHTML = '';
-      const blocked = prefs.blocked || [];
-      if (!blocked.length) blockedWrap.textContent = '(none)';
-      blocked.forEach(lsid=>{
-        const pill = el('span',{class:'pill'},[
-          el('span',{text:lsid}),
-          el('span',{class:'x',text:'Unblock'})
-        ]);
-        pill.querySelector('.x').onclick = async ()=>{
-          await fetch('/api/unblock-list?admin='+ADMIN, {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ lsid })
-          });
-          location.reload();
-        };
-        blockedWrap.appendChild(pill);
-        blockedWrap.appendChild(document.createTextNode(' '));
-      });
-    }
   }
 
-  const container = document.getElementById('prefs'); if (!container) return;
-  container.innerHTML = "";
-
-  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
-  const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
-  const missing   = Object.keys(lists).filter(id => !baseOrder.includes(id))
-    .sort((a,b)=>( (lists[a]?.name||a).localeCompare(lists[b]?.name||b) ));
-  const order = baseOrder.concat(missing);
-
-  const table = el('table');
-  const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:''}),
-    el('th',{text:'Enabled'}),
-    el('th',{text:'List (id)'}),
-    el('th',{text:'Items'}),
-    el('th',{text:'Default sort'}),
-    el('th',{text:'Move'}),
-    el('th',{text:'Remove'})
-  ])]);
-  table.appendChild(thead);
-  const tbody = el('tbody');
-
-  function moveRow(tr, delta){
-    if (!tr) return;
-    if (delta < 0) {
-      const prev = tr.previousElementSibling;
-      if (prev && prev.hasAttribute('data-lsid')) tbody.insertBefore(tr, prev);
-    } else if (delta > 0) {
-      const next = tr.nextElementSibling;
-      if (next && next.hasAttribute('data-lsid')) tbody.insertBefore(next, tr.nextSibling);
-    }
-  }
-
-  function makeDrawer(lsid) {
-    const tr = el('tr',{class:'drawer','data-drawer-for':lsid});
-    const td = el('td',{colspan:'7'});
-    td.appendChild(el('div',{text:'Loading…'}));
-    tr.appendChild(td);
-
-    getListItems(lsid).then(({items})=>{
-      td.innerHTML = '';
-
-      const tools = el('div',{class:'rowtools'});
-      const saveBtn = el('button',{text:'Save order'});
-      const resetBtn = el('button',{text:'Reset order'});
-      const fullBtn = el('button',{text:'Full reset'});
-      fullBtn.style.background = 'var(--danger)';
-      tools.appendChild(saveBtn);
-      tools.appendChild(resetBtn);
-      tools.appendChild(fullBtn);
-      td.appendChild(tools);
-
-      const optsWrap = el('div',{class:'rowtools'});
-      optsWrap.appendChild(el('span',{class:'mini muted',text:'Sort options shown in Stremio:'}));
-      const current = (prefs.sortOptions && prefs.sortOptions[lsid] && prefs.sortOptions[lsid].length)
-        ? new Set(prefs.sortOptions[lsid])
-        : new Set(SORT_OPTIONS);
-      SORT_OPTIONS.forEach(opt=>{
-        const lab = el('label',{class:'pill'});
-        const cb = el('input',{type:'checkbox'});
-        cb.checked = current.has(opt);
-        cb.onchange = ()=>{
-          const arr = Array.from(optsWrap.querySelectorAll('input')).map((c,i)=>c.checked?SORT_OPTIONS[i]:null).filter(Boolean);
-          prefs.sortOptions = prefs.sortOptions || {};
-          prefs.sortOptions[lsid] = arr.length ? arr : SORT_OPTIONS.slice();
-        };
-        lab.appendChild(cb);
-        lab.appendChild(el('span',{text:opt}));
-        optsWrap.appendChild(lab);
-      });
-      td.appendChild(optsWrap);
-
-      const ul = el('ul',{class:'thumbs'});
-      td.appendChild(ul);
-
-      function rebuildThumbs(list){
-        ul.innerHTML='';
-        list.forEach(it=>{
-          const li = el('li',{class:'thumb',draggable:'true','data-id':it.id});
-          const img = el('img',{class:'thumb-img',src:it.posterPortrait || it.poster || '',alt:''});
-          li.appendChild(img);
-          const textBox = el('div',{},[
-            el('div',{class:'title',text:it.name || it.id}),
-            el('div',{class:'id',text:it.id})
-          ]);
-          li.appendChild(textBox);
-          const del = el('div',{class:'del',text:'×'});
-          del.onclick = async (ev)=>{
-            ev.stopPropagation();
-            await fetch('/api/list-remove?admin='+ADMIN,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lsid,id:it.id})});
-            li.remove();
-          };
-          li.appendChild(del);
-          ul.appendChild(li);
-        });
-
-        const addLi = el('li',{class:'thumb add','data-add':'1'});
-        const box = el('div',{class:'addbox'});
-        box.appendChild(el('div',{class:'mini muted',text:'Add by IMDb ID (tt…)' }));
-        const inp = el('input',{placeholder:'tt1234567 or IMDb URL'});
-        box.appendChild(inp);
-        const btn = el('button',{text:'Add'});
-        btn.style.marginTop='6px';
-        btn.onclick = async (ev)=>{
-          ev.preventDefault();
-          const val = String(inp.value||'').trim();
-          if (!val) return;
-          const m = val.match(/tt\\d{7,}/i);
-          if (!m) { alert('Enter a valid tt id'); return; }
-          const id = m[0];
-          await fetch('/api/list-add?admin='+ADMIN,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lsid,id})});
-          const fresh = await getListItems(lsid);
-          rebuildThumbs(fresh.items);
-        };
-        box.appendChild(btn);
-        addLi.appendChild(box);
-        ul.appendChild(addLi);
-
-        attachThumbDnD(ul);
-      }
-
-      rebuildThumbs(items || []);
-
-      saveBtn.onclick = async (ev)=>{
-        ev.preventDefault();
-        const ids = Array.from(ul.querySelectorAll('li.thumb[data-id]')).map(li=>li.dataset.id);
-        saveBtn.disabled = true;
-        try{
-          await saveCustomOrder(lsid, ids);
-          const select = document.querySelector('tr[data-lsid="'+lsid+'"] select');
-          if (select) select.value = 'custom';
-          prefs.perListSort = prefs.perListSort || {};
-          prefs.perListSort[lsid] = 'custom';
-          alert('Custom order saved');
-        }catch(err){
-          console.error(err);
-          alert('Failed to save order');
-        }finally{
-          saveBtn.disabled = false;
-        }
-      };
-
-      resetBtn.onclick = async (ev)=>{
-        ev.preventDefault();
-        resetBtn.disabled = true;
-        try{
-          await clearCustomOrder(lsid);
-          const fresh = await getListItems(lsid);
-          rebuildThumbs(fresh.items || []);
-          const select = document.querySelector('tr[data-lsid="'+lsid+'"] select');
-          if (select && select.value === 'custom') select.value = 'name_asc';
-        }catch(err){
-          console.error(err);
-          alert('Failed to reset order');
-        }finally{
-          resetBtn.disabled = false;
-        }
-      };
-
-      fullBtn.onclick = async (ev)=>{
-        ev.preventDefault();
-        if (!confirm('Reset custom order and all add/remove edits for this list?')) return;
-        fullBtn.disabled = true;
-        try{
-          await fetch('/api/list-reset?admin='+ADMIN,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lsid})});
-          const fresh = await getListItems(lsid);
-          rebuildThumbs(fresh.items || []);
-          const select = document.querySelector('tr[data-lsid="'+lsid+'"] select');
-          if (select && select.value === 'custom') select.value = 'name_asc';
-        }catch(err){
-          console.error(err);
-          alert('Failed to full reset');
-        }finally{
-          fullBtn.disabled = false;
-        }
-      };
+  // ----- Tabs -----
+  qsa('.navtab').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      qsa('.navtab').forEach(function(b){ b.classList.remove('active'); });
+      btn.classList.add('active');
+      var v = btn.getAttribute('data-view');
+      document.body.className = 'view-' + v;
     });
-
-    return tr;
-  }
-
-  order.forEach(lsid=>{
-    const L = lists[lsid];
-    if (!L) return;
-    const tr = el('tr',{'data-lsid':lsid,draggable:'true'});
-    const chev = el('span',{class:'chev',text:'▾'});
-    const c1 = el('td',{},[chev]);
-    const c2 = el('td');
-    const cb = el('input',{type:'checkbox'});
-    cb.checked = enabledSet.has(lsid);
-    c2.appendChild(cb);
-    const c3 = el('td');
-    c3.appendChild(el('div',{text:L.name || lsid}));
-    c3.appendChild(el('div',{class:'mini muted',text:lsid}));
-    const c4 = el('td',{text:String((L.ids||[]).length)});
-    const c5 = el('td');
-    const sel = el('select');
-    SORT_OPTIONS.forEach(opt=>{
-      const o = el('option',{value:opt,text:opt});
-      sel.appendChild(o);
-    });
-    sel.value = (prefs.perListSort && prefs.perListSort[lsid]) || 'name_asc';
-    c5.appendChild(sel);
-
-    const c6 = el('td');
-    const upBtn = el('button',{class:'movebtn',text:'↑'});
-    const downBtn = el('button',{class:'movebtn',text:'↓'});
-    upBtn.onclick = (e)=>{ e.preventDefault(); moveRow(tr,-1); };
-    downBtn.onclick = (e)=>{ e.preventDefault(); moveRow(tr,1); };
-    c6.appendChild(upBtn); c6.appendChild(downBtn);
-
-    const c7 = el('td');
-    const rem = el('button',{text:'Remove'});
-    rem.style.background = 'var(--danger)';
-    rem.onclick = async (e)=>{
-      e.preventDefault();
-      if (!confirm('Remove this list and block it from re-appearing?')) return;
-      await fetch('/api/remove-list?admin='+ADMIN,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lsid})});
-      tr.nextElementSibling && tr.nextElementSibling.remove();
-      tr.remove();
-    };
-    c7.appendChild(rem);
-
-    tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4); tr.appendChild(c5); tr.appendChild(c6); tr.appendChild(c7);
-    tbody.appendChild(tr);
-
-    chev.onclick = ()=>{
-      const open = tbody.querySelector('tr.drawer[data-drawer-for="'+lsid+'"]');
-      if (open) { open.remove(); return; }
-      const drawer = makeDrawer(lsid);
-      tr.parentNode.insertBefore(drawer, tr.nextSibling);
-    };
   });
 
-  table.appendChild(tbody);
-  container.appendChild(table);
-  attachRowDnD(tbody);
+  var goAdd = qs('#goAdd');
+  if (goAdd) {
+    goAdd.addEventListener('click', function(){
+      var btn = qsa('.navtab').find(function(b){return b.getAttribute('data-view')==='sources';});
+      if (btn) btn.click();
+    });
+  }
+  var goCustom = qs('#goCustom');
+  if (goCustom) {
+    goCustom.addEventListener('click', function(){
+      var btn = qsa('.navtab').find(function(b){return b.getAttribute('data-view')==='custom';});
+      if (btn) btn.click();
+    });
+  }
 
-  const bottom = el('div',{class:'rowtools'});
-  const saveBtn = el('button',{text:'💾 Save'});
-  const statusSpan = el('span',{class:'mini muted',text:'Saving updates enabled lists, their order and default sort.'});
-  bottom.appendChild(saveBtn);
-  bottom.appendChild(statusSpan);
-  container.appendChild(bottom);
-
-  async function saveAll(){
-    const enableList = [];
-    const orderIds = [];
-    const rows = Array.from(tbody.querySelectorAll('tr[data-lsid]'));
-    rows.forEach(tr=>{
-      const id = tr.dataset.lsid;
-      orderIds.push(id);
-      const cb = tr.querySelector('input[type="checkbox"]');
-      if (cb && cb.checked) enableList.push(id);
-      const sel = tr.querySelector('select');
-      if (sel) {
-        prefs.perListSort = prefs.perListSort || {};
-        prefs.perListSort[id] = sel.value;
+  // Install button
+  var installBtn = qs('#installBtn');
+  if (installBtn) {
+    installBtn.addEventListener('click', function(){
+      try {
+        var target = 'stremio://' + encodeURIComponent(MANIFEST_URL);
+        window.location.href = target;
+      } catch(e) {
+        alert('If this button does not work, copy the manifest URL into Stremio manually.');
       }
     });
+  }
 
-    const payload = {
-      enabled: enableList,
-      order: orderIds,
-      defaultList: prefs.defaultList || '',
-      perListSort: prefs.perListSort || {},
-      sortOptions: prefs.sortOptions || {},
-      posterShape: prefs.posterShape || {},
-      upgradeEpisodes: !!prefs.upgradeEpisodes,
-      customOrder: prefs.customOrder || {},
-      sources: prefs.sources || { users:[], lists:[] },
-      blocked: prefs.blocked || []
-    };
-
-    await fetch('/api/prefs?admin='+ADMIN,{
+  // ----- API helpers -----
+  function apiGet(path){
+    var sep = path.indexOf('?') === -1 ? '?' : '&';
+    return fetch(path + sep + 'admin=' + encodeURIComponent(ADMIN))
+      .then(function(r){
+        if (!r.ok) throw new Error('GET ' + path + ' -> ' + r.status);
+        return r.json();
+      });
+  }
+  function apiPost(path, body, expectJson){
+    var sep = path.indexOf('?') === -1 ? '?' : '&';
+    return fetch(path + sep + 'admin=' + encodeURIComponent(ADMIN), {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
+      body: body ? JSON.stringify(body) : '{}'
+    }).then(function(r){
+      if (!r.ok) return r.text().then(function(t){ throw new Error(t || ('HTTP ' + r.status)); });
+      return expectJson ? r.json() : r.text();
     });
   }
 
-  saveBtn.onclick = async function(e){
-    e.preventDefault();
-    saveBtn.disabled = true;
-    const old = statusSpan.textContent;
-    statusSpan.textContent = 'Saving…';
-    try {
-      await saveAll();
-      statusSpan.textContent = 'Saved ✓ (manifest will bump if needed)';
-    } catch (err) {
-      console.error(err);
-      statusSpan.textContent = 'Save failed – see logs';
-    } finally {
-      saveBtn.disabled = false;
-      setTimeout(() => { statusSpan.textContent = old; }, 4000);
-    }
+  // ----- Global state -----
+  var state = {
+    lists:null,
+    prefs:null,
+    selected:null,
+    currentItems:[],
+    currentOrder:[]
   };
-}
-</script>
-</body>
-</html>`);
-});
 
-// ------- BOOT -------
+  function getOrderedIds(){
+    if (!state.lists) return [];
+    var allIds = Object.keys(state.lists);
+    var enabledSet = new Set(
+      state.prefs && state.prefs.enabled && state.prefs.enabled.length
+        ? state.prefs.enabled
+        : allIds
+    );
+    var base = Array.isArray(state.prefs && state.prefs.order)
+      ? state.prefs.order.filter(function(id){ return state.lists[id]; })
+      : [];
+    var missing = allIds.filter(function(id){ return base.indexOf(id) === -1; })
+      .sort(function(a,b){
+        var na = (state.lists[a].name || a);
+        var nb = (state.lists[b].name || b);
+        return na.localeCompare(nb);
+      });
+    var ordered = base.concat(missing);
+    return ordered.filter(function(id){ return enabledSet.has(id); });
+  }
+
+  function buildCustomizeTable(){
+    var tbody = qs('#listsTbody');
+    if (!tbody || !state.lists || !state.prefs) return;
+    tbody.innerHTML = '';
+    var ids = getOrderedIds();
+    ids.forEach(function(lsid){
+      var L = state.lists[lsid];
+      var tr = document.createElement('tr');
+      tr.setAttribute('data-lsid', lsid);
+
+      // enabled
+      var tdEn = document.createElement('td');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      var enabledList = state.prefs.enabled && state.prefs.enabled.length ? state.prefs.enabled : ids;
+      cb.checked = enabledList.indexOf(lsid) !== -1;
+      cb.addEventListener('change', function(){
+        var set = new Set(state.prefs.enabled || []);
+        if (cb.checked) set.add(lsid); else set.delete(lsid);
+        state.prefs.enabled = Array.from(set);
+      });
+      tdEn.appendChild(cb);
+      tr.appendChild(tdEn);
+
+      // name
+      var tdName = document.createElement('td');
+      var titleDiv = document.createElement('div');
+      titleDiv.innerHTML = '<b>' + escapeHtml(L.name || lsid) + '</b>';
+      var idDiv = document.createElement('div');
+      idDiv.className = 'mini muted';
+      idDiv.textContent = lsid;
+      tdName.appendChild(titleDiv);
+      tdName.appendChild(idDiv);
+      tr.appendChild(tdName);
+
+      // items
+      var tdItems = document.createElement('td');
+      tdItems.textContent = (L.ids && L.ids.length) ? L.ids.length : 0;
+      tr.appendChild(tdItems);
+
+      // default sort
+      var tdSort = document.createElement('td');
+      var sel = document.createElement('select');
+      ALL_SORTS.forEach(function(s){
+        var opt = document.createElement('option');
+        opt.value = s;
+        opt.textContent = s;
+        sel.appendChild(opt);
+      });
+      var cur = (state.prefs.perListSort && state.prefs.perListSort[lsid]) || 'name_asc';
+      if (ALL_SORTS.indexOf(cur) === -1) cur = 'name_asc';
+      sel.value = cur;
+      sel.addEventListener('change', function(){
+        state.prefs.perListSort = state.prefs.perListSort || {};
+        state.prefs.perListSort[lsid] = sel.value;
+      });
+      tdSort.appendChild(sel);
+      tr.appendChild(tdSort);
+
+      // move buttons
+      var tdMove = document.createElement('td');
+      var upBtn = document.createElement('button');
+      upBtn.type = 'button';
+      upBtn.className = 'movebtn';
+      upBtn.textContent = '↑';
+      upBtn.addEventListener('click', function(e){
+        e.stopPropagation();
+        moveList(lsid, -1);
+      });
+      var dnBtn = document.createElement('button');
+      dnBtn.type = 'button';
+      dnBtn.className = 'movebtn';
+      dnBtn.textContent = '↓';
+      dnBtn.addEventListener('click', function(e){
+        e.stopPropagation();
+        moveList(lsid, 1);
+      });
+      tdMove.appendChild(upBtn);
+      tdMove.appendChild(dnBtn);
+      tr.appendChild(tdMove);
+
+      // remove
+      var tdRem = document.createElement('td');
+      var rmBtn = document.createElement('button');
+      rmBtn.type = 'button';
+      rmBtn.style.background = 'var(--danger)';
+      rmBtn.textContent = 'Remove';
+      rmBtn.addEventListener('click', function(e){
+        e.stopPropagation();
+        if (!confirm('Remove this list and block it from future discovery?')) return;
+        apiPost('/api/remove-list', { lsid: lsid })
+          .then(function(){
+            qs('#prefsStatus').textContent = 'Removed ' + (L.name || lsid) + '.';
+            loadState();
+          })
+          .catch(function(err){ alert(err.message || err); });
+      });
+      tdRem.appendChild(rmBtn);
+      tr.appendChild(tdRem);
+
+      // clicking row opens editor
+      tr.addEventListener('click', function(e){
+        // ignore clicks on buttons or inputs
+        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+        openListEditor(lsid);
+      });
+
+      tbody.appendChild(tr);
+    });
+
+    // auto-select first list if none selected
+    if (!state.selected && ids.length) openListEditor(ids[0]);
+  }
+
+  function moveList(lsid, dir){
+    if (!state.prefs) return;
+    var allIds = Object.keys(state.lists || {});
+    var order = Array.isArray(state.prefs.order) && state.prefs.order.length
+      ? state.prefs.order.slice()
+      : allIds.slice();
+
+    var idx = order.indexOf(lsid);
+    if (idx === -1) return;
+    var newIdx = idx + dir;
+    if (newIdx < 0 || newIdx >= order.length) return;
+
+    var tmp = order[idx];
+    order[idx] = order[newIdx];
+    order[newIdx] = tmp;
+
+    state.prefs.order = order;
+    buildCustomizeTable();
+  }
+
+  // ----- List editor (items, custom order, shape) -----
+  function openListEditor(lsid){
+    if (!state.lists || !state.prefs) return;
+    var L = state.lists[lsid];
+    if (!L) return;
+    state.selected = lsid;
+
+    var editor = qs('#listEditor');
+    editor.innerHTML = '';
+
+    var heading = document.createElement('h4');
+    heading.textContent = 'Edit list: ' + (L.name || lsid);
+    editor.appendChild(heading);
+
+    var info = document.createElement('div');
+    info.className = 'mini muted';
+    info.style.marginBottom = '8px';
+    info.textContent = (L.url || '');
+    editor.appendChild(info);
+
+    // poster shape radios
+    var shapeRow = document.createElement('div');
+    shapeRow.className = 'rowtools';
+    var span = document.createElement('span');
+    span.className = 'mini muted';
+    span.textContent = 'Poster shape in Stremio:';
+    shapeRow.appendChild(span);
+
+    var currentShape = (state.prefs.posterShape && state.prefs.posterShape[lsid]) || 'poster';
+    ['poster','landscape'].forEach(function(mode){
+      var lab = document.createElement('label');
+      lab.className = 'pill';
+      var rb = document.createElement('input');
+      rb.type = 'radio';
+      rb.name = 'shape_' + lsid;
+      rb.value = mode;
+      rb.checked = (mode === currentShape);
+      rb.addEventListener('change', function(){
+        state.prefs.posterShape = state.prefs.posterShape || {};
+        state.prefs.posterShape[lsid] = mode;
+      });
+      lab.appendChild(rb);
+      lab.appendChild(document.createTextNode(mode === 'poster' ? 'Poster (vertical)' : 'Landscape'));
+      shapeRow.appendChild(lab);
+    });
+    editor.appendChild(shapeRow);
+
+    // thumbs container
+    var ul = document.createElement('ul');
+    ul.id = 'thumbsGrid';
+    ul.className = 'thumbs shape-' + currentShape;
+    editor.appendChild(ul);
+
+    // Add box
+    var addLi = document.createElement('li');
+    addLi.className = 'thumb add';
+    var addBox = document.createElement('div');
+    addBox.className = 'addbox';
+    addBox.innerHTML = '<div class="mini muted">Add by IMDb ID (tt.... or URL)</div>';
+    var addInput = document.createElement('input');
+    addInput.type = 'text';
+    addInput.placeholder = 'tt1234567 or IMDb URL';
+    addBox.appendChild(addInput);
+    addLi.appendChild(addBox);
+    ul.appendChild(addLi);
+
+    function doAdd(){
+      var val = (addInput.value || '').trim();
+      if (!val) return;
+      apiPost('/api/list-add', { lsid: lsid, id: val })
+        .then(function(){
+          addInput.value = '';
+          refreshListItems(lsid, ul, addLi);
+        })
+        .catch(function(err){ alert(err.message || err); });
+    }
+    addInput.addEventListener('keydown', function(e){
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doAdd();
+      }
+    });
+
+    // buttons row
+    var btnRow = document.createElement('div');
+    btnRow.className = 'rowtools';
+    var saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.textContent = 'Save order';
+    var resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'btn2';
+    resetBtn.textContent = 'Full reset';
+    var status = document.createElement('span');
+    status.className = 'statusText';
+    btnRow.appendChild(saveBtn);
+    btnRow.appendChild(resetBtn);
+    btnRow.appendChild(status);
+    editor.appendChild(btnRow);
+
+    saveBtn.addEventListener('click', function(){
+      var order = state.currentOrder.slice();
+      apiPost('/api/custom-order', { lsid: lsid, order: order }, true)
+        .then(function(j){
+          status.textContent = 'Saved custom order ✓ (rev ' + (j.manifestRev || '?') + ')';
+        })
+        .catch(function(err){
+          status.textContent = 'Failed: ' + (err.message || err);
+        });
+    });
+
+    resetBtn.addEventListener('click', function(){
+      if (!confirm('Reset added/removed items and custom order for this list?')) return;
+      apiPost('/api/list-reset', { lsid: lsid })
+        .then(function(){
+          status.textContent = 'List reset. Re-loading items…';
+          refreshListItems(lsid, ul, addLi);
+        })
+        .catch(function(err){ status.textContent = 'Failed: ' + (err.message || err); });
+    });
+
+    refreshListItems(lsid, ul, addLi);
+  }
+
+  function refreshListItems(lsid, ul, addLi){
+    state.currentItems = [];
+    state.currentOrder = [];
+    // clear all thumbs except add box
+    Array.from(ul.querySelectorAll('.thumb')).forEach(function(el){
+      if (el !== addLi) ul.removeChild(el);
+    });
+    apiGet('/api/list-items?lsid=' + encodeURIComponent(lsid))
+      .then(function(j){
+        var items = (j && j.items) || [];
+        state.currentItems = items;
+        state.currentOrder = items.map(function(it){ return it.id; });
+        items.forEach(function(it){
+          var li = document.createElement('li');
+          li.className = 'thumb';
+          li.setAttribute('draggable', 'true');
+          li.setAttribute('data-id', it.id);
+
+          var img = document.createElement('img');
+          img.className = 'thumb-img';
+          img.src = it.posterPortrait || it.poster || '';
+          img.alt = it.name || it.id;
+          li.appendChild(img);
+
+          var txtBox = document.createElement('div');
+          var tTitle = document.createElement('div');
+          tTitle.className = 'title';
+          tTitle.textContent = it.name || it.id;
+          var tId = document.createElement('div');
+          tId.className = 'id';
+          tId.textContent = it.id;
+          txtBox.appendChild(tTitle);
+          txtBox.appendChild(tId);
+          li.appendChild(txtBox);
+
+          var del = document.createElement('div');
+          del.className = 'del';
+          del.textContent = '×';
+          del.title = 'Remove from this list';
+          del.addEventListener('click', function(e){
+            e.stopPropagation();
+            if (!confirm('Remove ' + (it.name || it.id) + ' from this list?')) return;
+            apiPost('/api/list-remove', { lsid: lsid, id: it.id })
+              .then(function(){
+                refreshListItems(lsid, ul, addLi);
+              })
+              .catch(function(err){ alert(err.message || err); });
+          });
+          li.appendChild(del);
+
+          ul.insertBefore(li, addLi);
+        });
+
+        setupDrag(ul, addLi);
+      })
+      .catch(function(err){
+        console.error(err);
+      });
+  }
+
+  function setupDrag(ul, addLi){
+    var dragging = null;
+
+    Array.from(ul.querySelectorAll('.thumb')).forEach(function(li){
+      if (li === addLi) return;
+      li.addEventListener('dragstart', function(e){
+        dragging = li;
+        li.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      li.addEventListener('dragend', function(){
+        if (dragging) dragging.classList.remove('dragging');
+        dragging = null;
+      });
+    });
+
+    ul.addEventListener('dragover', function(e){
+      if (!dragging) return;
+      e.preventDefault();
+      var target = e.target.closest('.thumb');
+      if (!target || target === dragging || target === addLi) return;
+      var rect = target.getBoundingClientRect();
+      var before = (e.clientY - rect.top) < rect.height / 2;
+      if (before) ul.insertBefore(dragging, target);
+      else ul.insertBefore(dragging, target.nextSibling);
+      recomputeOrder(ul, addLi);
+    });
+  }
+
+  function recomputeOrder(ul, addLi){
+    var ids = [];
+    Array.from(ul.querySelectorAll('.thumb')).forEach(function(li){
+      if (li === addLi) return;
+      var id = li.getAttribute('data-id');
+      if (id) ids.push(id);
+    });
+    state.currentOrder = ids;
+  }
+
+  // ----- Save prefs (layout) -----
+  var btnSavePrefs = qs('#btnSavePrefs');
+  if (btnSavePrefs) {
+    btnSavePrefs.addEventListener('click', function(){
+      if (!state.prefs) return;
+      var body = {
+        enabled: state.prefs.enabled || [],
+        order: state.prefs.order || [],
+        defaultList: state.prefs.defaultList || '',
+        perListSort: state.prefs.perListSort || {},
+        sortOptions: state.prefs.sortOptions || {},
+        posterShape: state.prefs.posterShape || {},
+        upgradeEpisodes: !!state.prefs.upgradeEpisodes,
+        sources: state.prefs.sources || { users: [], lists: [] },
+        blocked: state.prefs.blocked || []
+      };
+      var status = qs('#prefsStatus');
+      status.textContent = 'Saving…';
+      apiPost('/api/prefs', body, false)
+        .then(function(txt){
+          status.textContent = 'Saved ✓ ' + txt;
+        })
+        .catch(function(err){
+          status.textContent = 'Failed: ' + (err.message || err);
+        });
+    });
+  }
+
+  // ----- Add sources card -----
+  var btnAddSources = qs('#btnAddSources');
+  if (btnAddSources) {
+    btnAddSources.addEventListener('click', function(){
+      var usersRaw = (qs('#srcUsers').value || '').split(/\\n+/).map(function(s){return s.trim();}).filter(Boolean);
+      var listsRaw = (qs('#srcLists').value || '').split(/\\n+/).map(function(s){return s.trim();}).filter(Boolean);
+      var status = qs('#sourcesStatus');
+      status.textContent = 'Saving & syncing…';
+      apiPost('/api/add-sources', { users: usersRaw, lists: listsRaw }, false)
+        .then(function(txt){
+          status.textContent = 'Done ✓ ' + txt;
+          loadState();
+        })
+        .catch(function(err){
+          status.textContent = 'Failed: ' + (err.message || err);
+        });
+    });
+  }
+
+  // ----- Initial load -----
+  function loadState(){
+    Promise.all([ apiGet('/api/lists'), apiGet('/api/prefs') ])
+      .then(function(res){
+        state.lists = res[0];
+        state.prefs = res[1];
+        buildCustomizeTable();
+      })
+      .catch(function(err){
+        console.error(err);
+      });
+  }
+
+  loadState();
+})();
+</script>
+</body></html>`);
+});
+ 
+// ----------------- BOOTSTRAP -----------------
+
 (async () => {
   try {
     const snap = await loadSnapshot();
     if (snap) {
-      LISTS = snap.lists || LISTS;
-      PREFS = snap.prefs || PREFS;
+      LISTS = snap.lists || Object.create(null);
+      PREFS = { ...PREFS, ...(snap.prefs || {}) };
       LAST_SYNC_AT = snap.lastSyncAt || 0;
       MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
       if (snap.fallback) {
@@ -2785,23 +2691,24 @@ async function render() {
       if (snap.ep2ser) {
         for (const [k, v] of Object.entries(snap.ep2ser)) EP2SER.set(k, v);
       }
+      LAST_MANIFEST_KEY = manifestKey();
       console.log(
-        `[BOOT] Loaded snapshot with ${
-          Object.keys(LISTS).length
-        } lists, manifest rev ${MANIFEST_REV}`
+        `[BOOT] Loaded snapshot with ${Object.keys(LISTS).length} lists.`
       );
     } else {
       console.log("[BOOT] No snapshot found, will run initial sync.");
       await fullSync({ rediscover: true });
-      scheduleNextSync();
     }
   } catch (e) {
-    console.error("[BOOT] snapshot load failed:", e);
+    console.error("[BOOT] Error loading snapshot, running full sync:", e);
+    await fullSync({ rediscover: true });
   }
+
+  scheduleNextSync();
 
   app.listen(PORT, HOST, () => {
     console.log(
-      `[BOOT] My Lists addon v${baseManifest.version} listening on http://${HOST}:${PORT}`
+      `[BOOT] My Lists addon v12.4.1 listening on http://${HOST}:${PORT}`
     );
   });
 })();
