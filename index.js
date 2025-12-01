@@ -1631,14 +1631,14 @@ app.get("/admin", async (req,res)=>{
         </div>
         <div><button id="addList" type="button">Add</button></div>
       </div>
-      <div style="margin-top:10px">
-        <div class="mini muted">Your IMDb/Trakt users:</div>
+
         <div id="userPills"></div>
       </div>
       <div style="margin-top:8px">
         <div class="mini muted">Your extra lists:</div>
         <div id="listPills"></div>
       </div>
+
       <div style="margin-top:12px">
         <div class="mini muted">Blocked lists (won't re-add on sync):</div>
         <div id="blockedPills"></div>
@@ -1723,6 +1723,7 @@ function normalizeListIdOrUrl2(v){
     return v.startsWith('http') ? v : 'https://www.imdb.com'+v;
   }
   return null;
+
 }
 async function addSources(payload){
   await fetch('/api/add-sources?admin='+ADMIN, {
@@ -1735,6 +1736,8 @@ function wireAddButtons(){
   const listBtn = document.getElementById('addList');
   const userInp = document.getElementById('userInput');
   const listInp = document.getElementById('listInput');
+  const traktUserBtn = document.getElementById('addTraktUser');
+  const traktUserInp = document.getElementById('traktUserInput');
 
   userBtn.onclick = async (e) => {
     e.preventDefault();
@@ -1759,6 +1762,7 @@ function wireAddButtons(){
     try { await addSources({ users:[], lists:[url] }); location.reload(); }
     finally { listBtn.disabled = false; }
   };
+
 
 }
 
@@ -1892,6 +1896,10 @@ async function render() {
   })();
   renderPills('listPills', prefs.sources?.lists || [], (i)=>{
     prefs.sources.lists.splice(i,1);
+    saveAll('Saved');
+  });
+  renderPills('traktUserPills', prefs.sources?.traktUsers || [], (i)=>{
+    prefs.sources.traktUsers.splice(i,1);
     saveAll('Saved');
   });
 
