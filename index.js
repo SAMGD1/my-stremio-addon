@@ -1620,8 +1620,8 @@ app.get("/admin", async (req,res)=>{
       <p class="mini muted" style="margin-top:6px;">We merge your main user (+ extras) and explicit list URLs/IDs. Removing a list also blocks it so it won’t re-appear on the next sync.</p>
 
       <div class="row">
-        <div><label class="mini">Add IMDb <b>User /lists</b> URL</label>
-          <input id="userInput" placeholder="https://www.imdb.com/user/urXXXXXXX/lists/" />
+        <div><label class="mini">Add IMDb/Trakt <b>User</b> URL</label>
+          <input id="userInput" placeholder="IMDb user /lists URL or Trakt user" />
         </div>
         <div><button id="addUser" type="button">Add</button></div>
       </div>
@@ -1631,24 +1631,12 @@ app.get("/admin", async (req,res)=>{
         </div>
         <div><button id="addList" type="button">Add</button></div>
       </div>
-      <div class="row">
-        <div><label class="mini">Add Trakt <b>User</b> (discover public lists)</label>
-          <input id="traktUserInput" placeholder="https://trakt.tv/users/username/lists" />
-        </div>
-        <div><button id="addTraktUser" type="button">Add</button></div>
-      </div>
 
-      <div style="margin-top:10px">
-        <div class="mini muted">Your IMDb users:</div>
         <div id="userPills"></div>
       </div>
       <div style="margin-top:8px">
         <div class="mini muted">Your extra lists:</div>
         <div id="listPills"></div>
-      </div>
-      <div style="margin-top:8px">
-        <div class="mini muted">Trakt users to scan:</div>
-        <div id="traktUserPills"></div>
       </div>
 
       <div style="margin-top:12px">
@@ -1713,9 +1701,13 @@ document.addEventListener('DOMContentLoaded', () => {
 function normalizeUserListsUrl(v){
   v = String(v||'').trim();
   if (!v) return null;
-  if (/imdb\\.com\\/user\\/ur\\d+\\/lists/i.test(v)) return v;
+  if (/imdb\\.com\\/user\\/ur\\d+\\/lists/i.test(v)) return { kind:'imdb', value: v };
   const m = v.match(/ur\\d{6,}/i);
-  return m ? 'https://www.imdb.com/user/'+m[0]+'/lists/' : null;
+  if (m) return { kind:'imdb', value: 'https://www.imdb.com/user/'+m[0]+'/lists/' };
+
+  const trakt = v.match(/trakt\\.tv\\/users\\/([^/]+)/i);
+  if (trakt) return { kind:'trakt', value: 'https://trakt.tv/users/' + trakt[1] + '/lists' };
+  return { kind:'trakt', value: 'https://trakt.tv/users/' + v + '/lists' };
 }
 function normalizeListIdOrUrl2(v){
   v = String(v||'').trim();
@@ -1731,13 +1723,7 @@ function normalizeListIdOrUrl2(v){
     return v.startsWith('http') ? v : 'https://www.imdb.com'+v;
   }
   return null;
-}
-function normalizeTraktUserUrl(v){
-  v = String(v||'').trim();
-  if (!v) return null;
-  const m = v.match(/trakt\\.tv\\/users\\/([^/]+)/i);
-  if (m) return 'https://trakt.tv/users/' + m[1] + '/lists';
-  return v ? 'https://trakt.tv/users/' + v + '/lists' : null;
+
 }
 async function addSources(payload){
   await fetch('/api/add-sources?admin='+ADMIN, {
@@ -1755,10 +1741,16 @@ function wireAddButtons(){
 
   userBtn.onclick = async (e) => {
     e.preventDefault();
-    const url = normalizeUserListsUrl(userInp.value);
-    if (!url) { alert('Enter a valid IMDb user /lists URL or ur… id'); return; }
+    const norm = normalizeUserListsUrl(userInp.value);
+    if (!norm) { alert('Enter a valid IMDb user /lists URL, ur… id, or Trakt user'); return; }
     userBtn.disabled = true;
-    try { await addSources({ users:[url], lists:[] }); location.reload(); }
+    try {
+      const payload = { users:[], lists:[], traktUsers:[] };
+      if (norm.kind === 'trakt') payload.traktUsers.push(norm.value);
+      else payload.users.push(norm.value);
+      await addSources(payload);
+      location.reload();
+    }
     finally { userBtn.disabled = false; }
   };
 
@@ -1771,14 +1763,7 @@ function wireAddButtons(){
     finally { listBtn.disabled = false; }
   };
 
-  traktUserBtn.onclick = async (e) => {
-    e.preventDefault();
-    const url = normalizeTraktUserUrl(traktUserInp.value);
-    if (!url) { alert('Enter a valid Trakt user URL or username'); return; }
-    traktUserBtn.disabled = true;
-    try { await addSources({ users:[], lists:[], traktUsers:[url] }); location.reload(); }
-    finally { traktUserBtn.disabled = false; }
-  };
+
 }
 
 function el(tag, attrs={}, kids=[]) {
@@ -1889,10 +1874,26 @@ async function render() {
     });
     if (!arr || !arr.length) wrap.textContent = '(none)';
   }
-  renderPills('userPills', prefs.sources?.users || [], (i)=>{
-    prefs.sources.users.splice(i,1);
-    saveAll('Saved');
-  });
+  (function renderUserPills(){
+    const wrap = document.getElementById('userPills'); wrap.innerHTML = '';
+    const entries = [];
+    (prefs.sources?.users || []).forEach((u,i)=>entries.push({ kind:'imdb', value:u, idx:i }));
+    (prefs.sources?.traktUsers || []).forEach((u,i)=>entries.push({ kind:'trakt', value:u, idx:i }));
+    if (!entries.length) { wrap.textContent = '(none)'; return; }
+    entries.forEach(entry=>{
+      const pill = el('span', {class:'pill'}, [
+        el('span',{text:(entry.kind==='trakt'?'Trakt: ':'IMDb: ')+entry.value}),
+        el('span',{class:'x',text:'✕'})
+      ]);
+      pill.querySelector('.x').onclick = ()=>{
+        if (entry.kind==='trakt') prefs.sources.traktUsers.splice(entry.idx,1);
+        else prefs.sources.users.splice(entry.idx,1);
+        saveAll('Saved');
+      };
+      wrap.appendChild(pill);
+      wrap.appendChild(document.createTextNode(' '));
+    });
+  })();
   renderPills('listPills', prefs.sources?.lists || [], (i)=>{
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
