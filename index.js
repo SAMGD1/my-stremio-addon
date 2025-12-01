@@ -2389,7 +2389,9 @@ document.addEventListener('DOMContentLoaded', () => {
   } finally {
     scheduleNextSync();
     app.listen(PORT, HOST, () => {
-      console.log(\`My Lists addon listening on http://\${HOST}:\${PORT}\`);
+      console.log(
+        "My Lists addon listening on http://" + HOST + ":" + PORT
+      );
     });
   }
 })();
