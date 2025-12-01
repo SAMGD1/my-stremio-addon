@@ -1632,11 +1632,21 @@ app.get("/admin", async (req,res)=>{
         <div><button id="addList" type="button">Add</button></div>
       </div>
 
+      <div style="margin-top:10px">
+        <div class="mini muted">Your IMDb users:</div>
         <div id="userPills"></div>
+      </div>
+      <div style="margin-top:8px">
+        <div class="mini muted">Trakt users to scan:</div>
+        <div id="traktUserPills"></div>
       </div>
       <div style="margin-top:8px">
         <div class="mini muted">Your extra lists:</div>
         <div id="listPills"></div>
+      </div>
+      <div style="margin-top:12px">
+        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+        <div id="blockedPills"></div>
       </div>
 
       <div style="margin-top:12px">
@@ -1874,6 +1884,14 @@ async function render() {
     });
     if (!arr || !arr.length) wrap.textContent = '(none)';
   }
+  renderPills('userPills', prefs.sources?.users || [], (i)=>{
+    prefs.sources.users.splice(i,1);
+    saveAll('Saved');
+  });
+  renderPills('traktUserPills', prefs.sources?.traktUsers || [], (i)=>{
+    prefs.sources.traktUsers.splice(i,1);
+    saveAll('Saved');
+  });
   (function renderUserPills(){
     const wrap = document.getElementById('userPills'); wrap.innerHTML = '';
     const entries = [];
