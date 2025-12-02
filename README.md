@@ -9,6 +9,8 @@ This project turns IMDb and Trakt lists into cached Stremio catalogs with a buil
 - Per-list sort options (IMDb order, IMDb popularity when available, IMDb release date order when available, rating/runtime/name/date, or custom order) with manifest version bumping when catalogs change.
 - Optional GitHub-based snapshot persistence so the addon remembers state across restarts.
 - Catalogs are exposed as movie catalogs to keep sort controls available on Stremio mobile clients.
+- Per-list sort options (IMDb order, IMDb release date order when available, rating/runtime/name/date, or custom order) with manifest version bumping when catalogs change.
+- Optional GitHub-based snapshot persistence so the addon remembers state across restarts.
 
 ## Requirements
 - Node.js 18 or newer.

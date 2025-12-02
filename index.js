@@ -1660,6 +1660,11 @@ app.get("/admin", async (req,res)=>{
         <div id="blockedPills"></div>
       </div>
 
+      <div style="margin-top:12px">
+        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+        <div id="blockedPills"></div>
+      </div>
+
       <h4 style="margin-top:14px">Discovered</h4>
       <ul>${disc}</ul>
     </div>
@@ -1739,6 +1744,7 @@ function normalizeListIdOrUrl2(v){
     return v.startsWith('http') ? v : 'https://www.imdb.com'+v;
   }
   return null;
+
 }
 async function addSources(payload){
   await fetch('/api/add-sources?admin='+ADMIN, {
@@ -1751,6 +1757,8 @@ function wireAddButtons(){
   const listBtn = document.getElementById('addList');
   const userInp = document.getElementById('userInput');
   const listInp = document.getElementById('listInput');
+  const traktUserBtn = document.getElementById('addTraktUser');
+  const traktUserInp = document.getElementById('traktUserInput');
 
   userBtn.onclick = async (e) => {
     e.preventDefault();
@@ -1775,6 +1783,7 @@ function wireAddButtons(){
     try { await addSources({ users:[], lists:[url] }); location.reload(); }
     finally { listBtn.disabled = false; }
   };
+
 
 }
 
@@ -1894,8 +1903,32 @@ async function render() {
     prefs.sources.traktUsers.splice(i,1);
     saveAll('Saved');
   });
+  (function renderUserPills(){
+    const wrap = document.getElementById('userPills'); wrap.innerHTML = '';
+    const entries = [];
+    (prefs.sources?.users || []).forEach((u,i)=>entries.push({ kind:'imdb', value:u, idx:i }));
+    (prefs.sources?.traktUsers || []).forEach((u,i)=>entries.push({ kind:'trakt', value:u, idx:i }));
+    if (!entries.length) { wrap.textContent = '(none)'; return; }
+    entries.forEach(entry=>{
+      const pill = el('span', {class:'pill'}, [
+        el('span',{text:(entry.kind==='trakt'?'Trakt: ':'IMDb: ')+entry.value}),
+        el('span',{class:'x',text:'✕'})
+      ]);
+      pill.querySelector('.x').onclick = ()=>{
+        if (entry.kind==='trakt') prefs.sources.traktUsers.splice(entry.idx,1);
+        else prefs.sources.users.splice(entry.idx,1);
+        saveAll('Saved');
+      };
+      wrap.appendChild(pill);
+      wrap.appendChild(document.createTextNode(' '));
+    });
+  })();
   renderPills('listPills', prefs.sources?.lists || [], (i)=>{
     prefs.sources.lists.splice(i,1);
+    saveAll('Saved');
+  });
+  renderPills('traktUserPills', prefs.sources?.traktUsers || [], (i)=>{
+    prefs.sources.traktUsers.splice(i,1);
     saveAll('Saved');
   });
 
