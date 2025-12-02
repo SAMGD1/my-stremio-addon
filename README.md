@@ -6,6 +6,9 @@ This project turns IMDb and Trakt lists into cached Stremio catalogs with a buil
 - Imports IMDb lists (including multi-page lists) and public Trakt lists, with episode-to-series upgrades when desired.
 - Discovers lists from configured IMDb users, explicit IMDb/Trakt list URLs, IMDb chart/search shortcuts, and optional fallback list IDs.
 - Admin console provides snapshot view, add sources page, and customize page with drag-and-drop **and** arrow buttons for remote-friendly ordering.
+- Per-list sort options (IMDb order, IMDb popularity when available, IMDb release date order when available, rating/runtime/name/date, or custom order) with manifest version bumping when catalogs change.
+- Optional GitHub-based snapshot persistence so the addon remembers state across restarts.
+- Catalogs are exposed as movie catalogs to keep sort controls available on Stremio mobile clients.
 - Per-list sort options (IMDb order, IMDb release date order when available, rating/runtime/name/date, or custom order) with manifest version bumping when catalogs change.
 - Optional GitHub-based snapshot persistence so the addon remembers state across restarts.
 
