@@ -786,6 +786,7 @@ async function fullSync({ rediscover = true } = {}) {
           try {
             const asc  = await fetchImdbOrder(url, "release_date,asc");
             const desc = await fetchImdbOrder(url, "release_date,desc");
+            const pop  = await fetchImdbOrder(url, "moviemeter,desc");
             const pop  = await fetchImdbOrder(url, "moviemeter,asc");
             list.orders = list.orders || {};
             list.orders.date_asc  = asc.slice();
