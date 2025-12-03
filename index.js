@@ -49,8 +49,10 @@ const SORT_OPTIONS = [
   "date_asc","date_desc",
   "rating_asc","rating_desc",
   "runtime_asc","runtime_desc",
-  "name_asc","name_desc"
+  "name_asc","name_desc",
+  "popularity"           // NEW: IMDb popularity (Moviemeter, most popular first)
 ];
+
 const VALID_SORT = new Set(SORT_OPTIONS);
 
 // ----------------- STATE -----------------
@@ -783,18 +785,27 @@ async function fullSync({ rediscover = true } = {}) {
         }
 
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
-          try {
-            const asc  = await fetchImdbOrder(url, "release_date,asc");
-            const desc = await fetchImdbOrder(url, "release_date,desc");
-            list.orders = list.orders || {};
-            list.orders.date_asc  = asc.slice();
-            list.orders.date_desc = desc.slice();
-            asc.forEach(tt => uniques.add(tt));
-            desc.forEach(tt => uniques.add(tt));
-          } catch (e) {
-            console.warn("[SYNC] release_date sort fetch failed for", id, e.message);
-          }
-        }
+  try {
+    // Release date orders
+    const asc  = await fetchImdbOrder(url, "release_date,asc");
+    const desc = await fetchImdbOrder(url, "release_date,desc");
+
+    // Popularity (IMDb Moviemeter) – "moviemeter,asc" means most popular first
+    const popularityRaw = await fetchImdbOrder(url, "moviemeter,asc");
+
+    list.orders = list.orders || {};
+    list.orders.date_asc  = asc.slice();
+    list.orders.date_desc = desc.slice();
+    list.orders.popularity = popularityRaw.slice(); // our canonical popularity order
+
+    asc.forEach(tt => uniques.add(tt));
+    desc.forEach(tt => uniques.add(tt));
+    popularityRaw.forEach(tt => uniques.add(tt));
+  } catch (e) {
+    console.warn("[SYNC] release_date / popularity sort fetch failed for", id, e.message);
+  }
+}
+
       }
 
       list.ids = raw.slice();
@@ -830,9 +841,11 @@ async function fullSync({ rediscover = true } = {}) {
       for (const id of Object.keys(next)) {
         next[id].ids = remap(next[id].ids);
         next[id].orders = next[id].orders || {};
-        if (next[id].orders.date_asc)  next[id].orders.date_asc  = remap(next[id].orders.date_asc);
-        if (next[id].orders.date_desc) next[id].orders.date_desc = remap(next[id].orders.date_desc);
-        next[id].orders.imdb = next[id].ids.slice();
+        if (next[id].orders.date_asc)      next[id].orders.date_asc      = remap(next[id].orders.date_asc);
+if (next[id].orders.date_desc)     next[id].orders.date_desc     = remap(next[id].orders.date_desc);
+if (next[id].orders.popularity)    next[id].orders.popularity    = remap(next[id].orders.popularity);
+next[id].orders.imdb = next[id].ids.slice();
+
       }
     } else {
       for (const id of Object.keys(next)) {
@@ -1033,12 +1046,23 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       );
     }
 
-    if (sort === "custom") metas = applyCustomOrder(metas, lsid);
-    else if (sort === "imdb") metas = sortByOrderKey(metas, lsid, "imdb");
-    else if (sort === "date_asc" || sort === "date_desc") {
-      const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
-      metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
-    } else metas = stableSort(metas, sort);
+ if (sort === "custom") {
+  metas = applyCustomOrder(metas, lsid);
+} else if (sort === "imdb") {
+  metas = sortByOrderKey(metas, lsid, "imdb");
+} else if (sort === "date_asc" || sort === "date_desc") {
+  const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
+  metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
+} else if (sort === "popularity") {
+  const havePopularity = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders.popularity) && LISTS[lsid].orders.popularity.length;
+  // If we have an IMDb popularity order for this list, use it; otherwise fall back to rating_desc.
+  metas = havePopularity
+    ? sortByOrderKey(metas, lsid, "popularity")
+    : stableSort(metas, "rating_desc");
+} else {
+  metas = stableSort(metas, sort);
+}
+
 
     // No poster-shape swap; meta already has a single poster field
     res.json({ metas: metas.slice(skip, skip+limit) });
@@ -1974,9 +1998,11 @@ async function render() {
     getListItems(lsid).then(({items})=>{
       td.innerHTML = '';
 
-      const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
-      const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
-      const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
+      const imdbIndex       = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
+const imdbDateAsc     = (lists[lsid]?.orders?.date_asc      || []);
+const imdbDateDesc    = (lists[lsid]?.orders?.date_desc     || []);
+const imdbPopularity  = (lists[lsid]?.orders?.popularity    || []);  // NEW
+
 
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
@@ -2096,15 +2122,19 @@ async function render() {
           });
         } else if (sortKey === 'imdb') {
           return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
-        } else if (sortKey === 'date_asc' && imdbDateAsc.length){
-          const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
-          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
-        } else if (sortKey === 'date_desc' && imdbDateDesc.length){
-          const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
-          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
-        } else {
-          return stableSortClient(items, sortKey);
-        }
+  } else if (sortKey === 'date_asc' && imdbDateAsc.length){
+  const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
+  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+} else if (sortKey === 'date_desc' && imdbDateDesc.length){
+  const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
+  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+} else if (sortKey === 'popularity' && imdbPopularity.length) {
+  const pos = new Map(imdbPopularity.map((id,i)=>[id,i]));
+  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+} else {
+  return stableSortClient(items, sortKey);
+}
+
       }
 
       const def = (prefs.perListSort && prefs.perListSort[lsid]) || 'name_asc';
