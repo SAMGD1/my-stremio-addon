@@ -582,7 +582,7 @@ function stableSort(items, sortKey) {
   return items.map((m,i)=>({m,i})).sort((A,B)=>{
     const a=A.m,b=B.m; let c=0;
     if (key==="date") c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
-    else if (key==="rating") c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    else if (key==="rating" || key==="popularity") c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
     else if (key==="runtime") c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
     else c = (a.name||"").localeCompare(b.name||"");
     if (c===0){ c=(a.name||"").localeCompare(b.name||""); if(c===0) c=(a.id||"").localeCompare(b.id||""); if(c===0) c=A.i-B.i; }
