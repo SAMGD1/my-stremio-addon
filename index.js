@@ -45,7 +45,7 @@ const CINEMETA = "https://v3-cinemeta.strem.io";
 
 // include "imdb" (raw list order) and mirror IMDb’s release-date order when available
 const SORT_OPTIONS = [
-  "custom","imdb","popularity",
+  "custom","imdb",
   "date_asc","date_desc",
   "rating_asc","rating_desc",
   "runtime_asc","runtime_desc",
@@ -782,48 +782,20 @@ async function fullSync({ rediscover = true } = {}) {
           console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
         }
 
-          if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
-            try {
-              const releaseAsc  = await fetchImdbOrder(url, "release_date,asc");
-              const releaseDesc = await fetchImdbOrder(url, "release_date,desc");
-              const popOrder    = await fetchImdbOrder(url, "moviemeter,desc");
-              list.orders = list.orders || {};
-              list.orders.date_asc   = releaseAsc.slice();
-              list.orders.date_desc  = releaseDesc.slice();
-              list.orders.popularity = popOrder.slice();
-              releaseAsc.forEach(tt => uniques.add(tt));
-              releaseDesc.forEach(tt => uniques.add(tt));
-              popOrder.forEach(tt => uniques.add(tt));
-            } catch (e) {
-              console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
-            }
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
           try {
-            const asc      = await fetchImdbOrder(url, "release_date,asc");
-            const desc     = await fetchImdbOrder(url, "release_date,desc");
-            const popOrder = await fetchImdbOrder(url, "moviemeter,desc");
-            list.orders = list.orders || {};
-            list.orders.date_asc  = asc.slice();
-            list.orders.date_desc = desc.slice();
-            list.orders.popularity = popOrder.slice();
-            asc.forEach(tt => uniques.add(tt));
-            desc.forEach(tt => uniques.add(tt));
-            popOrder.forEach(tt => uniques.add(tt));
             const asc  = await fetchImdbOrder(url, "release_date,asc");
             const desc = await fetchImdbOrder(url, "release_date,desc");
-            const pop  = await fetchImdbOrder(url, "moviemeter,desc");
-            const pop  = await fetchImdbOrder(url, "moviemeter,asc");
             list.orders = list.orders || {};
             list.orders.date_asc  = asc.slice();
             list.orders.date_desc = desc.slice();
-            list.orders.popularity = pop.slice();
             asc.forEach(tt => uniques.add(tt));
             desc.forEach(tt => uniques.add(tt));
-            pop.forEach(tt => uniques.add(tt));
           } catch (e) {
-            console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
+            console.warn("[SYNC] release_date sort fetch failed for", id, e.message);
           }
         }
+      }
 
       list.ids = raw.slice();
       raw.forEach(tt => uniques.add(tt));
@@ -957,7 +929,7 @@ const baseManifest = {
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["my lists"],
+  types: ["my lists","movie","series"],
   idPrefixes: ["tt"],
   behaviorHints: {
     configurable: true,
@@ -977,18 +949,13 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-    type: "movie",
+    type: "my lists",
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
-      { name:"sort", options: (()=>{
-        const raw = (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length)
-          ? PREFS.sortOptions[lsid].filter(x => VALID_SORT.has(x))
-          : SORT_OPTIONS;
-        return Array.from(new Set([...raw, ...SORT_OPTIONS])).filter(x => VALID_SORT.has(x));
-      })() }
+      { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
     ]
     // no posterShape – Stremio uses default poster style
   }));
@@ -1068,10 +1035,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     if (sort === "custom") metas = applyCustomOrder(metas, lsid);
     else if (sort === "imdb") metas = sortByOrderKey(metas, lsid, "imdb");
-    else if (sort === "popularity") {
-      const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders.popularity) && LISTS[lsid].orders.popularity.length;
-      metas = haveImdbOrder ? sortByOrderKey(metas, lsid, "popularity") : stableSort(metas, "rating_desc");
-    } else if (sort === "date_asc" || sort === "date_desc") {
+    else if (sort === "date_asc" || sort === "date_desc") {
       const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
       metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
     } else metas = stableSort(metas, sort);
@@ -1894,7 +1858,7 @@ function stableSortClient(items, sortKey){
   return items.map((m,i)=>({m,i})).sort((A,B)=>{
     const a=A.m,b=B.m; let c=0;
     if (key==='date') c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
-    else if (key==='rating' || key==='popularity') c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    else if (key==='rating') c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
     else if (key==='runtime') c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
     else c = (a.name||'').localeCompare(b.name||'');
     if (c===0){ c=(a.name||'').localeCompare(b.name||''); if(c===0) c=(a.id||'').localeCompare(b.id||''); if(c===0) c=A.i-B.i; }
