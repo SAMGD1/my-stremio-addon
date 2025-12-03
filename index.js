@@ -49,10 +49,8 @@ const SORT_OPTIONS = [
   "date_asc","date_desc",
   "rating_asc","rating_desc",
   "runtime_asc","runtime_desc",
-  "name_asc","name_desc",
-  "popularity"           // NEW: IMDb popularity (Moviemeter, most popular first)
+  "name_asc","name_desc"
 ];
-
 const VALID_SORT = new Set(SORT_OPTIONS);
 
 // ----------------- STATE -----------------
@@ -582,7 +580,7 @@ function stableSort(items, sortKey) {
   return items.map((m,i)=>({m,i})).sort((A,B)=>{
     const a=A.m,b=B.m; let c=0;
     if (key==="date") c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
-    else if (key==="rating" || key==="popularity") c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    else if (key==="rating") c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
     else if (key==="runtime") c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
     else c = (a.name||"").localeCompare(b.name||"");
     if (c===0){ c=(a.name||"").localeCompare(b.name||""); if(c===0) c=(a.id||"").localeCompare(b.id||""); if(c===0) c=A.i-B.i; }
@@ -784,49 +782,23 @@ async function fullSync({ rediscover = true } = {}) {
           console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
         }
 
-          if (isImdbListId(id)) {
-            let releaseAsc = null;
-            let releaseDesc = null;
-            let popOrder = null;
-
-            if (IMDB_FETCH_RELEASE_ORDERS) {
-              try {
-                releaseAsc  = await fetchImdbOrder(url, "release_date,asc");
-                releaseDesc = await fetchImdbOrder(url, "release_date,desc");
-              } catch (e) {
-                console.warn("[SYNC] release_date sort fetch failed for", id, e.message);
-              }
-            }
-
-            try {
-              popOrder = await fetchImdbOrder(url, "moviemeter,desc");
-            } catch (e) {
-              console.warn("[SYNC] popularity sort fetch failed for", id, e.message);
-            }
-
+        if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
+          try {
+            const asc  = await fetchImdbOrder(url, "release_date,asc");
+            const desc = await fetchImdbOrder(url, "release_date,desc");
+            const pop  = await fetchImdbOrder(url, "moviemeter,asc");
             list.orders = list.orders || {};
-            if (Array.isArray(releaseAsc) && releaseAsc.length) {
-              list.orders.date_asc = releaseAsc.slice();
-              releaseAsc.forEach(tt => uniques.add(tt));
-            }
-            if (Array.isArray(releaseDesc) && releaseDesc.length) {
-              list.orders.date_desc = releaseDesc.slice();
-              releaseDesc.forEach(tt => uniques.add(tt));
-            }
-            if (Array.isArray(popOrder) && popOrder.length) {
-              list.orders.popularity = popOrder.slice();
-              popOrder.forEach(tt => uniques.add(tt));
-            }
+            list.orders.date_asc  = asc.slice();
+            list.orders.date_desc = desc.slice();
+            list.orders.popularity = pop.slice();
+            asc.forEach(tt => uniques.add(tt));
+            desc.forEach(tt => uniques.add(tt));
+            pop.forEach(tt => uniques.add(tt));
+          } catch (e) {
+            console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
           }
-
-          list.orders = list.orders || {};
-          list.orders.date_asc   = releaseAsc.slice();
-          list.orders.date_desc  = releaseDesc.slice();
-          list.orders.popularity = popOrder.slice();
-          releaseAsc.forEach(tt => uniques.add(tt));
-          releaseDesc.forEach(tt => uniques.add(tt));
-          popOrder.forEach(tt => uniques.add(tt));
         }
+      }
 
       list.ids = raw.slice();
       raw.forEach(tt => uniques.add(tt));
@@ -863,13 +835,7 @@ async function fullSync({ rediscover = true } = {}) {
         next[id].orders = next[id].orders || {};
         if (next[id].orders.date_asc)  next[id].orders.date_asc  = remap(next[id].orders.date_asc);
         if (next[id].orders.date_desc) next[id].orders.date_desc = remap(next[id].orders.date_desc);
-        if (next[id].orders.popularity) next[id].orders.popularity = remap(next[id].orders.popularity);
         next[id].orders.imdb = next[id].ids.slice();
-        if (next[id].orders.date_asc)      next[id].orders.date_asc      = remap(next[id].orders.date_asc);
-if (next[id].orders.date_desc)     next[id].orders.date_desc     = remap(next[id].orders.date_desc);
-if (next[id].orders.popularity)    next[id].orders.popularity    = remap(next[id].orders.popularity);
-next[id].orders.imdb = next[id].ids.slice();
-
       }
     } else {
       for (const id of Object.keys(next)) {
@@ -966,7 +932,7 @@ const baseManifest = {
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["my lists"],
+  types: ["my lists","movie","series"],
   idPrefixes: ["tt"],
   behaviorHints: {
     configurable: true,
@@ -986,7 +952,7 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-    type: "my lists",
+    type: "movie",
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
@@ -1084,23 +1050,6 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
       metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
     } else metas = stableSort(metas, sort);
- if (sort === "custom") {
-  metas = applyCustomOrder(metas, lsid);
-} else if (sort === "imdb") {
-  metas = sortByOrderKey(metas, lsid, "imdb");
-} else if (sort === "date_asc" || sort === "date_desc") {
-  const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
-  metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
-} else if (sort === "popularity") {
-  const havePopularity = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders.popularity) && LISTS[lsid].orders.popularity.length;
-  // If we have an IMDb popularity order for this list, use it; otherwise fall back to rating_desc.
-  metas = havePopularity
-    ? sortByOrderKey(metas, lsid, "popularity")
-    : stableSort(metas, "rating_desc");
-} else {
-  metas = stableSort(metas, sort);
-}
-
 
     // No poster-shape swap; meta already has a single poster field
     res.json({ metas: metas.slice(skip, skip+limit) });
@@ -1711,6 +1660,11 @@ app.get("/admin", async (req,res)=>{
         <div id="blockedPills"></div>
       </div>
 
+      <div style="margin-top:12px">
+        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+        <div id="blockedPills"></div>
+      </div>
+
       <h4 style="margin-top:14px">Discovered</h4>
       <ul>${disc}</ul>
     </div>
@@ -1790,6 +1744,7 @@ function normalizeListIdOrUrl2(v){
     return v.startsWith('http') ? v : 'https://www.imdb.com'+v;
   }
   return null;
+
 }
 async function addSources(payload){
   await fetch('/api/add-sources?admin='+ADMIN, {
@@ -1828,6 +1783,7 @@ function wireAddButtons(){
     try { await addSources({ users:[], lists:[url] }); location.reload(); }
     finally { listBtn.disabled = false; }
   };
+
 
 }
 
@@ -1947,6 +1903,26 @@ async function render() {
     prefs.sources.traktUsers.splice(i,1);
     saveAll('Saved');
   });
+  (function renderUserPills(){
+    const wrap = document.getElementById('userPills'); wrap.innerHTML = '';
+    const entries = [];
+    (prefs.sources?.users || []).forEach((u,i)=>entries.push({ kind:'imdb', value:u, idx:i }));
+    (prefs.sources?.traktUsers || []).forEach((u,i)=>entries.push({ kind:'trakt', value:u, idx:i }));
+    if (!entries.length) { wrap.textContent = '(none)'; return; }
+    entries.forEach(entry=>{
+      const pill = el('span', {class:'pill'}, [
+        el('span',{text:(entry.kind==='trakt'?'Trakt: ':'IMDb: ')+entry.value}),
+        el('span',{class:'x',text:'✕'})
+      ]);
+      pill.querySelector('.x').onclick = ()=>{
+        if (entry.kind==='trakt') prefs.sources.traktUsers.splice(entry.idx,1);
+        else prefs.sources.users.splice(entry.idx,1);
+        saveAll('Saved');
+      };
+      wrap.appendChild(pill);
+      wrap.appendChild(document.createTextNode(' '));
+    });
+  })();
   renderPills('listPills', prefs.sources?.lists || [], (i)=>{
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
@@ -2009,11 +1985,9 @@ async function render() {
     getListItems(lsid).then(({items})=>{
       td.innerHTML = '';
 
-      const imdbIndex       = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
-const imdbDateAsc     = (lists[lsid]?.orders?.date_asc      || []);
-const imdbDateDesc    = (lists[lsid]?.orders?.date_desc     || []);
-const imdbPopularity  = (lists[lsid]?.orders?.popularity    || []);  // NEW
-
+      const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
+      const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
+      const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
 
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
@@ -2133,19 +2107,15 @@ const imdbPopularity  = (lists[lsid]?.orders?.popularity    || []);  // NEW
           });
         } else if (sortKey === 'imdb') {
           return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
-  } else if (sortKey === 'date_asc' && imdbDateAsc.length){
-  const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
-  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
-} else if (sortKey === 'date_desc' && imdbDateDesc.length){
-  const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
-  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
-} else if (sortKey === 'popularity' && imdbPopularity.length) {
-  const pos = new Map(imdbPopularity.map((id,i)=>[id,i]));
-  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
-} else {
-  return stableSortClient(items, sortKey);
-}
-
+        } else if (sortKey === 'date_asc' && imdbDateAsc.length){
+          const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+        } else if (sortKey === 'date_desc' && imdbDateDesc.length){
+          const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
+          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+        } else {
+          return stableSortClient(items, sortKey);
+        }
       }
 
       const def = (prefs.perListSort && prefs.perListSort[lsid]) || 'name_asc';
