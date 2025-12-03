@@ -45,7 +45,7 @@ const CINEMETA = "https://v3-cinemeta.strem.io";
 
 // include "imdb" (raw list order) and mirror IMDb’s release-date order when available
 const SORT_OPTIONS = [
-  "custom","imdb",
+  "custom","imdb","popularity",
   "date_asc","date_desc",
   "rating_asc","rating_desc",
   "runtime_asc","runtime_desc",
@@ -942,7 +942,7 @@ const baseManifest = {
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["my lists","movie","series"],
+  types: ["my lists"],
   idPrefixes: ["tt"],
   behaviorHints: {
     configurable: true,
@@ -968,7 +968,12 @@ function catalogs(){
     extraSupported: ["search","skip","limit","sort"],
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
-      { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
+      { name:"sort", options: (()=>{
+        const raw = (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length)
+          ? PREFS.sortOptions[lsid].filter(x => VALID_SORT.has(x))
+          : SORT_OPTIONS;
+        return Array.from(new Set([...raw, ...SORT_OPTIONS])).filter(x => VALID_SORT.has(x));
+      })() }
     ]
     // no posterShape – Stremio uses default poster style
   }));
@@ -1882,7 +1887,7 @@ function stableSortClient(items, sortKey){
   return items.map((m,i)=>({m,i})).sort((A,B)=>{
     const a=A.m,b=B.m; let c=0;
     if (key==='date') c = cmpNullBottom(toTs(a.releaseDate,a.year), toTs(b.releaseDate,b.year));
-    else if (key==='rating') c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
+    else if (key==='rating' || key==='popularity') c = cmpNullBottom(a.imdbRating ?? null, b.imdbRating ?? null);
     else if (key==='runtime') c = cmpNullBottom(a.runtime ?? null, b.runtime ?? null);
     else c = (a.name||'').localeCompare(b.name||'');
     if (c===0){ c=(a.name||'').localeCompare(b.name||''); if(c===0) c=(a.id||'').localeCompare(b.id||''); if(c===0) c=A.i-B.i; }
