@@ -932,7 +932,7 @@ const baseManifest = {
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["my lists","movie","series"],
+  types: ["my lists"],
   idPrefixes: ["tt"],
   behaviorHints: {
     configurable: true,
