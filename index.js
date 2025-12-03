@@ -782,6 +782,21 @@ async function fullSync({ rediscover = true } = {}) {
           console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
         }
 
+          if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
+            try {
+              const releaseAsc  = await fetchImdbOrder(url, "release_date,asc");
+              const releaseDesc = await fetchImdbOrder(url, "release_date,desc");
+              const popOrder    = await fetchImdbOrder(url, "moviemeter,desc");
+              list.orders = list.orders || {};
+              list.orders.date_asc   = releaseAsc.slice();
+              list.orders.date_desc  = releaseDesc.slice();
+              list.orders.popularity = popOrder.slice();
+              releaseAsc.forEach(tt => uniques.add(tt));
+              releaseDesc.forEach(tt => uniques.add(tt));
+              popOrder.forEach(tt => uniques.add(tt));
+            } catch (e) {
+              console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
+            }
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
           try {
             const asc      = await fetchImdbOrder(url, "release_date,asc");
@@ -809,7 +824,6 @@ async function fullSync({ rediscover = true } = {}) {
             console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
           }
         }
-      }
 
       list.ids = raw.slice();
       raw.forEach(tt => uniques.add(tt));
