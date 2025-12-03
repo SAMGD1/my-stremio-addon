@@ -784,6 +784,16 @@ async function fullSync({ rediscover = true } = {}) {
 
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
           try {
+            const asc      = await fetchImdbOrder(url, "release_date,asc");
+            const desc     = await fetchImdbOrder(url, "release_date,desc");
+            const popOrder = await fetchImdbOrder(url, "moviemeter,desc");
+            list.orders = list.orders || {};
+            list.orders.date_asc  = asc.slice();
+            list.orders.date_desc = desc.slice();
+            list.orders.popularity = popOrder.slice();
+            asc.forEach(tt => uniques.add(tt));
+            desc.forEach(tt => uniques.add(tt));
+            popOrder.forEach(tt => uniques.add(tt));
             const asc  = await fetchImdbOrder(url, "release_date,asc");
             const desc = await fetchImdbOrder(url, "release_date,desc");
             const pop  = await fetchImdbOrder(url, "moviemeter,desc");
