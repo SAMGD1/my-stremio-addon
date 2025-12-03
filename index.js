@@ -784,6 +784,27 @@ async function fullSync({ rediscover = true } = {}) {
           console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
         }
 
+          if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
+            let releaseAsc = [];
+            let releaseDesc = [];
+            let popOrder = [];
+            try {
+              releaseAsc  = await fetchImdbOrder(url, "release_date,asc");
+              releaseDesc = await fetchImdbOrder(url, "release_date,desc");
+              popOrder    = await fetchImdbOrder(url, "moviemeter,asc");
+            } catch (e) {
+              console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
+            }
+
+            list.orders = list.orders || {};
+            list.orders.date_asc   = releaseAsc.slice();
+            list.orders.date_desc  = releaseDesc.slice();
+            list.orders.popularity = popOrder.slice();
+            releaseAsc.forEach(tt => uniques.add(tt));
+            releaseDesc.forEach(tt => uniques.add(tt));
+            popOrder.forEach(tt => uniques.add(tt));
+          }
+        }
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
   try {
     // Release date orders
@@ -841,6 +862,10 @@ async function fullSync({ rediscover = true } = {}) {
       for (const id of Object.keys(next)) {
         next[id].ids = remap(next[id].ids);
         next[id].orders = next[id].orders || {};
+        if (next[id].orders.date_asc)  next[id].orders.date_asc  = remap(next[id].orders.date_asc);
+        if (next[id].orders.date_desc) next[id].orders.date_desc = remap(next[id].orders.date_desc);
+        if (next[id].orders.popularity) next[id].orders.popularity = remap(next[id].orders.popularity);
+        next[id].orders.imdb = next[id].ids.slice();
         if (next[id].orders.date_asc)      next[id].orders.date_asc      = remap(next[id].orders.date_asc);
 if (next[id].orders.date_desc)     next[id].orders.date_desc     = remap(next[id].orders.date_desc);
 if (next[id].orders.popularity)    next[id].orders.popularity    = remap(next[id].orders.popularity);
@@ -1051,6 +1076,15 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       );
     }
 
+    if (sort === "custom") metas = applyCustomOrder(metas, lsid);
+    else if (sort === "imdb") metas = sortByOrderKey(metas, lsid, "imdb");
+    else if (sort === "popularity") {
+      const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders.popularity) && LISTS[lsid].orders.popularity.length;
+      metas = haveImdbOrder ? sortByOrderKey(metas, lsid, "popularity") : stableSort(metas, "rating_desc");
+    } else if (sort === "date_asc" || sort === "date_desc") {
+      const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
+      metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
+    } else metas = stableSort(metas, sort);
  if (sort === "custom") {
   metas = applyCustomOrder(metas, lsid);
 } else if (sort === "imdb") {
