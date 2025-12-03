@@ -952,18 +952,13 @@ function getEnabledOrderedIds() {
 function catalogs(){
   const ids = getEnabledOrderedIds();
   return ids.map(lsid => ({
-    type: "movie",
+    type: "my lists",
     id: `list:${lsid}`,
     name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
-      { name:"sort", options: (()=>{
-        const raw = (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length)
-          ? PREFS.sortOptions[lsid].filter(x => VALID_SORT.has(x))
-          : SORT_OPTIONS;
-        return Array.from(new Set([...raw, ...SORT_OPTIONS])).filter(x => VALID_SORT.has(x));
-      })() }
+      { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
     ]
     // no posterShape – Stremio uses default poster style
   }));
@@ -1043,10 +1038,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     if (sort === "custom") metas = applyCustomOrder(metas, lsid);
     else if (sort === "imdb") metas = sortByOrderKey(metas, lsid, "imdb");
-    else if (sort === "popularity") {
-      const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders.popularity) && LISTS[lsid].orders.popularity.length;
-      metas = haveImdbOrder ? sortByOrderKey(metas, lsid, "popularity") : stableSort(metas, "rating_desc");
-    } else if (sort === "date_asc" || sort === "date_desc") {
+    else if (sort === "date_asc" || sort === "date_desc") {
       const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
       metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
     } else metas = stableSort(metas, sort);
