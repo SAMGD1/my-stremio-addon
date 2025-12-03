@@ -784,25 +784,39 @@ async function fullSync({ rediscover = true } = {}) {
           console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
         }
 
-          if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
-            let releaseAsc = [];
-            let releaseDesc = [];
-            let popOrder = [];
+          if (isImdbListId(id)) {
+            let releaseAsc = null;
+            let releaseDesc = null;
+            let popOrder = null;
+
+            if (IMDB_FETCH_RELEASE_ORDERS) {
+              try {
+                releaseAsc  = await fetchImdbOrder(url, "release_date,asc");
+                releaseDesc = await fetchImdbOrder(url, "release_date,desc");
+              } catch (e) {
+                console.warn("[SYNC] release_date sort fetch failed for", id, e.message);
+              }
+            }
+
             try {
-              releaseAsc  = await fetchImdbOrder(url, "release_date,asc");
-              releaseDesc = await fetchImdbOrder(url, "release_date,desc");
-              popOrder    = await fetchImdbOrder(url, "moviemeter,asc");
+              popOrder = await fetchImdbOrder(url, "moviemeter,desc");
             } catch (e) {
-              console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
+              console.warn("[SYNC] popularity sort fetch failed for", id, e.message);
             }
 
             list.orders = list.orders || {};
-            list.orders.date_asc   = releaseAsc.slice();
-            list.orders.date_desc  = releaseDesc.slice();
-            list.orders.popularity = popOrder.slice();
-            releaseAsc.forEach(tt => uniques.add(tt));
-            releaseDesc.forEach(tt => uniques.add(tt));
-            popOrder.forEach(tt => uniques.add(tt));
+            if (Array.isArray(releaseAsc) && releaseAsc.length) {
+              list.orders.date_asc = releaseAsc.slice();
+              releaseAsc.forEach(tt => uniques.add(tt));
+            }
+            if (Array.isArray(releaseDesc) && releaseDesc.length) {
+              list.orders.date_desc = releaseDesc.slice();
+              releaseDesc.forEach(tt => uniques.add(tt));
+            }
+            if (Array.isArray(popOrder) && popOrder.length) {
+              list.orders.popularity = popOrder.slice();
+              popOrder.forEach(tt => uniques.add(tt));
+            }
           }
 
           list.orders = list.orders || {};
@@ -813,29 +827,6 @@ async function fullSync({ rediscover = true } = {}) {
           releaseDesc.forEach(tt => uniques.add(tt));
           popOrder.forEach(tt => uniques.add(tt));
         }
-        if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
-  try {
-    // Release date orders
-    const asc  = await fetchImdbOrder(url, "release_date,asc");
-    const desc = await fetchImdbOrder(url, "release_date,desc");
-
-    // Popularity (IMDb Moviemeter) – "moviemeter,asc" means most popular first
-    const popularityRaw = await fetchImdbOrder(url, "moviemeter,asc");
-
-    list.orders = list.orders || {};
-    list.orders.date_asc  = asc.slice();
-    list.orders.date_desc = desc.slice();
-    list.orders.popularity = popularityRaw.slice(); // our canonical popularity order
-
-    asc.forEach(tt => uniques.add(tt));
-    desc.forEach(tt => uniques.add(tt));
-    popularityRaw.forEach(tt => uniques.add(tt));
-  } catch (e) {
-    console.warn("[SYNC] release_date / popularity sort fetch failed for", id, e.message);
-  }
-}
-
-      }
 
       list.ids = raw.slice();
       raw.forEach(tt => uniques.add(tt));
@@ -1720,11 +1711,6 @@ app.get("/admin", async (req,res)=>{
         <div id="blockedPills"></div>
       </div>
 
-      <div style="margin-top:12px">
-        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
-        <div id="blockedPills"></div>
-      </div>
-
       <h4 style="margin-top:14px">Discovered</h4>
       <ul>${disc}</ul>
     </div>
@@ -1804,7 +1790,6 @@ function normalizeListIdOrUrl2(v){
     return v.startsWith('http') ? v : 'https://www.imdb.com'+v;
   }
   return null;
-
 }
 async function addSources(payload){
   await fetch('/api/add-sources?admin='+ADMIN, {
@@ -1843,7 +1828,6 @@ function wireAddButtons(){
     try { await addSources({ users:[], lists:[url] }); location.reload(); }
     finally { listBtn.disabled = false; }
   };
-
 
 }
 
@@ -1963,26 +1947,6 @@ async function render() {
     prefs.sources.traktUsers.splice(i,1);
     saveAll('Saved');
   });
-  (function renderUserPills(){
-    const wrap = document.getElementById('userPills'); wrap.innerHTML = '';
-    const entries = [];
-    (prefs.sources?.users || []).forEach((u,i)=>entries.push({ kind:'imdb', value:u, idx:i }));
-    (prefs.sources?.traktUsers || []).forEach((u,i)=>entries.push({ kind:'trakt', value:u, idx:i }));
-    if (!entries.length) { wrap.textContent = '(none)'; return; }
-    entries.forEach(entry=>{
-      const pill = el('span', {class:'pill'}, [
-        el('span',{text:(entry.kind==='trakt'?'Trakt: ':'IMDb: ')+entry.value}),
-        el('span',{class:'x',text:'✕'})
-      ]);
-      pill.querySelector('.x').onclick = ()=>{
-        if (entry.kind==='trakt') prefs.sources.traktUsers.splice(entry.idx,1);
-        else prefs.sources.users.splice(entry.idx,1);
-        saveAll('Saved');
-      };
-      wrap.appendChild(pill);
-      wrap.appendChild(document.createTextNode(' '));
-    });
-  })();
   renderPills('listPills', prefs.sources?.lists || [], (i)=>{
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
