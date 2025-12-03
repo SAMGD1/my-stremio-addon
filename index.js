@@ -804,6 +804,14 @@ async function fullSync({ rediscover = true } = {}) {
             releaseDesc.forEach(tt => uniques.add(tt));
             popOrder.forEach(tt => uniques.add(tt));
           }
+
+          list.orders = list.orders || {};
+          list.orders.date_asc   = releaseAsc.slice();
+          list.orders.date_desc  = releaseDesc.slice();
+          list.orders.popularity = popOrder.slice();
+          releaseAsc.forEach(tt => uniques.add(tt));
+          releaseDesc.forEach(tt => uniques.add(tt));
+          popOrder.forEach(tt => uniques.add(tt));
         }
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
   try {
