@@ -49,8 +49,10 @@ const SORT_OPTIONS = [
   "date_asc","date_desc",
   "rating_asc","rating_desc",
   "runtime_asc","runtime_desc",
-  "name_asc","name_desc"
+  "name_asc","name_desc",
+  "popularity"           // NEW: IMDb popularity (Moviemeter, most popular first)
 ];
+
 const VALID_SORT = new Set(SORT_OPTIONS);
 
 // ----------------- STATE -----------------
@@ -816,6 +818,14 @@ async function fullSync({ rediscover = true } = {}) {
               popOrder.forEach(tt => uniques.add(tt));
             }
           }
+
+          list.orders = list.orders || {};
+          list.orders.date_asc   = releaseAsc.slice();
+          list.orders.date_desc  = releaseDesc.slice();
+          list.orders.popularity = popOrder.slice();
+          releaseAsc.forEach(tt => uniques.add(tt));
+          releaseDesc.forEach(tt => uniques.add(tt));
+          popOrder.forEach(tt => uniques.add(tt));
         }
 
       list.ids = raw.slice();
@@ -855,6 +865,11 @@ async function fullSync({ rediscover = true } = {}) {
         if (next[id].orders.date_desc) next[id].orders.date_desc = remap(next[id].orders.date_desc);
         if (next[id].orders.popularity) next[id].orders.popularity = remap(next[id].orders.popularity);
         next[id].orders.imdb = next[id].ids.slice();
+        if (next[id].orders.date_asc)      next[id].orders.date_asc      = remap(next[id].orders.date_asc);
+if (next[id].orders.date_desc)     next[id].orders.date_desc     = remap(next[id].orders.date_desc);
+if (next[id].orders.popularity)    next[id].orders.popularity    = remap(next[id].orders.popularity);
+next[id].orders.imdb = next[id].ids.slice();
+
       }
     } else {
       for (const id of Object.keys(next)) {
@@ -951,7 +966,7 @@ const baseManifest = {
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
   resources: ["catalog","meta"],
-  types: ["my lists","movie","series"],
+  types: ["my lists"],
   idPrefixes: ["tt"],
   behaviorHints: {
     configurable: true,
@@ -1069,6 +1084,23 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
       metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
     } else metas = stableSort(metas, sort);
+ if (sort === "custom") {
+  metas = applyCustomOrder(metas, lsid);
+} else if (sort === "imdb") {
+  metas = sortByOrderKey(metas, lsid, "imdb");
+} else if (sort === "date_asc" || sort === "date_desc") {
+  const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
+  metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
+} else if (sort === "popularity") {
+  const havePopularity = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders.popularity) && LISTS[lsid].orders.popularity.length;
+  // If we have an IMDb popularity order for this list, use it; otherwise fall back to rating_desc.
+  metas = havePopularity
+    ? sortByOrderKey(metas, lsid, "popularity")
+    : stableSort(metas, "rating_desc");
+} else {
+  metas = stableSort(metas, sort);
+}
+
 
     // No poster-shape swap; meta already has a single poster field
     res.json({ metas: metas.slice(skip, skip+limit) });
@@ -1770,6 +1802,8 @@ function wireAddButtons(){
   const listBtn = document.getElementById('addList');
   const userInp = document.getElementById('userInput');
   const listInp = document.getElementById('listInput');
+  const traktUserBtn = document.getElementById('addTraktUser');
+  const traktUserInp = document.getElementById('traktUserInput');
 
   userBtn.onclick = async (e) => {
     e.preventDefault();
@@ -1917,6 +1951,10 @@ async function render() {
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
   });
+  renderPills('traktUserPills', prefs.sources?.traktUsers || [], (i)=>{
+    prefs.sources.traktUsers.splice(i,1);
+    saveAll('Saved');
+  });
 
   // Blocked pills with Unblock action
   {
@@ -1971,9 +2009,11 @@ async function render() {
     getListItems(lsid).then(({items})=>{
       td.innerHTML = '';
 
-      const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
-      const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
-      const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
+      const imdbIndex       = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
+const imdbDateAsc     = (lists[lsid]?.orders?.date_asc      || []);
+const imdbDateDesc    = (lists[lsid]?.orders?.date_desc     || []);
+const imdbPopularity  = (lists[lsid]?.orders?.popularity    || []);  // NEW
+
 
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
@@ -2093,15 +2133,19 @@ async function render() {
           });
         } else if (sortKey === 'imdb') {
           return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
-        } else if (sortKey === 'date_asc' && imdbDateAsc.length){
-          const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
-          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
-        } else if (sortKey === 'date_desc' && imdbDateDesc.length){
-          const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
-          return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
-        } else {
-          return stableSortClient(items, sortKey);
-        }
+  } else if (sortKey === 'date_asc' && imdbDateAsc.length){
+  const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
+  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+} else if (sortKey === 'date_desc' && imdbDateDesc.length){
+  const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
+  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+} else if (sortKey === 'popularity' && imdbPopularity.length) {
+  const pos = new Map(imdbPopularity.map((id,i)=>[id,i]));
+  return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
+} else {
+  return stableSortClient(items, sortKey);
+}
+
       }
 
       const def = (prefs.perListSort && prefs.perListSort[lsid]) || 'name_asc';
