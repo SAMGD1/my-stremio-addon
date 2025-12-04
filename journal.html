@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SootheSpace · Journal</title>
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Inter:wght@500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="journal.css">
+
+  <!-- JS -->
+  <script src="journal.js" defer></script>
+</head>
+<body>
+
+  <!-- ===== NAVBAR (your design) ===== -->
+  <header class="ss-nav">
+    <!-- LEFT: LOGO -->
+    <div class="ss-nav-left">
+      <a href="page.html" class="ss-logo">
+        <span class="ss-logo-main">Soothe</span>
+        <span class="ss-logo-accent">Space</span>
+        <span class="ss-logo-icon">🤝</span>
+      </a>
+    </div>
+
+    <!-- CENTER: LINKS -->
+    <nav class="ss-nav-links">
+      <a href="page.html" class="ss-pill">Home</a>
+      <a href="ChatbotWebpage.html" class="ss-pill">Your Corner AI</a>
+      <a href="communities.html" class="ss-pill">Communities</a>
+      <a href="contact.html" class="ss-pill">Help</a>
+      <a href="journal.html" class="ss-pill active">Journal</a>
+    </nav>
+
+    <!-- RIGHT: PROFILE + HAMBURGER -->
+    <div style="display:flex; align-items:center; gap:10px;">
+      <a href="#" class="ss-profile">
+        <div class="ss-profile-circle"></div>
+      </a>
+
+      <!-- hamburger only visible on mobile -->
+      <button class="ss-menu-toggle" aria-label="Toggle navigation">
+        <div class="ss-menu-toggle-box">
+          <span class="ss-menu-line"></span>
+          <span class="ss-menu-line"></span>
+          <span class="ss-menu-line"></span>
+        </div>
+      </button>
+    </div>
+  </header>
+
+  <!-- ===== JOURNAL CONTENT ===== -->
+  <div class="header">
+    <h1>Your Journal</h1>
+    <p class="subtitle">
+      A private space to check in with yourself. Only stored on this device.
+    </p>
+  </div>
+
+  <div class="shell">
+    <!-- Left: new / edit entry -->
+    <section class="panel new-entry" aria-label="Journal entry form">
+      <h2>Today’s check-in</h2>
+
+      <div class="field">
+        <label class="label" for="entryTitle">Title</label>
+        <input id="entryTitle" type="text" placeholder="e.g. Rough day but hopeful">
+      </div>
+
+      <div class="field">
+        <label class="label">How are you feeling today?</label>
+        <div id="moodButtons" class="moods">
+          <!-- mood buttons created in JS -->
+        </div>
+      </div>
+
+      <div class="field field-text">
+        <label class="label" for="entryText">Write about your day</label>
+        <textarea id="entryText" rows="6" placeholder="You can write anything here..."></textarea>
+      </div>
+
+      <div class="meta-row">
+        <div class="meta-left">
+          <div id="todayLabel" class="today-label"></div>
+          <div id="formMode" class="form-mode">New entry</div>
+        </div>
+        <div class="meta-actions">
+          <button id="cancelEditBtn" type="button" class="cancel-btn" style="display:none;">Cancel</button>
+          <button id="saveEntryBtn" class="save-btn">Save entry</button>
+        </div>
+      </div>
+
+      <p class="hint">
+        Entries are saved in your browser only (localStorage). Editing an entry updates its saved time.
+      </p>
+    </section>
+
+    <!-- Right: past entries -->
+    <section class="panel entries-panel" aria-label="Previous entries">
+      <div class="entries-header">
+        <h2>Your past entries</h2>
+        <span id="entryCount" class="entry-count">0 entries</span>
+      </div>
+
+      <div id="entriesList" class="entries-list">
+        <!-- filled by JS -->
+      </div>
+    </section>
+  </div>
+
+  <!-- Safety notice -->
+  <div class="safety">
+    <span class="tri"></span>
+    Soothepspace is not a crisis service. For urgent help:
+    Samaritans 116 123 · Text SHOUT to 85258 · NHS 111.
+  </div>
+
+</body>
+</html>
