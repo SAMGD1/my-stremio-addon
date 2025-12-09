@@ -1119,14 +1119,14 @@ app.get("/", (req, res) => {
       <div class="card">
         <h3>Create your personal addon</h3>
         <p class="muted">Use public IMDb/Trakt sources. A private profile id will be generated.</p>
-        <form id="createForm">
+        <form id="createForm" onsubmit="return false;">
           <label>IMDb or Trakt usernames / profile URLs</label>
           <textarea id="userEntries" rows="2" placeholder="ur12345678, imdb.com/user/ur12345678/lists/, trakt.tv/users/yourname"></textarea>
           <label>IMDb or Trakt list URLs (one per line)</label>
           <textarea id="listUrls" rows="3" placeholder="IMDb ls… or Trakt list URLs"></textarea>
           <div class="note">Only public IMDb & Trakt lists are supported. First sync may take a moment.</div>
           <div class="row">
-            <button type="submit">Create profile</button>
+            <button id="createBtn" type="button">Create profile</button>
             <span id="createStatus" class="status"></span>
           </div>
           <div class="muted" id="manifestInfo"></div>
@@ -1160,11 +1160,9 @@ function normalizeUsers(entries){
 }
 const userField = document.getElementById('userEntries');
 const listField = document.getElementById('listUrls');
-document.getElementById('createForm').addEventListener('submit', async (e)=>{
-  e.preventDefault();
-  e.stopPropagation();
+const createBtn = document.getElementById('createBtn');
+createBtn.addEventListener('click', async ()=>{
   const status = document.getElementById('createStatus');
-  const btn = e.submitter || document.querySelector('#createForm button[type="submit"]');
   status.textContent = '';
   const users = normalizeUsers(userField.value);
   const lists = splitLines(listField.value);
@@ -1175,7 +1173,7 @@ document.getElementById('createForm').addEventListener('submit', async (e)=>{
     return;
   }
   status.textContent = 'Creating…';
-  if (btn) btn.disabled = true;
+  createBtn.disabled = true;
   const sources = { users, lists };
   try {
     const r = await fetch('/api/public/create-profile', {
@@ -1194,7 +1192,7 @@ document.getElementById('createForm').addEventListener('submit', async (e)=>{
     status.textContent = 'Error: ' + err.message;
     alert('Could not create profile: ' + err.message);
   } finally {
-    if (btn) btn.disabled = false;
+    createBtn.disabled = false;
   }
 });
 
