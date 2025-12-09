@@ -1651,12 +1651,7 @@ app.get("/admin", async (req,res)=>{
         <div class="mini muted">Blocked lists (won't re-add on sync):</div>
         <div id="blockedPills"></div>
       </div>
-
-      <div style="margin-top:12px">
-        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
-        <div id="blockedPills"></div>
-      </div>
-
+      
       <h4 style="margin-top:14px">Discovered</h4>
       <ul>${disc}</ul>
     </div>
