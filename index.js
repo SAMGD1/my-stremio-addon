@@ -1064,7 +1064,10 @@ app.get("/manifest.json", (req,res)=>{
 
 app.get("/configure", (req, res) => {
   const base = absoluteBase(req);
-  const dest = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+  const profileId = req.query.profile || "";
+  const dest = profileId
+    ? `${base}/u/${encodeURIComponent(profileId)}/admin`
+    : `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
 
   res.type("html").send(`
     <!doctype html><meta charset="utf-8">
@@ -1077,6 +1080,112 @@ app.get("/configure", (req, res) => {
     </style>
     <p>Opening admin… <a href="${dest}">continue</a></p>
   `);
+});
+
+app.get("/", (req, res) => {
+  res.type("html").send(`<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>My Lists – Welcome</title>
+<style>
+  :root{
+    color-scheme:light;
+    --bg:#050415; --bg2:#0f0d1a; --card:#141129; --muted:#9aa0b4; --text:#f7f7fb;
+    --accent:#6c5ce7; --accent2:#8b7cf7; --border:#262145;
+  }
+  body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:radial-gradient(circle at top,#2f2165 0,#050415 48%,#02010a 100%);color:var(--text);}
+  .wrap{max-width:960px;margin:24px auto;padding:0 16px;}
+  .hero{padding:28px 0 12px;text-align:center;}
+  h1{margin:0;font-size:30px}
+  p{color:var(--muted);margin:6px 0 0}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr;}
+  @media(min-width:900px){ .grid{grid-template-columns:1fr 1fr;} }
+  .card{border:1px solid var(--border);border-radius:18px;padding:16px 18px;background:linear-gradient(145deg,rgba(17,14,39,.96),rgba(8,6,25,.98));box-shadow:0 18px 40px rgba(0,0,0,.55);} 
+  label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+  input,textarea{width:100%;box-sizing:border-box;background:#1c1837;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px;font-size:14px;}
+  button{padding:10px 14px;border:0;border-radius:999px;background:var(--accent);color:#fff;cursor:pointer;font-size:14px;box-shadow:0 6px 16px rgba(108,92,231,.55);}
+  button.btn2{background:var(--accent2);} 
+  .muted{color:var(--muted);font-size:13px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  .note{background:rgba(108,92,231,.12);border:1px solid var(--border);padding:10px;border-radius:10px;font-size:13px;margin-top:10px}
+  .status{margin-top:8px;font-size:13px;color:var(--muted)}
+</style>
+</head><body>
+  <div class="wrap">
+    <div class="hero">
+      <h1>My Lists – IMDb → Stremio</h1>
+      <p>Create your own profile to turn public IMDb/Trakt lists into a personal Stremio addon.</p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h3>Create your personal addon</h3>
+        <p class="muted">Use public IMDb/Trakt sources. A private profile id will be generated.</p>
+        <form id="createForm">
+          <label>IMDb user /lists URL (optional)</label>
+          <input id="imdbUser" placeholder="https://www.imdb.com/user/urXXXXXX/lists/" />
+          <label>Extra IMDb/Trakt list URLs (one per line)</label>
+          <textarea id="listUrls" rows="3" placeholder="IMDb ls… or Trakt list URLs"></textarea>
+          <label>Trakt usernames (comma or newline separated)</label>
+          <textarea id="traktUsers" rows="2" placeholder="traktuser"></textarea>
+          <div class="note">Only public IMDb & Trakt lists are supported. First sync may take a moment.</div>
+          <div class="row">
+            <button type="submit">Create profile</button>
+            <span id="createStatus" class="status"></span>
+          </div>
+          <div class="muted" id="manifestInfo"></div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Open existing setup</h3>
+        <p class="muted">Paste your profile id or manifest URL.</p>
+        <label>Profile ID or URL</label>
+        <input id="existingId" placeholder="p_xxxx or manifest URL" />
+        <div class="row">
+          <button id="openBtn" type="button" class="btn2">Open dashboard</button>
+          <span id="openStatus" class="status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+<script>
+function splitLines(val){
+  return (val||'').split(/[,\n]/).map(s=>s.trim()).filter(Boolean);
+}
+document.getElementById('createForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const status = document.getElementById('createStatus');
+  status.textContent = 'Creating…';
+  const sources = {
+    users: splitLines(document.getElementById('imdbUser').value),
+    lists: splitLines(document.getElementById('listUrls').value),
+    traktUsers: splitLines(document.getElementById('traktUsers').value)
+  };
+  try {
+    const r = await fetch('/api/public/create-profile', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ sources })
+    });
+    if (!r.ok) throw new Error('Create failed');
+    const data = await r.json();
+    document.getElementById('manifestInfo').innerHTML = 'Manifest URL: <a href="'+data.manifestUrl+'">'+data.manifestUrl+'</a>';
+    status.textContent = 'Redirecting to your dashboard…';
+    window.location.href = data.adminUrl;
+  } catch(err) {
+    status.textContent = 'Error: ' + err.message;
+  }
+});
+
+document.getElementById('openBtn').onclick = ()=>{
+  const raw = (document.getElementById('existingId').value||'').trim();
+  if (!raw) return;
+  let pid = raw;
+  try {
+    const u = new URL(raw);
+    pid = u.searchParams.get('profile') || u.pathname.split('/').filter(Boolean).pop() || raw;
+  } catch {}
+  window.location.href = '/u/' + encodeURIComponent(pid) + '/admin';
+};
+</script>
+</body></html>`);
 });
 
 // ------- Catalog -------
@@ -1166,15 +1275,25 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
 
 // ------- Admin + debug & new endpoints -------
 app.get("/api/lists", (req,res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  res.json(LISTS);
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
+  try {
+    res.json(LISTS);
+  } finally { saveProfileBack(p); }
 });
 app.get("/api/prefs", (req,res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  res.json(PREFS);
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
+  try {
+    res.json(PREFS);
+  } finally { saveProfileBack(p); }
 });
 app.post("/api/prefs", async (req,res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try{
     const body = req.body || {};
     PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
@@ -1216,11 +1335,14 @@ app.post("/api/prefs", async (req,res) => {
 
     res.status(200).send("Saved. Manifest rev " + MANIFEST_REV);
   }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
+  finally { saveProfileBack(p); }
 });
 
 // unblock a previously removed list
 app.post("/api/unblock-list", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try{
     const lsid = String(req.body.lsid||"");
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
@@ -1229,30 +1351,37 @@ app.post("/api/unblock-list", async (req,res)=>{
     scheduleNextSync();
     res.status(200).send("Unblocked & synced");
   }catch(e){ console.error(e); res.status(500).send("Failed"); }
+  finally { saveProfileBack(p); }
 });
 
 // return cards for one list (for the drawer) — includes edits
 app.get("/api/list-items", (req,res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  const lsid = String(req.query.lsid || "");
-  const list = LISTS[lsid];
-  if (!list) return res.json({ items: [] });
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
+  try {
+    const lsid = String(req.query.lsid || "");
+    const list = LISTS[lsid];
+    if (!list) return res.json({ items: [] });
 
-  let ids = (list.ids || []).slice();
-  const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
-  const removed = new Set((ed.removed || []).filter(isImdb));
-  if (removed.size) ids = ids.filter(tt => !removed.has(tt));
-  const toAdd = (ed.added || []).filter(isImdb);
-  for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
+    let ids = (list.ids || []).slice();
+    const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
+    const removed = new Set((ed.removed || []).filter(isImdb));
+    if (removed.size) ids = ids.filter(tt => !removed.has(tt));
+    const toAdd = (ed.added || []).filter(isImdb);
+    for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
 
-  const items = ids.map(tt => CARD.get(tt) || cardFor(tt));
+    const items = ids.map(tt => CARD.get(tt) || cardFor(tt));
 
-  res.json({ items });
+    res.json({ items });
+  } finally { saveProfileBack(p); }
 });
 
 // add an item (tt...) to a list
 app.post("/api/list-add", async (req, res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try {
     const lsid = String(req.body.lsid || "");
     let tt = String(req.body.id || "").trim();
@@ -1281,11 +1410,14 @@ app.post("/api/list-add", async (req, res) => {
 
     res.status(200).send("Added");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
+  finally { saveProfileBack(p); }
 });
 
 // remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try {
     const lsid = String(req.body.lsid || "");
     let tt = String(req.body.id || "").trim();
@@ -1312,11 +1444,14 @@ app.post("/api/list-remove", async (req, res) => {
 
     res.status(200).send("Removed");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
+  finally { saveProfileBack(p); }
 });
 
 // clear custom order and all add/remove edits for a list
 app.post("/api/list-reset", async (req, res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try {
     const lsid = String(req.body.lsid || "");
     if (!isListId(lsid)) return res.status(400).send("Bad input");
@@ -1336,11 +1471,14 @@ app.post("/api/list-reset", async (req, res) => {
 
     res.status(200).send("Reset");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
+  finally { saveProfileBack(p); }
 });
 
 // save a per-list custom order and set default sort=custom
 app.post("/api/custom-order", async (req,res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try{
     const lsid = String(req.body.lsid || "");
     const order = Array.isArray(req.body.order) ? req.body.order.filter(isImdb) : [];
@@ -1372,11 +1510,14 @@ app.post("/api/custom-order", async (req,res) => {
 
     res.status(200).json({ ok:true, manifestRev: MANIFEST_REV });
   }catch(e){ console.error("custom-order:", e); res.status(500).send("Failed"); }
+  finally { saveProfileBack(p); }
 });
 
 // add sources quickly then sync
 app.post("/api/add-sources", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try{
     const users = Array.isArray(req.body.users) ? req.body.users.map(s=>String(s).trim()).filter(Boolean) : [];
     const lists = Array.isArray(req.body.lists) ? req.body.lists.map(s=>String(s).trim()).filter(Boolean) : [];
@@ -1389,11 +1530,14 @@ app.post("/api/add-sources", async (req,res)=>{
     scheduleNextSync();
     res.status(200).send("Sources added & synced");
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
+  finally { saveProfileBack(p); }
 });
 
 // remove/block a list
 app.post("/api/remove-list", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try{
     const lsid = String(req.body.lsid||"");
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
@@ -1415,26 +1559,39 @@ app.post("/api/remove-list", async (req,res)=>{
     });
     res.status(200).send("Removed & blocked");
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
+  finally { saveProfileBack(p); }
 });
 
 app.post("/api/sync", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try{
     await fullSync({ rediscover:true });
     scheduleNextSync();
-    res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
+    const backLink = profileId === "default"
+      ? `/admin?admin=${ADMIN_PASSWORD}`
+      : `/u/${encodeURIComponent(profileId)}/admin`;
+    res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="${backLink}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
+  finally { saveProfileBack(p); }
 });
 app.post("/api/purge-sync", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  const profileId = req.query.profile || "default";
+  if (profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden");
+  const p = useProfile(profileId);
   try{
     LISTS = Object.create(null);
     BEST.clear(); FALLBK.clear(); EP2SER.clear(); CARD.clear();
     PREFS.customOrder = PREFS.customOrder || {};
     await fullSync({ rediscover:true });
     scheduleNextSync();
-    res.status(200).send(`Purged & synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
+    const backLink = profileId === "default"
+      ? `/admin?admin=${ADMIN_PASSWORD}`
+      : `/u/${encodeURIComponent(profileId)}/admin`;
+    res.status(200).send(`Purged & synced at ${new Date().toISOString()}. <a href="${backLink}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
+  finally { saveProfileBack(p); }
 });
 
 app.get("/api/debug-imdb", async (req,res)=>{
@@ -1447,29 +1604,84 @@ app.get("/api/debug-imdb", async (req,res)=>{
   }catch(e){ res.type("text").status(500).send("Fetch failed: "+e.message); }
 });
 
+app.post("/api/public/create-profile", express.json(), async (req, res) => {
+  try {
+    const sources = req.body && req.body.sources || {};
+    const profileId = "p_" + crypto.randomBytes(12).toString("base64url");
+    const p = useProfile(profileId);
+    PREFS.sources = {
+      users: Array.isArray(sources.users) ? sources.users.map(s => String(s).trim()).filter(Boolean) : [],
+      lists: Array.isArray(sources.lists) ? sources.lists.map(s => String(s).trim()).filter(Boolean) : [],
+      traktUsers: Array.isArray(sources.traktUsers) ? sources.traktUsers.map(s => String(s).trim()).filter(Boolean) : []
+    };
+    saveProfileBack(p);
+
+    await fullSync({ rediscover: true });
+    saveProfileBack(p);
+    await saveProfileSnapshot(profileId, {
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lastManifestKey: LAST_MANIFEST_KEY,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
+
+    const base = absoluteBase(req);
+    const manifestUrl = `${base}/manifest.json?profile=${encodeURIComponent(profileId)}${SHARED_SECRET ? "&key="+SHARED_SECRET : ""}`;
+    const adminUrl = `${base}/u/${encodeURIComponent(profileId)}/admin`;
+    res.json({ profileId, manifestUrl, adminUrl });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // ------- Admin page (simplified UI: no poster shape) -------
-app.get("/admin", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
-  const base = absoluteBase(req);
-  const manifestUrl = `${base}/manifest.json${SHARED_SECRET?`?key=${SHARED_SECRET}`:""}`;
+async function renderDashboard(req, res, profileId, requireAdmin = false) {
+  if (requireAdmin && profileId === "default" && !adminAllowed(req)) return res.status(403).send("Forbidden. Append ?admin=YOUR_PASSWORD");
+  const p = useProfile(profileId);
+  try {
+    const base = absoluteBase(req);
+    const manifestUrl = `${base}/manifest.json${profileId === "default" ? (SHARED_SECRET?`?key=${SHARED_SECRET}`:"") : `?profile=${encodeURIComponent(profileId)}${SHARED_SECRET?`&key=${SHARED_SECRET}`:""}`}`;
+    const queryParam = profileId === "default"
+      ? `admin=${encodeURIComponent(ADMIN_PASSWORD)}`
+      : `profile=${encodeURIComponent(profileId)}`;
 
-  let discovered = [];
-  try { discovered = await harvestSources(); } catch {}
+    let discovered = [];
+    try { discovered = await harvestSources(); } catch {}
 
-  const rows = Object.keys(LISTS).map(id => {
-    const L = LISTS[id]; const count=(L.ids||[]).length;
-    return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
-  }).join("") || "<li>(none)</li>";
+    if (profileId !== "default" && !p._loadedSnapshot) {
+      const snap = await loadProfileSnapshot(profileId);
+      if (snap) {
+        LISTS = p.LISTS = snap.lists || Object.create(null);
+        PREFS = p.PREFS = snap.prefs || PREFS;
+        if (snap.fallback) FALLBK.clear(), Object.entries(snap.fallback).forEach(([k,v]) => FALLBK.set(k,v));
+        if (snap.cards) CARD.clear(), Object.entries(snap.cards).forEach(([k,v]) => CARD.set(k,v));
+        if (snap.ep2ser) EP2SER.clear(), Object.entries(snap.ep2ser).forEach(([k,v]) => EP2SER.set(k,v));
+        LAST_SYNC_AT  = p.LAST_SYNC_AT  = snap.lastSyncAt || 0;
+        MANIFEST_REV  = p.MANIFEST_REV  = snap.manifestRev || 1;
+        LAST_MANIFEST_KEY = p.LAST_MANIFEST_KEY = snap.lastManifestKey || "";
+      }
+      p._loadedSnapshot = true;
+    }
 
-  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
+    const rows = Object.keys(LISTS).map(id => {
+      const L = LISTS[id]; const count=(L.ids||[]).length;
+      return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
+    }).join("") || "<li>(none)</li>";
 
-  const lastSyncText = LAST_SYNC_AT
-    ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
-    : "never";
+    const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
 
-  res.type("html").send(`<!doctype html>
+    const lastSyncText = LAST_SYNC_AT
+      ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
+      : "never";
+
+    res.type("html").send(`<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>My Lists – Admin</title>
+<title>My Lists – ${profileId === "default" ? "Admin" : "Profile"}</title>
 <style>
   :root{
     color-scheme:light;
@@ -1694,10 +1906,10 @@ app.get("/admin", async (req,res)=>{
       <h3>Current Snapshot</h3>
       <ul>${rows}</ul>
       <div class="rowtools">
-        <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
+        <form method="POST" action="/api/sync?${queryParam}">
           <button class="btn2" type="submit">🔁 Sync Lists Now</button>
         </form>
-        <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge & re-sync everything?')">
+        <form method="POST" action="/api/purge-sync?${queryParam}" onsubmit="return confirm('Purge & re-sync everything?')">
           <button type="submit">🧹 Purge & Sync</button>
         </form>
         <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
@@ -1768,16 +1980,18 @@ app.get("/admin", async (req,res)=>{
 </div>
 
 <script>
-const ADMIN="${ADMIN_PASSWORD}";
+const QUERY = ${JSON.stringify(queryParam)};
+const PROFILE_ID = ${JSON.stringify(profileId === "default" ? "" : profileId)};
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 const HOST_URL = ${JSON.stringify(base)};
 const SECRET = ${JSON.stringify(SHARED_SECRET)};
+const manifestUrl = ${JSON.stringify(manifestUrl)};
 
-async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
-async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
-async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
+async function getPrefs(){ const r = await fetch('/api/prefs?'+QUERY); return r.json(); }
+async function getLists(){ const r = await fetch('/api/lists?'+QUERY); return r.json(); }
+async function getListItems(lsid){ const r = await fetch('/api/list-items?'+QUERY+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
 async function saveCustomOrder(lsid, order){
-  const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
+  const r = await fetch('/api/custom-order?'+QUERY, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
   if (!r.ok) throw new Error('save failed');
   return r.json();
 }
@@ -1788,9 +2002,9 @@ document.addEventListener('DOMContentLoaded', () => {
   if (btn) {
     btn.onclick = (e) => {
       e.preventDefault();
-      let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
-      if (SECRET) url += '?key=' + SECRET;
-      window.location.href = url;
+      let url = manifestUrl;
+      if (!url.includes('://')) url = HOST_URL + '/manifest.json';
+      window.location.href = url.replace(/^https?:/, 'stremio:');
     };
   }
 
@@ -1834,7 +2048,7 @@ function normalizeListIdOrUrl2(v){
 
 }
 async function addSources(payload){
-  await fetch('/api/add-sources?admin='+ADMIN, {
+  await fetch('/api/add-sources?'+QUERY, {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify(payload)
   });
@@ -2031,7 +2245,7 @@ async function render() {
         el('span',{class:'x',text:'Unblock'})
       ]);
       pill.querySelector('.x').onclick = async ()=>{
-        await fetch('/api/unblock-list?admin='+ADMIN, {
+        await fetch('/api/unblock-list?'+QUERY, {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ lsid })
         });
@@ -2110,7 +2324,7 @@ async function render() {
         li.querySelector('.del').onclick = async (e)=>{
           e.stopPropagation();
           if (!confirm('Remove this item from the list?')) return;
-          await fetch('/api/list-remove?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: it.id })});
+          await fetch('/api/list-remove?'+QUERY, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: it.id })});
           await refresh();
         };
 
@@ -2146,7 +2360,7 @@ async function render() {
           if (!m) { alert('Enter a valid IMDb id'); return; }
           input.disabled = true;
           try {
-            await fetch('/api/list-add?admin='+ADMIN, {
+            await fetch('/api/list-add?'+QUERY, {
               method: 'POST',
               headers: { 'Content-Type':'application/json' },
               body: JSON.stringify({ lsid, id: m[1] })
@@ -2235,7 +2449,7 @@ async function render() {
         if (!confirm('Full reset: clear custom order and local add/remove edits for this list?')) return;
         resetAllBtn.disabled = true;
         try{
-          await fetch('/api/list-reset?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
+          await fetch('/api/list-reset?'+QUERY, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })});
           await refresh();
         } finally {
           resetAllBtn.disabled = false;
@@ -2256,7 +2470,7 @@ async function render() {
 
   function removeList(lsid){
     if (!confirm('Remove this list and block it from reappearing?')) return;
-    fetch('/api/remove-list?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })})
+    fetch('/api/remove-list?'+QUERY, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid })})
       .then(()=> location.reload())
       .catch(()=> alert('Remove failed'));
   }
@@ -2359,7 +2573,7 @@ async function render() {
       blocked: prefs.blocked || []
     };
     msg.textContent = "Saving…";
-    const r = await fetch('/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const r = await fetch('/api/prefs?'+QUERY, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     const t = await r.text();
     msg.textContent = text || t || "Saved.";
     setTimeout(()=>{ msg.textContent = ""; }, 1800);
@@ -2372,6 +2586,17 @@ wireAddButtons();
 render();
 </script>
 </body></html>`);
+  } finally { saveProfileBack(p); }
+}
+
+app.get("/admin", async (req,res)=>{
+  const profileId = req.query.profile || "default";
+  return renderDashboard(req, res, profileId, true);
+});
+
+app.get("/u/:profileId/admin", async (req,res)=>{
+  const profileId = req.params.profileId || "default";
+  return renderDashboard(req, res, profileId, profileId === "default");
 });
 
 // ----------------- BOOT -----------------
