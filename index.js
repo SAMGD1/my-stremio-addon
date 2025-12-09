@@ -1158,30 +1158,43 @@ function normalizeUsers(entries){
     return v;
   });
 }
+const userField = document.getElementById('userEntries');
+const listField = document.getElementById('listUrls');
 document.getElementById('createForm').addEventListener('submit', async (e)=>{
   e.preventDefault();
+  e.stopPropagation();
   const status = document.getElementById('createStatus');
+  const btn = e.submitter || document.querySelector('#createForm button[type="submit"]');
   status.textContent = '';
-  const users = normalizeUsers(document.getElementById('userEntries').value);
-  const lists = splitLines(document.getElementById('listUrls').value);
+  const users = normalizeUsers(userField.value);
+  const lists = splitLines(listField.value);
   if (!users.length && !lists.length) {
     status.textContent = 'Please add at least one username or list link.';
+    alert('Please paste an IMDb/Trakt username or list link.');
+    (userField.value ? listField : userField).focus();
     return;
   }
   status.textContent = 'Creating…';
+  if (btn) btn.disabled = true;
   const sources = { users, lists };
   try {
     const r = await fetch('/api/public/create-profile', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ sources })
     });
-    if (!r.ok) throw new Error(await r.text() || 'Create failed');
+    if (!r.ok) {
+      const msg = await r.text();
+      throw new Error(msg || 'Create failed');
+    }
     const data = await r.json();
     document.getElementById('manifestInfo').innerHTML = 'Manifest URL: <a href="'+data.manifestUrl+'">'+data.manifestUrl+'</a>';
     status.textContent = 'Redirecting to your dashboard…';
-    window.location.href = data.adminUrl;
+    window.location.assign(data.adminUrl);
   } catch(err) {
     status.textContent = 'Error: ' + err.message;
+    alert('Could not create profile: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 });
 
@@ -1649,6 +1662,7 @@ app.post("/api/public/create-profile", express.json(), async (req, res) => {
 
     (async()=>{
       try {
+        useProfile(profileId);
         await fullSync({ rediscover: true });
         saveProfileBack(p);
         await saveProfileSnapshot(profileId, {
