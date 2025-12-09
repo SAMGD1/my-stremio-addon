@@ -1161,7 +1161,10 @@ function normalizeUsers(entries){
 const userField = document.getElementById('userEntries');
 const listField = document.getElementById('listUrls');
 const createBtn = document.getElementById('createBtn');
-createBtn.addEventListener('click', async ()=>{
+const createForm = document.getElementById('createForm');
+
+async function handleCreate(evt){
+  evt?.preventDefault();
   const status = document.getElementById('createStatus');
   status.textContent = '';
   const users = normalizeUsers(userField.value);
@@ -1170,7 +1173,7 @@ createBtn.addEventListener('click', async ()=>{
     status.textContent = 'Please add at least one username or list link.';
     alert('Please paste an IMDb/Trakt username or list link.');
     (userField.value ? listField : userField).focus();
-    return;
+    return false;
   }
   status.textContent = 'Creating…';
   createBtn.disabled = true;
@@ -1187,14 +1190,18 @@ createBtn.addEventListener('click', async ()=>{
     const data = await r.json();
     document.getElementById('manifestInfo').innerHTML = 'Manifest URL: <a href="'+data.manifestUrl+'">'+data.manifestUrl+'</a>';
     status.textContent = 'Redirecting to your dashboard…';
-    window.location.assign(data.adminUrl);
+    window.location.href = data.adminUrl;
   } catch(err) {
     status.textContent = 'Error: ' + err.message;
     alert('Could not create profile: ' + err.message);
   } finally {
     createBtn.disabled = false;
   }
-});
+  return false;
+}
+
+createBtn.addEventListener('click', handleCreate);
+createForm.addEventListener('submit', handleCreate);
 
 document.getElementById('openBtn').onclick = ()=>{
   const raw = (document.getElementById('existingId').value||'').trim();
@@ -1648,7 +1655,7 @@ app.post("/api/public/create-profile", express.json(), async (req, res) => {
       return res.status(400).json({ error: "Please provide at least one user or list link." });
     }
 
-    const profileId = "p_" + crypto.randomBytes(12).toString("base64url");
+    const profileId = "p_" + crypto.randomInt(1_000_000, 1_000_000_000).toString();
     const p = useProfile(profileId);
     PREFS.sources = { users, lists, traktUsers: [] };
     saveProfileBack(p);
