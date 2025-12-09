@@ -1120,12 +1120,10 @@ app.get("/", (req, res) => {
         <h3>Create your personal addon</h3>
         <p class="muted">Use public IMDb/Trakt sources. A private profile id will be generated.</p>
         <form id="createForm">
-          <label>IMDb user /lists URL (optional)</label>
-          <input id="imdbUser" placeholder="https://www.imdb.com/user/urXXXXXX/lists/" />
-          <label>Extra IMDb/Trakt list URLs (one per line)</label>
+          <label>IMDb or Trakt usernames / profile URLs</label>
+          <textarea id="userEntries" rows="2" placeholder="ur12345678, imdb.com/user/ur12345678/lists/, trakt.tv/users/yourname"></textarea>
+          <label>IMDb or Trakt list URLs (one per line)</label>
           <textarea id="listUrls" rows="3" placeholder="IMDb ls… or Trakt list URLs"></textarea>
-          <label>Trakt usernames (comma or newline separated)</label>
-          <textarea id="traktUsers" rows="2" placeholder="traktuser"></textarea>
           <div class="note">Only public IMDb & Trakt lists are supported. First sync may take a moment.</div>
           <div class="row">
             <button type="submit">Create profile</button>
@@ -1150,21 +1148,34 @@ app.get("/", (req, res) => {
 function splitLines(val){
   return (val||'').split(/[,\n]/).map(s=>s.trim()).filter(Boolean);
 }
+function normalizeUsers(entries){
+  return splitLines(entries).map(v=>{
+    if (/^https?:\/\/trakt\.tv\/users\//i.test(v)) return v;
+    if (/^https?:\/\/www\.imdb\.com\/user\//i.test(v)) {
+      return v.includes('/lists') ? v : v.replace(/\/+$|$/, '/') + 'lists/';
+    }
+    if (/^ur\d{2,}$/i.test(v)) return 'https://www.imdb.com/user/'+v+'/lists/';
+    return v;
+  });
+}
 document.getElementById('createForm').addEventListener('submit', async (e)=>{
   e.preventDefault();
   const status = document.getElementById('createStatus');
+  status.textContent = '';
+  const users = normalizeUsers(document.getElementById('userEntries').value);
+  const lists = splitLines(document.getElementById('listUrls').value);
+  if (!users.length && !lists.length) {
+    status.textContent = 'Please add at least one username or list link.';
+    return;
+  }
   status.textContent = 'Creating…';
-  const sources = {
-    users: splitLines(document.getElementById('imdbUser').value),
-    lists: splitLines(document.getElementById('listUrls').value),
-    traktUsers: splitLines(document.getElementById('traktUsers').value)
-  };
+  const sources = { users, lists };
   try {
     const r = await fetch('/api/public/create-profile', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ sources })
     });
-    if (!r.ok) throw new Error('Create failed');
+    if (!r.ok) throw new Error(await r.text() || 'Create failed');
     const data = await r.json();
     document.getElementById('manifestInfo').innerHTML = 'Manifest URL: <a href="'+data.manifestUrl+'">'+data.manifestUrl+'</a>';
     status.textContent = 'Redirecting to your dashboard…';
@@ -1604,35 +1615,56 @@ app.get("/api/debug-imdb", async (req,res)=>{
   }catch(e){ res.type("text").status(500).send("Fetch failed: "+e.message); }
 });
 
+function normalizeUserEntry(val){
+  const v = String(val||"").trim();
+  if (!v) return "";
+  if (/^https?:\/\/www\.imdb\.com\/user\//i.test(v)) return v.includes('/lists') ? v : v.replace(/\/+$|$/, '/') + 'lists/';
+  if (/^https?:\/\/trakt\.tv\/users\//i.test(v)) return v;
+  if (/^ur\d{2,}$/i.test(v)) return `https://www.imdb.com/user/${v}/lists/`;
+  return v;
+}
+
 app.post("/api/public/create-profile", express.json(), async (req, res) => {
   try {
     const sources = req.body && req.body.sources || {};
+    const rawUsers = Array.isArray(sources.users) ? sources.users : [];
+    const rawLists = Array.isArray(sources.lists) ? sources.lists : [];
+
+    const users = Array.from(new Set(rawUsers.map(normalizeUserEntry).filter(Boolean)));
+    const lists = Array.from(new Set(rawLists.map(s => String(s).trim()).filter(Boolean)));
+
+    if (!users.length && !lists.length) {
+      return res.status(400).json({ error: "Please provide at least one user or list link." });
+    }
+
     const profileId = "p_" + crypto.randomBytes(12).toString("base64url");
     const p = useProfile(profileId);
-    PREFS.sources = {
-      users: Array.isArray(sources.users) ? sources.users.map(s => String(s).trim()).filter(Boolean) : [],
-      lists: Array.isArray(sources.lists) ? sources.lists.map(s => String(s).trim()).filter(Boolean) : [],
-      traktUsers: Array.isArray(sources.traktUsers) ? sources.traktUsers.map(s => String(s).trim()).filter(Boolean) : []
-    };
+    PREFS.sources = { users, lists, traktUsers: [] };
     saveProfileBack(p);
-
-    await fullSync({ rediscover: true });
-    saveProfileBack(p);
-    await saveProfileSnapshot(profileId, {
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lastManifestKey: LAST_MANIFEST_KEY,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
 
     const base = absoluteBase(req);
     const manifestUrl = `${base}/manifest.json?profile=${encodeURIComponent(profileId)}${SHARED_SECRET ? "&key="+SHARED_SECRET : ""}`;
     const adminUrl = `${base}/u/${encodeURIComponent(profileId)}/admin`;
     res.json({ profileId, manifestUrl, adminUrl });
+
+    (async()=>{
+      try {
+        await fullSync({ rediscover: true });
+        saveProfileBack(p);
+        await saveProfileSnapshot(profileId, {
+          lastSyncAt: LAST_SYNC_AT,
+          manifestRev: MANIFEST_REV,
+          lastManifestKey: LAST_MANIFEST_KEY,
+          lists: LISTS,
+          prefs: PREFS,
+          fallback: Object.fromEntries(FALLBK),
+          cards: Object.fromEntries(CARD),
+          ep2ser: Object.fromEntries(EP2SER)
+        });
+      } catch (err) {
+        console.error("[public-create] sync failed", err);
+      }
+    })();
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err) });
