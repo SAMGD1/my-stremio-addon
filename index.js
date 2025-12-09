@@ -4,6 +4,8 @@
 "use strict";
 const express = require("express");
 const fs = require("fs/promises");
+const crypto = require("crypto");
+const path   = require("path");
 
 // ----------------- ENV -----------------
 const PORT  = Number(process.env.PORT || 7000);
@@ -101,6 +103,83 @@ let syncInProgress = false;
 
 let MANIFEST_REV = 1;
 let LAST_MANIFEST_KEY = "";
+
+const profiles = new Map();
+
+function createDefaultPrefs() {
+  return {
+    listEdits: {},
+    enabled: [],
+    order: [],
+    defaultList: "",
+    perListSort: {},
+    sortOptions: {},
+    customOrder: {},
+    upgradeEpisodes: UPGRADE_EPISODES,
+    sources: {
+      users: [],
+      lists: [],
+      traktUsers: []
+    },
+    blocked: []
+  };
+}
+
+function createProfileState(id) {
+  return {
+    id,
+    LISTS: Object.create(null),
+    PREFS: createDefaultPrefs(),
+    BEST: new Map(),
+    FALLBK: new Map(),
+    EP2SER: new Map(),
+    CARD: new Map(),
+    LAST_SYNC_AT: 0,
+    MANIFEST_REV: 1,
+    LAST_MANIFEST_KEY: "",
+    syncTimer: null,
+    syncInProgress: false
+  };
+}
+
+function getProfile(id = "default") {
+  let p = profiles.get(id);
+  if (!p) {
+    p = createProfileState(id);
+    profiles.set(id, p);
+  }
+  return p;
+}
+
+function useProfile(id = "default") {
+  const p = getProfile(id);
+  LISTS = p.LISTS;
+  PREFS = p.PREFS;
+  BEST = p.BEST;
+  FALLBK = p.FALLBK;
+  EP2SER = p.EP2SER;
+  CARD = p.CARD;
+  LAST_SYNC_AT = p.LAST_SYNC_AT;
+  MANIFEST_REV = p.MANIFEST_REV;
+  LAST_MANIFEST_KEY = p.LAST_MANIFEST_KEY;
+  syncTimer = p.syncTimer;
+  syncInProgress = p.syncInProgress;
+  return p;
+}
+
+function saveProfileBack(p) {
+  p.LISTS = LISTS;
+  p.PREFS = PREFS;
+  p.BEST = BEST;
+  p.FALLBK = FALLBK;
+  p.EP2SER = EP2SER;
+  p.CARD = CARD;
+  p.LAST_SYNC_AT = LAST_SYNC_AT;
+  p.MANIFEST_REV = MANIFEST_REV;
+  p.LAST_MANIFEST_KEY = LAST_MANIFEST_KEY;
+  p.syncTimer = syncTimer;
+  p.syncInProgress = syncInProgress;
+}
 
 // ----------------- UTILS -----------------
 const isImdb = v => /^tt\d{7,}$/i.test(String(v||""));
