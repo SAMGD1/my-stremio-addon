@@ -4,6 +4,8 @@
 "use strict";
 const express = require("express");
 const fs = require("fs/promises");
+const crypto = require("crypto");
+const path   = require("path");
 
 // ----------------- ENV -----------------
 const PORT  = Number(process.env.PORT || 7000);
@@ -29,7 +31,10 @@ const GITHUB_OWNER  = process.env.GITHUB_OWNER  || "";
 const GITHUB_REPO   = process.env.GITHUB_REPO   || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
-const SNAP_LOCAL    = "data/snapshot.json";
+const SNAP_DIR           = "data";
+const SNAP_DEFAULT_ID    = "default";
+const localSnapPath      = id => path.join(SNAP_DIR, `snapshot-${id}.json`);
+const githubSnapPath     = id => `data/snapshot-${id}.json`;
 
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
@@ -101,6 +106,83 @@ let syncInProgress = false;
 
 let MANIFEST_REV = 1;
 let LAST_MANIFEST_KEY = "";
+
+const profiles = new Map();
+
+function createDefaultPrefs() {
+  return {
+    listEdits: {},
+    enabled: [],
+    order: [],
+    defaultList: "",
+    perListSort: {},
+    sortOptions: {},
+    customOrder: {},
+    upgradeEpisodes: UPGRADE_EPISODES,
+    sources: {
+      users: [],
+      lists: [],
+      traktUsers: []
+    },
+    blocked: []
+  };
+}
+
+function createProfileState(id) {
+  return {
+    id,
+    LISTS: Object.create(null),
+    PREFS: createDefaultPrefs(),
+    BEST: new Map(),
+    FALLBK: new Map(),
+    EP2SER: new Map(),
+    CARD: new Map(),
+    LAST_SYNC_AT: 0,
+    MANIFEST_REV: 1,
+    LAST_MANIFEST_KEY: "",
+    syncTimer: null,
+    syncInProgress: false
+  };
+}
+
+function getProfile(id = "default") {
+  let p = profiles.get(id);
+  if (!p) {
+    p = createProfileState(id);
+    profiles.set(id, p);
+  }
+  return p;
+}
+
+function useProfile(id = "default") {
+  const p = getProfile(id);
+  LISTS = p.LISTS;
+  PREFS = p.PREFS;
+  BEST = p.BEST;
+  FALLBK = p.FALLBK;
+  EP2SER = p.EP2SER;
+  CARD = p.CARD;
+  LAST_SYNC_AT = p.LAST_SYNC_AT;
+  MANIFEST_REV = p.MANIFEST_REV;
+  LAST_MANIFEST_KEY = p.LAST_MANIFEST_KEY;
+  syncTimer = p.syncTimer;
+  syncInProgress = p.syncInProgress;
+  return p;
+}
+
+function saveProfileBack(p) {
+  p.LISTS = LISTS;
+  p.PREFS = PREFS;
+  p.BEST = BEST;
+  p.FALLBK = FALLBK;
+  p.EP2SER = EP2SER;
+  p.CARD = CARD;
+  p.LAST_SYNC_AT = LAST_SYNC_AT;
+  p.MANIFEST_REV = MANIFEST_REV;
+  p.LAST_MANIFEST_KEY = LAST_MANIFEST_KEY;
+  p.syncTimer = syncTimer;
+  p.syncInProgress = syncInProgress;
+}
 
 // ----------------- UTILS -----------------
 const isImdb = v => /^tt\d{7,}$/i.test(String(v||""));
@@ -178,33 +260,33 @@ async function ghGetSha(path) {
     return data && data.sha || null;
   } catch { return null; }
 }
-async function saveSnapshot(obj) {
+async function saveProfileSnapshot(profileId, obj) {
   // local (best effort)
   try {
-    await fs.mkdir("data", { recursive: true });
-    await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
+    await fs.mkdir(SNAP_DIR, { recursive: true });
+    await fs.writeFile(localSnapPath(profileId), JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
   // GitHub (if enabled)
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
-  const path = "data/snapshot.json";
-  const sha = await ghGetSha(path);
-  const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
+  const gPath = githubSnapPath(profileId);
+  const sha = await ghGetSha(gPath);
+  const body = { message: "Update snapshot-" + profileId + ".json", content, branch: GITHUB_BRANCH };
   if (sha) body.sha = sha;
-  await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
+  await gh("PUT", `/contents/${encodeURIComponent(gPath)}`, body);
 }
-async function loadSnapshot() {
+async function loadProfileSnapshot(profileId) {
   // try GitHub first
   if (GH_ENABLED) {
     try {
-      const data = await gh("GET", `/contents/${encodeURIComponent("data/snapshot.json")}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+      const data = await gh("GET", `/contents/${encodeURIComponent(githubSnapPath(profileId))}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
       const buf = Buffer.from(data.content, "base64").toString("utf8");
       return JSON.parse(buf);
     } catch {/* ignore */}
   }
   // local
   try {
-    const txt = await fs.readFile(SNAP_LOCAL, "utf8");
+    const txt = await fs.readFile(localSnapPath(profileId), "utf8");
     return JSON.parse(txt);
   } catch { return null; }
 }
@@ -875,9 +957,10 @@ async function fullSync({ rediscover = true } = {}) {
       console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
     }
 
-    await saveSnapshot({
+    await saveProfileSnapshot("default", {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
+      lastManifestKey: LAST_MANIFEST_KEY,
       lists: LISTS,
       prefs: PREFS,
       fallback: Object.fromEntries(FALLBK),
@@ -964,6 +1047,8 @@ function catalogs(){
   }));
 }
 app.get("/manifest.json", (req,res)=>{
+  const profileId = req.query.profile || "default";
+  const p = useProfile(profileId);
   try{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
@@ -972,9 +1057,9 @@ app.get("/manifest.json", (req,res)=>{
       ...baseManifest,
       version,
       catalogs: catalogs(),
-      configuration: `${absoluteBase(req)}/configure`
+      configuration: `${absoluteBase(req)}/configure?profile=${encodeURIComponent(profileId)}`
     });
-  }catch(e){ console.error("manifest:", e); res.status(500).send("Internal Server Error");}
+  }catch(e){ console.error("manifest:", e); res.status(500).send("Internal Server Error");} finally { saveProfileBack(p); }
 });
 
 app.get("/configure", (req, res) => {
@@ -1000,6 +1085,8 @@ function parseExtra(extraStr, qObj){
   return { ...Object.fromEntries(p.entries()), ...(qObj||{}) };
 }
 app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
+  const profileId = req.query.profile || "default";
+  const p = useProfile(profileId);
   try{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
@@ -1045,11 +1132,13 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     // No poster-shape swap; meta already has a single poster field
     res.json({ metas: metas.slice(skip, skip+limit) });
-  }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
+  }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); } finally { saveProfileBack(p); }
 });
 
 // ------- Meta -------
 app.get("/meta/:type/:id.json", async (req,res)=>{
+  const profileId = req.query.profile || "default";
+  const p = useProfile(profileId);
   try{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     maybeBackgroundSync();
@@ -1072,7 +1161,7 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
         type: rec.kind
       }
     });
-  }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
+  }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); } finally { saveProfileBack(p); }
 });
 
 // ------- Admin + debug & new endpoints -------
@@ -1114,9 +1203,10 @@ app.post("/api/prefs", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshot({
+    await saveProfileSnapshot("default", {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
+      lastManifestKey: LAST_MANIFEST_KEY,
       lists: LISTS,
       prefs: PREFS,
       fallback: Object.fromEntries(FALLBK),
@@ -1178,9 +1268,10 @@ app.post("/api/list-add", async (req, res) => {
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
 
-    await saveSnapshot({
+    await saveProfileSnapshot("default", {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
+      lastManifestKey: LAST_MANIFEST_KEY,
       lists: LISTS,
       prefs: PREFS,
       fallback: Object.fromEntries(FALLBK),
@@ -1208,9 +1299,10 @@ app.post("/api/list-remove", async (req, res) => {
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
 
-    await saveSnapshot({
+    await saveProfileSnapshot("default", {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
+      lastManifestKey: LAST_MANIFEST_KEY,
       lists: LISTS,
       prefs: PREFS,
       fallback: Object.fromEntries(FALLBK),
@@ -1231,9 +1323,10 @@ app.post("/api/list-reset", async (req, res) => {
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
 
-    await saveSnapshot({
+    await saveProfileSnapshot("default", {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
+      lastManifestKey: LAST_MANIFEST_KEY,
       lists: LISTS,
       prefs: PREFS,
       fallback: Object.fromEntries(FALLBK),
@@ -1266,9 +1359,10 @@ app.post("/api/custom-order", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshot({
+    await saveProfileSnapshot("default", {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
+      lastManifestKey: LAST_MANIFEST_KEY,
       lists: LISTS,
       prefs: PREFS,
       fallback: Object.fromEntries(FALLBK),
@@ -1309,9 +1403,10 @@ app.post("/api/remove-list", async (req,res)=>{
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
 
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
-    await saveSnapshot({
+    await saveProfileSnapshot("default", {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
+      lastManifestKey: LAST_MANIFEST_KEY,
       lists: LISTS,
       prefs: PREFS,
       fallback: Object.fromEntries(FALLBK),
@@ -2282,16 +2377,17 @@ render();
 // ----------------- BOOT -----------------
 (async () => {
   try {
-    const snap = await loadSnapshot();
+    const p = getProfile("default");
+    const snap = await loadProfileSnapshot("default");
     if (snap) {
-      LISTS = snap.lists || LISTS;
-      PREFS = { ...PREFS, ...(snap.prefs || {}) };
-      FALLBK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
-      CARD.clear();   if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
-      EP2SER.clear(); if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
-      MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
-      LAST_SYNC_AT = snap.lastSyncAt || 0;
-      LAST_MANIFEST_KEY = manifestKey();
+      LISTS = p.LISTS = snap.lists || Object.create(null);
+      PREFS = p.PREFS = snap.prefs || PREFS;
+      if (snap.fallback) FALLBK.clear(), Object.entries(snap.fallback).forEach(([k,v]) => FALLBK.set(k,v));
+      if (snap.cards) CARD.clear(), Object.entries(snap.cards).forEach(([k,v]) => CARD.set(k,v));
+      if (snap.ep2ser) EP2SER.clear(), Object.entries(snap.ep2ser).forEach(([k,v]) => EP2SER.set(k,v));
+      LAST_SYNC_AT  = p.LAST_SYNC_AT  = snap.lastSyncAt || 0;
+      MANIFEST_REV  = p.MANIFEST_REV  = snap.manifestRev || 1;
+      LAST_MANIFEST_KEY = p.LAST_MANIFEST_KEY = snap.lastManifestKey || "";
 
       console.log("[BOOT] snapshot loaded");
     }
