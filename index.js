@@ -95,10 +95,10 @@ let PREFS = {
   blocked: []             // listIds you removed/blocked (IMDb or Trakt)
 };
 
-const BEST   = new Map(); // Map<tt, { kind, meta }>
-const FALLBK = new Map(); // Map<tt, { name?, poster?, releaseDate?, year?, type? }>
-const EP2SER = new Map(); // Map<episode_tt, parent_series_tt>
-const CARD   = new Map(); // Map<tt, card>
+let BEST   = new Map(); // Map<tt, { kind, meta }>
+let FALLBK = new Map(); // Map<tt, { name?, poster?, releaseDate?, year?, type? }>
+let EP2SER = new Map(); // Map<episode_tt, parent_series_tt>
+let CARD   = new Map(); // Map<tt, card>
 
 let LAST_SYNC_AT = 0;
 let syncTimer = null;
@@ -1322,7 +1322,7 @@ app.post("/api/prefs", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveProfileSnapshot("default", {
+    await saveProfileSnapshot(profileId, {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lastManifestKey: LAST_MANIFEST_KEY,
@@ -1397,7 +1397,7 @@ app.post("/api/list-add", async (req, res) => {
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
 
-    await saveProfileSnapshot("default", {
+    await saveProfileSnapshot(profileId, {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lastManifestKey: LAST_MANIFEST_KEY,
@@ -1431,7 +1431,7 @@ app.post("/api/list-remove", async (req, res) => {
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
 
-    await saveProfileSnapshot("default", {
+    await saveProfileSnapshot(profileId, {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lastManifestKey: LAST_MANIFEST_KEY,
@@ -1458,7 +1458,7 @@ app.post("/api/list-reset", async (req, res) => {
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
 
-    await saveProfileSnapshot("default", {
+    await saveProfileSnapshot(profileId, {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lastManifestKey: LAST_MANIFEST_KEY,
@@ -1497,7 +1497,7 @@ app.post("/api/custom-order", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveProfileSnapshot("default", {
+    await saveProfileSnapshot(profileId, {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lastManifestKey: LAST_MANIFEST_KEY,
@@ -1547,7 +1547,7 @@ app.post("/api/remove-list", async (req,res)=>{
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
 
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
-    await saveProfileSnapshot("default", {
+    await saveProfileSnapshot(profileId, {
       lastSyncAt: LAST_SYNC_AT,
       manifestRev: MANIFEST_REV,
       lastManifestKey: LAST_MANIFEST_KEY,
