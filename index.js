@@ -1577,13 +1577,15 @@ app.get("/admin", async (req,res)=>{
     border-radius:999px;
     cursor:pointer;
     box-shadow:0 6px 16px rgba(0,0,0,.35);
+    text-decoration:none;
+    display:inline-block;
   }
   .nav-btn.active{
     background:var(--accent);
     box-shadow:0 10px 26px rgba(108,92,231,.55);
   }
   .section{width:100%;display:none;}
-  .section.active{display:block;}
+  .section.active, .section:target{display:block;}
   .center-card{max-width:980px;margin:0 auto;}
   .wrap{display:flex;flex-direction:column;align-items:center;}
 </style>
@@ -1595,9 +1597,9 @@ app.get("/admin", async (req,res)=>{
   </div>
 
   <div class="nav">
-    <button class="nav-btn active" data-target="snapshot">Snapshot</button>
-    <button class="nav-btn" data-target="add">Add Lists</button>
-    <button class="nav-btn" data-target="customize">Customize Layout</button>
+    <a class="nav-btn active" data-target="snapshot" href="#section-snapshot">Snapshot</a>
+    <a class="nav-btn" data-target="add" href="#section-add">Add Lists</a>
+    <a class="nav-btn" data-target="customize" href="#section-customize">Customize Layout</a>
   </div>
 
   <section id="section-snapshot" class="section active">
@@ -1690,28 +1692,44 @@ async function saveCustomOrder(lsid, order){
 }
 
 // --- Install Button Logic ---
-document.addEventListener('DOMContentLoaded', () => {
-  const btn = document.getElementById('installBtn');
-  if (btn) {
-    btn.onclick = (e) => {
-      e.preventDefault();
-      let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
-      if (SECRET) url += '?key=' + SECRET;
-      window.location.href = url;
-    };
+  function activateSection(target){
+    const name = target ? target.replace(/^section-/, '') : 'snapshot';
+    document.querySelectorAll('.nav-btn').forEach(b => {
+      const key = (b.dataset.target || '').replace(/^section-/, '');
+      b.classList.toggle('active', key === name);
+    });
+    document.querySelectorAll('.section').forEach(sec => {
+      sec.classList.toggle('active', sec.id === 'section-' + name);
+    });
   }
 
-  document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const target = btn.dataset.target;
-      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelectorAll('.section').forEach(sec => {
-        sec.classList.toggle('active', sec.id === 'section-' + target);
+  document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('installBtn');
+    if (btn) {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
+        if (SECRET) url += '?key=' + SECRET;
+        window.location.href = url;
+      };
+    }
+
+    const initialTarget = (location.hash || '').replace(/^#/, '') || 'section-snapshot';
+    activateSection(initialTarget);
+
+    window.addEventListener('hashchange', () => {
+      const target = (location.hash || '').replace(/^#/, '') || 'section-snapshot';
+      activateSection(target);
+    });
+
+    document.querySelectorAll('.nav-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const target = btn.getAttribute('href') || btn.dataset.target || '#section-snapshot';
+        const name = target.replace(/^#/, '').replace(/^section-/, '');
+        activateSection(name);
       });
     });
   });
-});
 
 function normalizeUserListsUrl(v){
   v = String(v||'').trim();
