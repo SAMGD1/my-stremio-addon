@@ -525,8 +525,8 @@ async function render() {
   const tbody = el('tbody');
 
   const enabledSet = new Set(prefs.enabled || []);
-  const perSort = JSON.stringify(prefs.perListSort || {});
-  const perOpts = JSON.stringify(prefs.sortOptions || {});
+  const perSort = prefs.perListSort || {};
+  const perOpts = prefs.sortOptions || {};
   const order = (prefs.order || Object.keys(lists || {})).filter(id => !!lists[id]);
 
   const cloneItems = (arr) => (arr || []).map(x=> ({...x}));
@@ -773,8 +773,6 @@ async function render() {
       items = items || [];
       items = items.filter(it=>!!(it && it.id));
 
-      const perSort = JSON.parse(${JSON.stringify(perSort)});
-      const perOpts = JSON.parse(${JSON.stringify(perOpts)});
       const curSort = perSort[lsid] || 'name_asc';
       const sortKey = curSort === 'custom' ? (perSort[lsid]||'name_asc') : curSort;
       const initialOrder = (()=>{
