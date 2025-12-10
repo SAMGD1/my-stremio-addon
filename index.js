@@ -1529,7 +1529,7 @@ app.get("/admin", async (req,res)=>{
   }
   .pill input{margin-right:4px}
   .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
-  input[type="text"]{
+  input[type="text"], textarea{
     background:#1c1837;
     color:var(--text);
     border:1px solid var(--border);
@@ -1537,6 +1537,12 @@ app.get("/admin", async (req,res)=>{
     padding:8px 9px;
     width:100%;
     font-size:13px;
+  }
+  textarea.multi-input{
+    min-height:84px;
+    resize:vertical;
+    line-height:1.4;
+    font-family:inherit;
   }
   .row{
     display:grid;
@@ -1571,13 +1577,15 @@ app.get("/admin", async (req,res)=>{
     border-radius:999px;
     cursor:pointer;
     box-shadow:0 6px 16px rgba(0,0,0,.35);
+    text-decoration:none;
+    display:inline-block;
   }
   .nav-btn.active{
     background:var(--accent);
     box-shadow:0 10px 26px rgba(108,92,231,.55);
   }
   .section{width:100%;display:none;}
-  .section.active{display:block;}
+  .section.active, .section:target{display:block;}
   .center-card{max-width:980px;margin:0 auto;}
   .wrap{display:flex;flex-direction:column;align-items:center;}
 </style>
@@ -1589,9 +1597,9 @@ app.get("/admin", async (req,res)=>{
   </div>
 
   <div class="nav">
-    <button class="nav-btn active" data-target="snapshot">Snapshot</button>
-    <button class="nav-btn" data-target="add">Add Lists</button>
-    <button class="nav-btn" data-target="customize">Customize Layout</button>
+    <a class="nav-btn active" data-target="snapshot" href="#section-snapshot">Snapshot</a>
+    <a class="nav-btn" data-target="add" href="#section-add">Add Lists</a>
+    <a class="nav-btn" data-target="customize" href="#section-customize">Customize Layout</a>
   </div>
 
   <section id="section-snapshot" class="section active">
@@ -1624,13 +1632,13 @@ app.get("/admin", async (req,res)=>{
 
       <div class="row">
         <div><label class="mini">Add IMDb/Trakt <b>User</b> URL</label>
-          <input id="userInput" placeholder="IMDb user /lists URL or Trakt user" />
+          <textarea id="userInput" class="multi-input" placeholder="IMDb user link/id or Trakt username (Shift+Enter for new line)"></textarea>
         </div>
         <div><button id="addUser" type="button">Add</button></div>
       </div>
       <div class="row">
         <div><label class="mini">Add IMDb/Trakt <b>List</b> URL</label>
-          <input id="listInput" placeholder="IMDb ls… or Trakt list URL" />
+          <textarea id="listInput" class="multi-input" placeholder="IMDb ls…/list URL or Trakt list (Shift+Enter for new line)"></textarea>
         </div>
         <div><button id="addList" type="button">Add</button></div>
       </div>
@@ -1684,33 +1692,52 @@ async function saveCustomOrder(lsid, order){
 }
 
 // --- Install Button Logic ---
-document.addEventListener('DOMContentLoaded', () => {
-  const btn = document.getElementById('installBtn');
-  if (btn) {
-    btn.onclick = (e) => {
-      e.preventDefault();
-      let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
-      if (SECRET) url += '?key=' + SECRET;
-      window.location.href = url;
-    };
+  function activateSection(target){
+    const name = target ? target.replace(/^section-/, '') : 'snapshot';
+    document.querySelectorAll('.nav-btn').forEach(b => {
+      const key = (b.dataset.target || '').replace(/^section-/, '');
+      b.classList.toggle('active', key === name);
+    });
+    document.querySelectorAll('.section').forEach(sec => {
+      sec.classList.toggle('active', sec.id === 'section-' + name);
+    });
   }
 
-  document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const target = btn.dataset.target;
-      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelectorAll('.section').forEach(sec => {
-        sec.classList.toggle('active', sec.id === 'section-' + target);
+  document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('installBtn');
+    if (btn) {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        let url = HOST_URL.replace(/^https?:/, 'stremio:') + '/manifest.json';
+        if (SECRET) url += '?key=' + SECRET;
+        window.location.href = url;
+      };
+    }
+
+    const initialTarget = (location.hash || '').replace(/^#/, '') || 'section-snapshot';
+    activateSection(initialTarget);
+
+    window.addEventListener('hashchange', () => {
+      const target = (location.hash || '').replace(/^#/, '') || 'section-snapshot';
+      activateSection(target);
+    });
+
+    document.querySelectorAll('.nav-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const target = btn.getAttribute('href') || btn.dataset.target || '#section-snapshot';
+        const name = target.replace(/^#/, '').replace(/^section-/, '');
+        activateSection(name);
       });
     });
   });
-});
 
 function normalizeUserListsUrl(v){
   v = String(v||'').trim();
   if (!v) return null;
-  if (/imdb\\.com\\/user\\/ur\\d+\\/lists/i.test(v)) return { kind:'imdb', value: v };
+  if (/imdb\\.com\\/user\\/ur\\d+/i.test(v)) {
+    const m = v.match(/ur\\d{6,}/i);
+    if (m) return { kind:'imdb', value: 'https://www.imdb.com/user/' + m[0] + '/lists/' };
+  }
   const m = v.match(/ur\\d{6,}/i);
   if (m) return { kind:'imdb', value: 'https://www.imdb.com/user/'+m[0]+'/lists/' };
 
@@ -1740,24 +1767,62 @@ async function addSources(payload){
     body: JSON.stringify(payload)
   });
 }
+function splitEntries(str){
+  return String(str||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+}
+function parseUserEntries(raw){
+  const payload = { users: [], lists: [], traktUsers: [] };
+  const invalid = [];
+  splitEntries(raw).forEach(line => {
+    const norm = normalizeUserListsUrl(line);
+    if (!norm) invalid.push(line);
+    else if (norm.kind === 'trakt') payload.traktUsers.push(norm.value);
+    else payload.users.push(norm.value);
+  });
+  payload.users = Array.from(new Set(payload.users));
+  payload.traktUsers = Array.from(new Set(payload.traktUsers));
+  return { payload, invalid };
+}
+function parseListEntries(raw){
+  const payload = { users: [], lists: [], traktUsers: [] };
+  const invalid = [];
+  splitEntries(raw).forEach(line => {
+    const url = normalizeListIdOrUrl2(line);
+    if (url) payload.lists.push(url);
+    else invalid.push(line);
+  });
+  payload.lists = Array.from(new Set(payload.lists));
+  return { payload, invalid };
+}
+function handleEnterSubmit(ctrl, handler){
+  ctrl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handler();
+    }
+  });
+}
 function wireAddButtons(){
   const userBtn = document.getElementById('addUser');
   const listBtn = document.getElementById('addList');
   const userInp = document.getElementById('userInput');
   const listInp = document.getElementById('listInput');
-  const traktUserBtn = document.getElementById('addTraktUser');
-  const traktUserInp = document.getElementById('traktUserInput');
+
+  handleEnterSubmit(userInp, () => userBtn.click());
+  handleEnterSubmit(listInp, () => listBtn.click());
 
   userBtn.onclick = async (e) => {
     e.preventDefault();
-    const norm = normalizeUserListsUrl(userInp.value);
-    if (!norm) { alert('Enter a valid IMDb user /lists URL, ur… id, or Trakt user'); return; }
+    const { payload, invalid } = parseUserEntries(userInp.value);
+    if (!payload.users.length && !payload.traktUsers.length) {
+      alert(invalid.length ? 'Invalid entries:\n- ' + invalid.join('\n- ') : 'Enter at least one user');
+      return;
+    }
     userBtn.disabled = true;
     try {
-      const payload = { users:[], lists:[], traktUsers:[] };
-      if (norm.kind === 'trakt') payload.traktUsers.push(norm.value);
-      else payload.users.push(norm.value);
       await addSources(payload);
+      userInp.value = '';
+      if (invalid.length) alert('Skipped invalid entries:\n- ' + invalid.join('\n- '));
       location.reload();
     }
     finally { userBtn.disabled = false; }
@@ -1765,10 +1830,18 @@ function wireAddButtons(){
 
   listBtn.onclick = async (e) => {
     e.preventDefault();
-    const url = normalizeListIdOrUrl2(listInp.value);
-    if (!url) { alert('Enter a valid IMDb list URL, ls… id, or Trakt list URL'); return; }
+    const { payload, invalid } = parseListEntries(listInp.value);
+    if (!payload.lists.length) {
+      alert(invalid.length ? 'Invalid entries:\n- ' + invalid.join('\n- ') : 'Enter at least one list');
+      return;
+    }
     listBtn.disabled = true;
-    try { await addSources({ users:[], lists:[url] }); location.reload(); }
+    try {
+      await addSources(payload);
+      listInp.value = '';
+      if (invalid.length) alert('Skipped invalid entries:\n- ' + invalid.join('\n- '));
+      location.reload();
+    }
     finally { listBtn.disabled = false; }
   };
 
