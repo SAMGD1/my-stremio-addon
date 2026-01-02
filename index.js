@@ -79,6 +79,7 @@ let PREFS = {
   order: [],              // listIds order in manifest
   defaultList: "",
   perListSort: {},        // { listId: 'date_asc' | ... | 'custom' }
+  sortReverse: {},        // { listId: true } => reverse default sort order
   sortOptions: {},        // { listId: ['custom', 'date_desc', ...] }
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
   upgradeEpisodes: UPGRADE_EPISODES,
@@ -617,10 +618,11 @@ function manifestKey() {
   const names   = enabled.map(id => LISTS[id]?.name || id).sort().join("|");
   const perSort = JSON.stringify(PREFS.perListSort || {});
   const perOpts = JSON.stringify(PREFS.sortOptions || {});
+  const perReverse = JSON.stringify(PREFS.sortReverse || {});
   const custom  = Object.keys(PREFS.customOrder || {}).length;
   const order   = (PREFS.order || []).join(",");
 
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#c${custom}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}`;
 }
 
 async function harvestSources() {
@@ -1043,6 +1045,8 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
       metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
     } else metas = stableSort(metas, sort);
 
+    if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
+
     // No poster-shape swap; meta already has a single poster field
     res.json({ metas: metas.slice(skip, skip+limit) });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
@@ -1092,6 +1096,9 @@ app.post("/api/prefs", async (req,res) => {
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : (PREFS.perListSort || {});
+    PREFS.sortReverse     = body.sortReverse && typeof body.sortReverse === "object"
+      ? Object.fromEntries(Object.entries(body.sortReverse).map(([k,v]) => [k, !!v]))
+      : (PREFS.sortReverse || {});
     PREFS.sortOptions     = body.sortOptions && typeof body.sortOptions === "object"
       ? Object.fromEntries(Object.entries(body.sortOptions).map(([k,v])=>[k,clampSortOptions(v)]))
       : (PREFS.sortOptions || {});
@@ -1544,6 +1551,16 @@ app.get("/admin", async (req,res)=>{
     grid-template-columns:1fr 110px;
     margin-bottom:8px;
   }
+  .sort-wrap{display:flex;align-items:center;gap:6px;}
+  .sort-reverse-btn{
+    padding:6px 9px;
+    font-size:12px;
+    min-width:40px;
+    background:var(--card);
+    border:1px solid var(--border);
+    box-shadow:none;
+  }
+  .sort-reverse-btn.active{background:var(--accent2);color:#fff;box-shadow:0 6px 16px rgba(139,124,247,.45);}
   .move-btns{display:flex;flex-direction:column;gap:6px;align-items:center;}
   .move-btns button{padding:6px 10px;font-size:12px;}
   .mini{font-size:12px}
@@ -1979,7 +1996,7 @@ async function render() {
 
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
-      const resetBtn = el('button',{text:'Reset order'});
+      const resetBtn = el('button',{text:'Reset order', class:'order-reset-btn'});
       const resetAllBtn = el('button',{text:'Full reset'});
       tools.appendChild(saveBtn); tools.appendChild(resetBtn); tools.appendChild(resetAllBtn);
 
@@ -2078,9 +2095,12 @@ async function render() {
         else parent.insertBefore(li, ref.nextSibling);
       }
 
+      const isReversed = () => !!(prefs.sortReverse && prefs.sortReverse[lsid]);
+      const applyReverse = (arr) => isReversed() ? arr.slice().reverse() : arr;
+
       function renderList(arr){
         ul.innerHTML = '';
-        arr.forEach(it => ul.appendChild(liFor(it)));
+        applyReverse(arr).forEach(it => ul.appendChild(liFor(it)));
         ul.appendChild(addTile());
         attachThumbDnD(ul);
       }
@@ -2110,7 +2130,8 @@ async function render() {
       renderList(orderFor(def));
 
       saveBtn.onclick = async ()=>{
-        const ids = Array.from(ul.querySelectorAll('li.thumb[data-id]')).map(li=>li.getAttribute('data-id'));
+        let ids = Array.from(ul.querySelectorAll('li.thumb[data-id]')).map(li=>li.getAttribute('data-id'));
+        if (isReversed()) ids = ids.slice().reverse();
         saveBtn.disabled = true; resetBtn.disabled = true; resetAllBtn.disabled = true;
         try {
           await saveCustomOrder(lsid, ids);
@@ -2193,12 +2214,31 @@ async function render() {
       if (o===def) opt.setAttribute('selected','');
       sortSel.appendChild(opt);
     });
+    const reverseBtn = el('button',{type:'button',class:'sort-reverse-btn',title:'Reverse order (last becomes first)'});
+    function updateReverseBtn(){
+      const active = !!(prefs.sortReverse && prefs.sortReverse[lsid]);
+      reverseBtn.classList.toggle('active', active);
+      reverseBtn.textContent = active ? '↓↑' : '↑↓';
+    }
+    reverseBtn.onclick = (e)=>{
+      e.preventDefault();
+      prefs.sortReverse = prefs.sortReverse || {};
+      prefs.sortReverse[lsid] = !prefs.sortReverse[lsid];
+      updateReverseBtn();
+      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+      if (drawer && drawer.style.display !== "none") {
+        const resetBtn = drawer.querySelector('.order-reset-btn');
+        if (resetBtn) resetBtn.click();
+      }
+    };
+    updateReverseBtn();
+    const sortWrap = el('div',{class:'sort-wrap'},[sortSel, reverseBtn]);
     sortSel.addEventListener('change', ()=>{
       prefs.perListSort = prefs.perListSort || {}; 
       prefs.perListSort[lsid] = sortSel.value;
       const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
       if (drawer && drawer.style.display !== "none") {
-        const resetBtn = drawer.querySelectorAll('button')[1];
+        const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
       }
     });
@@ -2211,7 +2251,7 @@ async function render() {
     tr.appendChild(moveTd);
     tr.appendChild(nameCell);
     tr.appendChild(count);
-    tr.appendChild(el('td',{},[sortSel]));
+    tr.appendChild(el('td',{},[sortWrap]));
     tr.appendChild(el('td',{},[rmBtn]));
 
     let drawer = null; let open = false;
@@ -2254,6 +2294,7 @@ async function render() {
       order: newOrder,
       defaultList: prefs.defaultList || (enabled[0] || ""),
       perListSort: prefs.perListSort || {},
+      sortReverse: prefs.sortReverse || {},
       sortOptions: prefs.sortOptions || {},
       upgradeEpisodes: prefs.upgradeEpisodes || false,
       sources: prefs.sources || {},
