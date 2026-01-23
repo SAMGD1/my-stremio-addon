@@ -14,8 +14,6 @@ const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 
 const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // https://www.imdb.com/user/urXXXXXXX/lists/
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
-const IMDB_BLOCKED_COOLDOWN_HOURS = Math.max(0, Number(process.env.IMDB_BLOCKED_COOLDOWN_HOURS || 6));
-const IMDB_REQUEST_DELAY_MS = Math.max(0, Number(process.env.IMDB_REQUEST_DELAY_MS || 250));
 const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
 
 // fetch IMDb’s own release-date page order so our date sort matches IMDb exactly
@@ -101,14 +99,6 @@ const CARD   = new Map(); // Map<tt, card>
 let LAST_SYNC_AT = 0;
 let syncTimer = null;
 let syncInProgress = false;
-let imdbSyncInProgress = false;
-let IMDB_SYNC = {
-  blockedUntil: 0,
-  lastAttemptAt: 0,
-  lastSuccessAt: 0,
-  lastError: "",
-  blockedDetected: false
-};
 
 let MANIFEST_REV = 1;
 let LAST_MANIFEST_KEY = "";
@@ -151,61 +141,11 @@ function imdbCustomIdFor(url) {
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
-const IMDB_BACKOFFS = [30000, 120000, 600000];
-const IMDB_BLOCKED_MARKERS = [
-  "token.awswaf.com",
-  "AwsWafIntegration",
-  "challenge.js",
-  "awsWafCookieDomainList"
-];
-
-function isImdbBlockedHtml(html) {
-  const txt = String(html || "");
-  return IMDB_BLOCKED_MARKERS.some(marker => txt.includes(marker));
-}
-function isImdbBlockedStatus(status) {
-  return status === 403 || status === 429 || status === 503;
-}
-function imdbBlockedReason(status) {
-  return status ? `IMDb blocked (AWS WAF challenge, ${status})` : "IMDb blocked (AWS WAF challenge)";
-}
-function updateImdbBlocked(reason) {
-  IMDB_SYNC.blockedDetected = true;
-  IMDB_SYNC.lastError = reason;
-  IMDB_SYNC.blockedUntil = Date.now() + (IMDB_BLOCKED_COOLDOWN_HOURS * 60 * 60 * 1000);
-  console.warn("[IMDb]", reason, "- cooldown until", new Date(IMDB_SYNC.blockedUntil).toISOString());
-}
-function setImdbError(reason) {
-  IMDB_SYNC.lastError = reason;
-  console.warn("[IMDb]", reason);
-}
 
 async function fetchText(url) {
   const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
   if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
   return r.text();
-}
-async function fetchImdbText(url, { allowRetry = true } = {}) {
-  let attempt = 0;
-  while (true) {
-    const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
-    const status = r.status;
-    const html = await r.text();
-    if (isImdbBlockedStatus(status) || isImdbBlockedHtml(html)) {
-      if ((status === 429 || status === 503) && allowRetry && attempt < IMDB_BACKOFFS.length) {
-        const delay = IMDB_BACKOFFS[attempt++];
-        console.warn(`[IMDb] ${status} on ${url} – backing off ${Math.round(delay/1000)}s`);
-        await sleep(delay);
-        continue;
-      }
-      const err = new Error(imdbBlockedReason(status));
-      err.imdbBlocked = true;
-      err.status = status;
-      throw err;
-    }
-    if (!r.ok) throw new Error(`GET ${url} -> ${status}`);
-    return html;
-  }
 }
 async function fetchJson(url) {
   const r = await fetch(url, { headers: { "User-Agent": UA, "Accept":"application/json" }, redirect:"follow" });
@@ -268,18 +208,6 @@ async function loadSnapshot() {
     const txt = await fs.readFile(SNAP_LOCAL, "utf8");
     return JSON.parse(txt);
   } catch { return null; }
-}
-function snapshotPayload() {
-  return {
-    lastSyncAt: LAST_SYNC_AT,
-    manifestRev: MANIFEST_REV,
-    lists: LISTS,
-    prefs: PREFS,
-    fallback: Object.fromEntries(FALLBK),
-    cards: Object.fromEntries(CARD),
-    ep2ser: Object.fromEntries(EP2SER),
-    imdbStatus: IMDB_SYNC
-  };
 }
 
 // ----------------- TRAKT HELPERS -----------------
@@ -483,7 +411,12 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
   for (let page = 1; page <= maxPages; page++) {
     let url = withParam(listUrl, "mode", "detail");
     url = withParam(url, "page", String(page));
-    const html = await fetchImdbText(withParam(url, "_", Date.now()));
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
     const found = tconstsFromHtml(html);
     let added = 0;
     for (const tt of found) {
@@ -494,7 +427,7 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
       }
     }
     if (!added) break;
-    await sleep(IMDB_REQUEST_DELAY_MS);
+    await sleep(80);
   }
   return ids;
 }
@@ -508,7 +441,12 @@ async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, m
     let url = withParam(listUrl, "mode", "detail");
     url = withParam(url, "sort", sortSpec);
     url = withParam(url, "page", String(page));
-    const html = await fetchImdbText(withParam(url, "_", Date.now()));
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
     const found = tconstsFromHtml(html);
     let added = 0;
     for (const tt of found) {
@@ -519,7 +457,7 @@ async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, m
       }
     }
     if (!added) break;
-    await sleep(IMDB_REQUEST_DELAY_MS);
+    await sleep(80);
   }
   return ids;
 }
@@ -533,7 +471,12 @@ async function fetchImdbSearchOrPageIds(url, maxPages = 20) {
   for (let page = 0; page < maxPages; page++) {
     const start = 1 + page * 50;
     const pageUrl = needsPaging ? withParam(url, "start", String(start)) : url;
-    const html = await fetchImdbText(withParam(pageUrl, "_", Date.now()));
+    let html;
+    try {
+      html = await fetchText(withParam(pageUrl, "_", Date.now()));
+    } catch {
+      break;
+    }
     const found = tconstsFromHtml(html);
     let added = 0;
     for (const tt of found) {
@@ -544,7 +487,7 @@ async function fetchImdbSearchOrPageIds(url, maxPages = 20) {
       }
     }
     if (!added || !needsPaging) break;
-    await sleep(IMDB_REQUEST_DELAY_MS);
+    await sleep(80);
   }
   return ids;
 }
@@ -787,13 +730,10 @@ async function harvestSources() {
   return Array.from(map.values());
 }
 
-async function fullSync({ rediscover = true, imdbOnly = false, forceImdb = false } = {}) {
+async function fullSync({ rediscover = true } = {}) {
   if (syncInProgress) return;
   syncInProgress = true;
   const started = Date.now();
-  let imdbAttempted = false;
-  let imdbSuccess = false;
-  let imdbStop = false;
   try {
     let discovered = [];
     if (rediscover) {
@@ -804,24 +744,16 @@ async function fullSync({ rediscover = true, imdbOnly = false, forceImdb = false
       console.log(`[DISCOVER] used IMDB_LIST_IDS fallback (${discovered.length})`);
     }
 
-    if (imdbOnly) discovered = discovered.filter(d => !isTraktListId(d.id));
-
     const next = Object.create(null);
     const seen = new Set();
     for (const d of discovered) {
-      const existing = LISTS[d.id];
-      const base = existing ? { ...existing } : {
+      next[d.id] = {
         id: d.id,
         name: d.name || d.id,
         url: d.url,
         ids: [],
         orders: d.orders || {}
       };
-      base.id = d.id;
-      base.name = d.name || base.name || d.id;
-      base.url = d.url || base.url;
-      base.orders = base.orders || d.orders || {};
-      next[d.id] = base;
       seen.add(d.id);
     }
     const blocked = new Set(PREFS.blocked || []);
@@ -831,83 +763,26 @@ async function fullSync({ rediscover = true, imdbOnly = false, forceImdb = false
 
     // pull items for each list (IMDb or Trakt)
     const uniques = new Set();
-    const hasImdbLists = Object.keys(next).some(id => !isTraktListId(id));
-    let imdbAllowed = true;
-    if (hasImdbLists) {
-      if (imdbSyncInProgress) {
-        imdbAllowed = false;
-      } else if (!forceImdb && IMDB_SYNC.blockedUntil && Date.now() < IMDB_SYNC.blockedUntil) {
-        imdbAllowed = false;
-      }
-      if (imdbAllowed) {
-        imdbSyncInProgress = true;
-        imdbAttempted = true;
-        IMDB_SYNC.lastAttemptAt = Date.now();
-        IMDB_SYNC.lastError = "";
-        IMDB_SYNC.blockedDetected = false;
-      } else {
-        const reason = imdbSyncInProgress ? "locked" : "cooldown";
-        console.log(`[IMDb] sync skipped (${reason})`);
-      }
-    }
-
     for (const id of Object.keys(next)) {
       const list = next[id];
       let raw = [];
 
       if (isTraktListId(id)) {
-        if (!imdbOnly) {
-          const ts = parseTraktListKey(id);
-          if (ts && TRAKT_CLIENT_ID) {
-            try {
-              raw = await fetchTraktListImdbIds(ts);
-            } catch (e) {
-              console.warn("[SYNC] Trakt fetch failed for", id, e.message);
-            }
+        const ts = parseTraktListKey(id);
+        if (ts && TRAKT_CLIENT_ID) {
+          try {
+            raw = await fetchTraktListImdbIds(ts);
+          } catch (e) {
+            console.warn("[SYNC] Trakt fetch failed for", id, e.message);
           }
-          list.ids = raw.slice();
-          raw.forEach(tt => uniques.add(tt));
-          await sleep(60);
-        } else {
-          (list.ids || []).forEach(tt => uniques.add(tt));
         }
       } else {
         const url = list.url || `https://www.imdb.com/list/${id}/`;
-        const existing = LISTS[id];
-        if (!imdbAllowed || imdbStop) {
-          if (existing) {
-            list.ids = existing.ids || [];
-            list.orders = existing.orders || list.orders || {};
-          }
-          (list.ids || []).forEach(tt => uniques.add(tt));
-          continue;
-        }
-
         try {
           raw = isImdbListId(id) ? await fetchImdbListIdsAllPages(url) : await fetchImdbSearchOrPageIds(url);
-          if (!Array.isArray(raw) || raw.length === 0) {
-            throw new Error("IMDb list returned 0 items");
-          }
         } catch (e) {
-          const reason = e?.imdbBlocked ? imdbBlockedReason(e.status) : (e.message || "IMDb fetch failed");
-          IMDB_SYNC.lastError = `[${id}] ${reason}`;
-          if (e?.imdbBlocked) {
-            updateImdbBlocked(IMDB_SYNC.lastError);
-            imdbStop = true;
-          } else {
-            setImdbError(IMDB_SYNC.lastError);
-          }
-          if (existing) {
-            list.ids = existing.ids || [];
-            list.orders = existing.orders || list.orders || {};
-          }
-          (list.ids || []).forEach(tt => uniques.add(tt));
-          continue;
+          console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
         }
-
-        list.ids = raw.slice();
-        raw.forEach(tt => uniques.add(tt));
-        imdbSuccess = true;
 
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
           try {
@@ -922,33 +797,14 @@ async function fullSync({ rediscover = true, imdbOnly = false, forceImdb = false
             desc.forEach(tt => uniques.add(tt));
             pop.forEach(tt => uniques.add(tt));
           } catch (e) {
-            const reason = e?.imdbBlocked ? imdbBlockedReason(e.status) : (e.message || "IMDb sort fetch failed");
-            IMDB_SYNC.lastError = `[${id}] ${reason}`;
-            if (e?.imdbBlocked) {
-              updateImdbBlocked(IMDB_SYNC.lastError);
-              imdbStop = true;
-              if (existing) {
-                list.ids = existing.ids || [];
-                list.orders = existing.orders || list.orders || {};
-              }
-            } else {
-              setImdbError(IMDB_SYNC.lastError);
-            }
-            if (existing && existing.orders) list.orders = existing.orders;
+            console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
           }
         }
-        list.orders = list.orders || {};
-        list.orders.imdb = list.ids.slice();
-        await sleep(IMDB_REQUEST_DELAY_MS);
       }
-    }
 
-    if (imdbAttempted && imdbAllowed && imdbSuccess && !IMDB_SYNC.blockedDetected) {
-      IMDB_SYNC.lastSuccessAt = Date.now();
-      IMDB_SYNC.lastError = "";
-      IMDB_SYNC.blockedUntil = 0;
-    } else if (imdbAttempted && imdbAllowed && !imdbSuccess && !IMDB_SYNC.blockedDetected && !IMDB_SYNC.lastError) {
-      IMDB_SYNC.lastError = "IMDb sync did not return any items.";
+      list.ids = raw.slice();
+      raw.forEach(tt => uniques.add(tt));
+      await sleep(60);
     }
 
     // episode → series (optional)
@@ -1021,14 +877,21 @@ async function fullSync({ rediscover = true, imdbOnly = false, forceImdb = false
       console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
     }
 
-    await saveSnapshot(snapshotPayload());
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
 
     console.log(`[SYNC] ok – ${Object.values(LISTS).reduce((n,L)=>n+(L.ids?.length||0),0)} items across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
   } catch (e) {
     console.error("[SYNC] failed:", e);
   } finally {
     syncInProgress = false;
-    if (imdbAttempted) imdbSyncInProgress = false;
   }
 }
 function scheduleNextSync() {
@@ -1258,7 +1121,15 @@ app.post("/api/prefs", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshot(snapshotPayload());
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
 
     res.status(200).send("Saved. Manifest rev " + MANIFEST_REV);
   }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
@@ -1314,7 +1185,15 @@ app.post("/api/list-add", async (req, res) => {
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
 
-    await saveSnapshot(snapshotPayload());
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
 
     res.status(200).send("Added");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
@@ -1336,7 +1215,15 @@ app.post("/api/list-remove", async (req, res) => {
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
 
-    await saveSnapshot(snapshotPayload());
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
 
     res.status(200).send("Removed");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
@@ -1351,7 +1238,15 @@ app.post("/api/list-reset", async (req, res) => {
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
 
-    await saveSnapshot(snapshotPayload());
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
 
     res.status(200).send("Reset");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
@@ -1378,7 +1273,15 @@ app.post("/api/custom-order", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshot(snapshotPayload());
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
 
     res.status(200).json({ ok:true, manifestRev: MANIFEST_REV });
   }catch(e){ console.error("custom-order:", e); res.status(500).send("Failed"); }
@@ -1413,7 +1316,15 @@ app.post("/api/remove-list", async (req,res)=>{
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
 
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
-    await saveSnapshot(snapshotPayload());
+    await saveSnapshot({
+      lastSyncAt: LAST_SYNC_AT,
+      manifestRev: MANIFEST_REV,
+      lists: LISTS,
+      prefs: PREFS,
+      fallback: Object.fromEntries(FALLBK),
+      cards: Object.fromEntries(CARD),
+      ep2ser: Object.fromEntries(EP2SER)
+    });
     res.status(200).send("Removed & blocked");
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
@@ -1425,53 +1336,6 @@ app.post("/api/sync", async (req,res)=>{
     scheduleNextSync();
     res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
-});
-app.post("/api/imdb/sync-now", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  const force = String(req.query.force || "").toLowerCase() === "true";
-  if (imdbSyncInProgress || syncInProgress) {
-    return res.json({
-      status: "skipped_locked",
-      lastAttemptAt: IMDB_SYNC.lastAttemptAt,
-      lastSuccessAt: IMDB_SYNC.lastSuccessAt,
-      lastError: IMDB_SYNC.lastError,
-      blockedDetected: IMDB_SYNC.blockedDetected,
-      blockedUntil: IMDB_SYNC.blockedUntil
-    });
-  }
-  if (!force && IMDB_SYNC.blockedUntil && Date.now() < IMDB_SYNC.blockedUntil) {
-    return res.json({
-      status: "skipped_blocked_until",
-      lastAttemptAt: IMDB_SYNC.lastAttemptAt,
-      lastSuccessAt: IMDB_SYNC.lastSuccessAt,
-      lastError: IMDB_SYNC.lastError,
-      blockedDetected: IMDB_SYNC.blockedDetected,
-      blockedUntil: IMDB_SYNC.blockedUntil
-    });
-  }
-  try {
-    await fullSync({ rediscover: true, imdbOnly: true, forceImdb: force });
-    const success = IMDB_SYNC.lastSuccessAt && IMDB_SYNC.lastSuccessAt >= IMDB_SYNC.lastAttemptAt;
-    const status = success ? "completed" : "failed";
-    return res.json({
-      status,
-      lastAttemptAt: IMDB_SYNC.lastAttemptAt,
-      lastSuccessAt: IMDB_SYNC.lastSuccessAt,
-      lastError: IMDB_SYNC.lastError,
-      blockedDetected: IMDB_SYNC.blockedDetected,
-      blockedUntil: IMDB_SYNC.blockedUntil
-    });
-  } catch (e) {
-    IMDB_SYNC.lastError = e.message || "IMDb sync failed";
-    return res.status(500).json({
-      status: "failed",
-      lastAttemptAt: IMDB_SYNC.lastAttemptAt,
-      lastSuccessAt: IMDB_SYNC.lastSuccessAt,
-      lastError: IMDB_SYNC.lastError,
-      blockedDetected: IMDB_SYNC.blockedDetected,
-      blockedUntil: IMDB_SYNC.blockedUntil
-    });
-  }
 });
 app.post("/api/purge-sync", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -1514,12 +1378,6 @@ app.get("/admin", async (req,res)=>{
   const lastSyncText = LAST_SYNC_AT
     ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
     : "never";
-  const imdbBlocked = IMDB_SYNC.blockedUntil && Date.now() < IMDB_SYNC.blockedUntil;
-  const imdbBlockedText = imdbBlocked ? "IMDb blocked (AWS WAF challenge)" : "OK";
-  const imdbAttemptText = IMDB_SYNC.lastAttemptAt ? new Date(IMDB_SYNC.lastAttemptAt).toLocaleString() : "never";
-  const imdbSuccessText = IMDB_SYNC.lastSuccessAt ? new Date(IMDB_SYNC.lastSuccessAt).toLocaleString() : "never";
-  const imdbBlockedUntilText = IMDB_SYNC.blockedUntil ? new Date(IMDB_SYNC.blockedUntil).toLocaleString() : "n/a";
-  const imdbErrorText = IMDB_SYNC.lastError || "none";
 
   res.type("html").send(`<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -1761,25 +1619,11 @@ app.get("/admin", async (req,res)=>{
         <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
           <button class="btn2" type="submit">🔁 Sync Lists Now</button>
         </form>
-        <form method="POST" action="/api/imdb/sync-now?admin=${ADMIN_PASSWORD}">
-          <button class="btn2" type="submit">🎬 Sync IMDb Now</button>
-        </form>
-        <form method="POST" action="/api/imdb/sync-now?admin=${ADMIN_PASSWORD}&force=true" onsubmit="return confirm('Force IMDb sync even if blocked?')">
-          <button type="submit">⚡ Force IMDb Sync</button>
-        </form>
         <form method="POST" action="/api/purge-sync?admin=${ADMIN_PASSWORD}" onsubmit="return confirm('Purge & re-sync everything?')">
           <button type="submit">🧹 Purge & Sync</button>
         </form>
         <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
       </div>
-      <h4>IMDb Status</h4>
-      <table>
-        <tr><th>Status</th><td>${imdbBlockedText}</td></tr>
-        <tr><th>Last attempt</th><td>${imdbAttemptText}</td></tr>
-        <tr><th>Last success</th><td>${imdbSuccessText}</td></tr>
-        <tr><th>Blocked until</th><td>${imdbBlockedUntilText}</td></tr>
-        <tr><th>Last error</th><td>${imdbErrorText}</td></tr>
-      </table>
       <h4>Manifest URL</h4>
       <p class="code">${manifestUrl}</p>
       <div class="installRow">
@@ -2484,9 +2328,6 @@ render();
       EP2SER.clear(); if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
       MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
       LAST_SYNC_AT = snap.lastSyncAt || 0;
-      if (snap.imdbStatus && typeof snap.imdbStatus === "object") {
-        IMDB_SYNC = { ...IMDB_SYNC, ...snap.imdbStatus };
-      }
       LAST_MANIFEST_KEY = manifestKey();
 
       console.log("[BOOT] snapshot loaded");
