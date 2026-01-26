@@ -3,7 +3,7 @@
 This project turns IMDb and Trakt lists into cached Stremio catalogs with a built-in admin console.
 
 ## Features
-- Imports IMDb lists (including multi-page lists) and public Trakt lists, with episode-to-series upgrades when desired.
+- Imports IMDb lists (including multi-page lists), IMDb watchlists, and public Trakt lists (including Trakt watchlists), with episode-to-series upgrades when desired.
 - Discovers lists from configured IMDb users, explicit IMDb/Trakt list URLs, IMDb chart/search shortcuts, and optional fallback list IDs.
 - Admin console provides snapshot view, add sources page, and customize page with drag-and-drop **and** arrow buttons for remote-friendly ordering.
 - Per-list sort options (IMDb order, IMDb popularity when available, IMDb release date order when available, rating/runtime/name/date, or custom order) with manifest version bumping when catalogs change.
@@ -39,9 +39,9 @@ Change the `ADMIN_PASSWORD` environment variable in production.
 | `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_BRANCH` | Enable optional snapshot persistence on GitHub. |
 
 ## Adding sources
-- **IMDb users**: Add `/user/urXXXXXX/lists/` URLs. The addon discovers all lists for the user.
-- **IMDb lists**: Provide full list URLs or `ls` IDs. IMDb chart/search shortcuts can be provided as `imdb:chart-top`, `imdb:chart-toptv`, or `imdb:search:<slug>` to map to known chart/search URLs.
-- **Trakt lists**: Provide Trakt list URLs (`https://trakt.tv/users/<user>/lists/<slug>`). Official Trakt URLs like `https://trakt.tv/lists/official/<slug>` are normalized to the proper list key. You can also add Trakt usernames (or user URLs) under Trakt Users to harvest all their public lists.
+- **IMDb users**: Add `/user/urXXXXXX/lists/` URLs. The addon discovers all lists for the user and their public watchlist.
+- **IMDb lists**: Provide full list URLs, watchlist URLs, or `ls` IDs. IMDb chart/search shortcuts can be provided as `imdb:chart-top`, `imdb:chart-toptv`, or `imdb:search:<slug>` to map to known chart/search URLs.
+- **Trakt lists**: Provide Trakt list URLs (`https://trakt.tv/users/<user>/lists/<slug>`) or watchlist URLs (`https://trakt.tv/users/<user>/watchlist`). Official Trakt URLs like `https://trakt.tv/lists/official/<slug>` are normalized to the proper list key. You can also add Trakt usernames (or user URLs) under Trakt Users to harvest all their public lists and watchlist.
 
 Use the **Add sources** page in the admin console to submit new IMDb users, IMDb/Trakt lists, or Trakt users. Added sources are saved and pulled on the next sync.
 

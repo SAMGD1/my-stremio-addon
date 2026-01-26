@@ -116,7 +116,10 @@ function makeTraktListKey(user, slug) {
 }
 function parseTraktListKey(id) {
   const m = String(id || "").match(/^trakt:([^:]+):(.+)$/i);
-  return m ? { user: m[1], slug: m[2], direct: m[1] === "list" } : null;
+  if (!m) return null;
+  const slug = m[2];
+  const watchlist = String(slug).toLowerCase() === "watchlist";
+  return { user: m[1], slug, direct: m[1] === "list", watchlist };
 }
 
 function hashString(str) {
@@ -215,6 +218,12 @@ function parseTraktListUrl(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
 
+  const watchlist = s.match(/trakt\.tv\/users\/([^/]+)\/watchlist/i);
+  if (watchlist) {
+    const user = decodeURIComponent(watchlist[1]);
+    return { user, slug: "watchlist", direct: false, watchlist: true };
+  }
+
   const userList = s.match(/trakt\.tv\/users\/([^/]+)\/lists\/([^\/?#]+)/i);
   if (userList) {
     const user = decodeURIComponent(userList[1]);
@@ -256,6 +265,12 @@ async function traktJson(path) {
 async function fetchTraktListMeta(info) {
   const { user, slug, direct } = info;
   try {
+    if (info.watchlist) {
+      return {
+        name: "Watchlist",
+        url: `https://trakt.tv/users/${user}/watchlist`
+      };
+    }
     const path = direct
       ? `/lists/${encodeURIComponent(slug)}`
       : `/users/${encodeURIComponent(user)}/lists/${encodeURIComponent(slug)}`;
@@ -274,7 +289,50 @@ async function fetchTraktListMeta(info) {
   }
 }
 
+async function fetchTraktWatchlistImdbIds(user) {
+  const out = [];
+  const seen = new Set();
+  const types = [
+    { key: "movies", prop: "movie" },
+    { key: "shows", prop: "show" },
+    { key: "seasons", prop: "season" },
+    { key: "episodes", prop: "episode" }
+  ];
+  for (const { key, prop } of types) {
+    let page = 1;
+    while (true) {
+      let items;
+      try {
+        items = await traktJson(`/users/${encodeURIComponent(user)}/watchlist/${key}?page=${page}&limit=100`);
+      } catch (e) {
+        console.warn("[TRAKT] watchlist fetch failed", user, key, e.message);
+        break;
+      }
+      if (!Array.isArray(items) || !items.length) break;
+      for (const it of items) {
+        const obj = it[prop];
+        const ids = obj && obj.ids;
+        let imdb = ids && ids.imdb;
+        if (!imdb && (key === "episodes" || key === "seasons") && it.show && it.show.ids && it.show.ids.imdb) {
+          imdb = it.show.ids.imdb;
+        }
+        if (imdb && isImdb(imdb) && !seen.has(imdb)) {
+          seen.add(imdb);
+          out.push(imdb);
+        }
+      }
+      if (items.length < 100) break;
+      page++;
+      await sleep(80);
+    }
+  }
+  return out;
+}
+
 async function fetchTraktListImdbIds(info) {
+  if (info.watchlist) {
+    return fetchTraktWatchlistImdbIds(info.user);
+  }
   const { user, slug, direct } = info;
   const types = [
     { key: "movies",   prop: "movie"   },
@@ -351,13 +409,32 @@ async function discoverTraktUserLists(user) {
     page++;
     await sleep(60);
   }
+  found.push({
+    id: makeTraktListKey(user, "watchlist"),
+    name: "Watchlist",
+    url: `https://trakt.tv/users/${user}/watchlist`
+  });
   return found;
 }
 
 // ----------------- IMDb DISCOVERY -----------------
+function imdbUserIdFromUrl(value) {
+  const m = String(value || "").match(/imdb\.com\/user\/(ur\d{6,})/i);
+  return m ? m[1] : null;
+}
+function imdbWatchlistUrlForUser(userId) {
+  return userId ? `https://www.imdb.com/user/${userId}/watchlist/` : "";
+}
+function isImdbWatchlistUrl(url) {
+  return /imdb\.com\/user\/ur\d{6,}\/watchlist/i.test(String(url || ""));
+}
 function normalizeListIdOrUrl(s) {
   if (!s) return null;
   s = String(s).trim();
+  if (isImdbWatchlistUrl(s)) {
+    const url = s.startsWith("http") ? s : `https://www.imdb.com${s}`;
+    return { id: imdbCustomIdFor(url), url };
+  }
   const m = s.match(/ls\d{6,}/i);
   if (m) return { id: m[0], url: `https://www.imdb.com/list/${m[0]}/` };
   if (/imdb\.com\/list\//i.test(s)) return { id: null, url: s };
@@ -378,7 +455,17 @@ async function discoverFromUserLists(userListsUrl) {
     while ((m = re2.exec(html))) ids.add(m[1]);
   }
   const arr = Array.from(ids).map(id => ({ id, url: `https://www.imdb.com/list/${id}/` }));
-  await Promise.all(arr.map(async L => { try { L.name = await fetchListName(L.url); } catch { L.name = L.id; } }));
+  const imdbUserId = imdbUserIdFromUrl(userListsUrl);
+  if (imdbUserId) {
+    const watchUrl = imdbWatchlistUrlForUser(imdbUserId);
+    if (watchUrl) {
+      arr.push({ id: imdbCustomIdFor(watchUrl), url: watchUrl, watchlist: true });
+    }
+  }
+  await Promise.all(arr.map(async L => {
+    try { L.name = await fetchListName(L.url); }
+    catch { L.name = L.watchlist ? "IMDb Watchlist" : L.id; }
+  }));
   return arr;
 }
 async function fetchListName(listUrl) {
@@ -707,7 +794,10 @@ async function harvestSources() {
     }
     if (!id) id = imdbCustomIdFor(url);
     let name = id;
-    try { name = await fetchListName(url); } catch { /* ignore */ }
+    try { name = await fetchListName(url); }
+    catch {
+      if (isImdbWatchlistUrl(url)) name = "IMDb Watchlist";
+    }
 
     add({ id, url, name });
     await sleep(60);
@@ -779,7 +869,11 @@ async function fullSync({ rediscover = true } = {}) {
       } else {
         const url = list.url || `https://www.imdb.com/list/${id}/`;
         try {
-          raw = isImdbListId(id) ? await fetchImdbListIdsAllPages(url) : await fetchImdbSearchOrPageIds(url);
+          if (isImdbListId(id) || isImdbWatchlistUrl(url)) {
+            raw = await fetchImdbListIdsAllPages(url);
+          } else {
+            raw = await fetchImdbSearchOrPageIds(url);
+          }
         } catch (e) {
           console.warn("[SYNC] IMDb list fetch failed for", id, e.message);
         }
@@ -1647,7 +1741,7 @@ app.get("/admin", async (req,res)=>{
       </div>
       <div class="row">
         <div><label class="mini">Add IMDb/Trakt <b>List</b> URL</label>
-          <input id="listInput" placeholder="IMDb ls… or Trakt list URL" />
+          <input id="listInput" placeholder="IMDb ls…/watchlist or Trakt list/watchlist URL" />
         </div>
         <div><button id="addList" type="button">Add</button></div>
       </div>
@@ -1740,8 +1834,10 @@ function normalizeListIdOrUrl2(v){
   if (!v) return null;
   // Trakt lists
   if (/trakt\\.tv\\/users\\/[^/]+\\/lists\\/[^/?#]+/i.test(v)) return v;
+  if (/trakt\\.tv\\/users\\/[^/]+\\/watchlist/i.test(v)) return v;
   if (/trakt\\.tv\\/lists\\//i.test(v)) return v;
   // IMDb lists
+  if (/imdb\\.com\\/user\\/ur\\d+\\/watchlist/i.test(v)) return v;
   if (/imdb\\.com\\/(list\\/ls\\d{6,}|chart\\/|search\\/title)/i.test(v)) return v;
   const m = v.match(/ls\\d{6,}/i);
   if (m) return 'https://www.imdb.com/list/'+m[0]+'/';
@@ -1783,7 +1879,7 @@ function wireAddButtons(){
   listBtn.onclick = async (e) => {
     e.preventDefault();
     const url = normalizeListIdOrUrl2(listInp.value);
-    if (!url) { alert('Enter a valid IMDb list URL, ls… id, or Trakt list URL'); return; }
+    if (!url) { alert('Enter a valid IMDb list/watchlist URL, ls… id, or Trakt list/watchlist URL'); return; }
     listBtn.disabled = true;
     try { await addSources({ users:[], lists:[url] }); location.reload(); }
     finally { listBtn.disabled = false; }
