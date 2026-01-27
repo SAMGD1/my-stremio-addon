@@ -619,13 +619,6 @@ async function fetchTmdbFind(imdbId) {
   const url = `https://api.themoviedb.org/3/find/${encodeURIComponent(imdbId)}?api_key=${encodeURIComponent(key)}&external_source=imdb_id`;
   return fetchJson(url);
 }
-async function verifyTmdbKey(key) {
-  if (!key) return { ok: false, error: "Missing TMDB key" };
-  const url = `https://api.themoviedb.org/3/configuration?api_key=${encodeURIComponent(key)}`;
-  const data = await fetchJson(url);
-  if (data && data.images) return { ok: true };
-  return { ok: false, error: "Invalid TMDB key" };
-}
 function tmdbMetaFromFind(data) {
   if (!data) return null;
   const movie = Array.isArray(data.movie_results) && data.movie_results[0];
@@ -955,20 +948,16 @@ async function fullSync({ rediscover = true } = {}) {
     }
     for (const [id, data] of Object.entries(customLists)) {
       if (!isListId(id) || blocked.has(id)) continue;
-      const sources = Array.isArray(data?.sources) ? data.sources.filter(isListId) : [];
-      const hasSources = sources.length > 0;
-      const ids = hasSources && !frozenSet.has(id)
-        ? customListIdsFromSources(sources)
-        : (Array.isArray(data?.ids) ? data.ids.filter(isImdb) : []);
+      const ids = Array.isArray(data?.ids) ? data.ids.filter(isImdb) : [];
       next[id] = {
         id,
         name: data?.name || id,
-        url: data?.url || (hasSources ? "custom:merge" : "custom"),
+        url: data?.url || "custom",
         ids: ids.slice(),
         orders: { imdb: ids.slice() }
       };
-      if (hasSources) customLists[id].ids = ids.slice();
       seen.add(id);
+      frozenSet.add(id);
     }
 
     // pull items for each list (IMDb or Trakt)
@@ -1341,11 +1330,7 @@ app.post("/api/prefs", async (req,res) => {
       PREFS.customLists = Object.fromEntries(
         Object.entries(body.customLists)
           .filter(([id, val]) => isListId(id) && val && typeof val === "object")
-          .map(([id, val]) => [id, {
-            name: String(val.name || id),
-            ids: Array.isArray(val.ids) ? val.ids.filter(isImdb) : [],
-            sources: Array.isArray(val.sources) ? val.sources.filter(isListId) : []
-          }])
+          .map(([id, val]) => [id, { name: String(val.name || id), ids: Array.isArray(val.ids) ? val.ids.filter(isImdb) : [] }])
       );
     }
     if (Array.isArray(body.frozen)) {
@@ -1393,33 +1378,9 @@ function effectiveListIds(lsid) {
   return Array.from(new Set(ids));
 }
 
-function customListIdsFromSources(sources) {
-  const ids = [];
-  const seen = new Set();
-  (sources || []).forEach(src => {
-    if (!isListId(src)) return;
-    for (const id of effectiveListIds(src)) {
-      if (!seen.has(id)) { seen.add(id); ids.push(id); }
-    }
-  });
-  return ids;
-}
-
 async function refreshListFromSource(lsid) {
   const list = LISTS[lsid];
   if (!list) return;
-  if (PREFS.customLists && PREFS.customLists[lsid] && Array.isArray(PREFS.customLists[lsid].sources)) {
-    const ids = customListIdsFromSources(PREFS.customLists[lsid].sources);
-    PREFS.customLists[lsid].ids = ids.slice();
-    list.ids = ids.slice();
-    list.orders = list.orders || {};
-    list.orders.imdb = list.ids.slice();
-    for (const tt of ids) {
-      await getBestMeta(tt);
-      CARD.set(tt, cardFor(tt));
-    }
-    return;
-  }
   let raw = [];
   if (isTraktListId(lsid)) {
     const ts = parseTraktListKey(lsid);
@@ -1471,9 +1432,6 @@ app.post("/api/freeze-list", async (req,res)=>{
     if (frozen) set.add(lsid);
     else set.delete(lsid);
     PREFS.frozen = Array.from(set);
-    if (frozen && PREFS.customLists && PREFS.customLists[lsid] && Array.isArray(PREFS.customLists[lsid].sources)) {
-      PREFS.customLists[lsid].ids = customListIdsFromSources(PREFS.customLists[lsid].sources);
-    }
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
     await saveSnapshot({
@@ -1513,16 +1471,6 @@ app.post("/api/rename-list", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send("Failed"); }
 });
 
-app.post("/api/tmdb-verify", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const key = String(req.body.key || PREFS.tmdbKey || "").trim();
-    const result = await verifyTmdbKey(key);
-    if (!result.ok) return res.status(400).json(result);
-    res.json({ ok: true });
-  }catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
 app.post("/api/duplicate-list", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -1547,12 +1495,18 @@ app.post("/api/merge-lists", async (req,res)=>{
   try{
     const sourceIds = Array.isArray(req.body.sourceIds) ? req.body.sourceIds.filter(isListId) : [];
     if (sourceIds.length < 2) return res.status(400).send("Pick at least two lists");
-    if (sourceIds.length > 4) return res.status(400).send("Pick up to 4 lists");
     const name = String(req.body.name || "Merged List").trim() || "Merged List";
-    const ids = customListIdsFromSources(sourceIds);
+    const ids = [];
+    const seen = new Set();
+    for (const src of sourceIds) {
+      for (const id of effectiveListIds(src)) {
+        if (!seen.has(id)) { seen.add(id); ids.push(id); }
+      }
+    }
     const id = createCustomListId(name);
     PREFS.customLists = PREFS.customLists || {};
-    PREFS.customLists[id] = { name, ids, sources: sourceIds };
+    PREFS.customLists[id] = { name, ids };
+    PREFS.frozen = Array.from(new Set([...(PREFS.frozen || []).filter(isListId), id]));
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
     await fullSync({ rediscover: true });
@@ -2005,20 +1959,18 @@ app.get("/admin", async (req,res)=>{
   a.link{color:#b1b9ff;text-decoration:none}
   a.link:hover{text-decoration:underline}
   .tmdb-row{margin-top:12px;display:flex;flex-direction:column;gap:8px;}
-  .tmdb-status{display:inline-flex;align-items:center;gap:6px;}
-  .tmdb-status.ok{color:#64f5a0;}
-  .tmdb-status.bad{color:#ff9f9f;}
   .advanced-toggle{display:flex;justify-content:flex-end;margin-bottom:8px;}
-  .advanced-on .adv-cell{display:block;}
-  .adv-cell{display:none;margin-top:6px;padding:8px;border-radius:10px;background:rgba(12,11,29,.7);border:1px solid var(--border);}
-  .adv-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
-  .adv-actions input[type="text"]{font-size:12px;}
+  .advanced-panel{display:none;margin-top:12px;border:1px solid var(--border);border-radius:14px;padding:14px;background:rgba(20,17,41,.6);}
+  .advanced-panel.active{display:block;}
+  .adv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;}
+  .adv-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;}
+  .adv-card h4{margin:0 0 6px 0;font-size:14px;}
+  .adv-list{display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto;}
+  .adv-row{display:flex;flex-direction:column;gap:6px;border:1px solid var(--border);border-radius:10px;padding:10px;background:rgba(12,11,29,.8);}
+  .adv-row .adv-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+  .adv-row input[type="text"]{font-size:12px;}
   .star-btn{border-radius:999px;padding:6px 10px;background:rgba(255,255,255,.08);border:1px solid var(--border);}
   .star-btn.active{background:var(--accent2);color:#fff;box-shadow:0 6px 16px rgba(139,124,247,.35);}
-  .merge-bar{display:none;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:12px;background:rgba(12,11,29,.7);}
-  .advanced-on .merge-bar{display:flex;}
-  .merge-check{display:none;}
-  .advanced-on .merge-check{display:inline-flex;}
   .installRow{
     display:flex;
     flex-wrap:wrap;
@@ -2088,10 +2040,6 @@ app.get("/admin", async (req,res)=>{
           <div><input id="tmdbKeyInput" placeholder="Paste TMDB API key to enrich posters & metadata" /></div>
           <div><button id="tmdbSave" type="button">Save</button></div>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button id="tmdbVerify" type="button">Verify</button>
-          <span id="tmdbStatus" class="mini muted">Not verified</span>
-        </div>
         <div class="mini muted">When set, catalogs and metadata use TMDB images/details instead of default sources.</div>
       </div>
       <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, or ordering change.</p>
@@ -2112,7 +2060,7 @@ app.get("/admin", async (req,res)=>{
       </div>
       <div class="row">
         <div><label class="mini">Add IMDb/Trakt <b>List</b> URL</label>
-          <textarea id="listInput" placeholder="IMDb ls…/watchlist or Trakt list/watchlist URL (one per line)"></textarea>
+          <input id="listInput" placeholder="IMDb ls…/watchlist or Trakt list/watchlist URL" />
         </div>
         <div><button id="addList" type="button">Add</button></div>
       </div>
@@ -2146,6 +2094,22 @@ app.get("/admin", async (req,res)=>{
       <p class="muted">Drag rows to reorder lists or use the arrows. Click ▾ to open the drawer and tune sort options or custom order.</p>
       <div class="advanced-toggle">
         <button type="button" id="advancedToggle">Advanced options</button>
+      </div>
+      <div id="advancedPanel" class="advanced-panel">
+        <div class="adv-grid">
+          <div class="adv-card">
+            <h4>Merge lists</h4>
+            <div class="mini muted">Combine multiple lists into a new frozen list.</div>
+            <div id="mergeListOptions" class="adv-list"></div>
+            <input id="mergeName" type="text" placeholder="Merged list name" />
+            <button id="mergeListsBtn" type="button">Create merged list</button>
+          </div>
+          <div class="adv-card">
+            <h4>List actions</h4>
+            <div class="mini muted">Star to freeze updates, rename, duplicate, or refresh frozen lists.</div>
+            <div id="advancedListActions" class="adv-list"></div>
+          </div>
+        </div>
       </div>
       <div id="prefs"></div>
       <div id="mergeBar" class="merge-bar">
@@ -2273,16 +2237,8 @@ function wireAddButtons(){
 
   listBtn.onclick = async (e) => {
     e.preventDefault();
-    const entries = splitBulkLines(listInp.value);
-    if (!entries.length) { alert('Enter a valid IMDb list/watchlist URL, ls… id, or Trakt list/watchlist URL'); return; }
-    const urls = [];
-    const invalid = [];
-    entries.forEach(val => {
-      const url = normalizeListIdOrUrl2(val);
-      if (url) urls.push(url);
-      else invalid.push(val);
-    });
-    if (!urls.length) { alert('Enter a valid IMDb list/watchlist URL, ls… id, or Trakt list/watchlist URL'); return; }
+    const url = normalizeListIdOrUrl2(listInp.value);
+    if (!url) { alert('Enter a valid IMDb list/watchlist URL, ls… id, or Trakt list/watchlist URL'); return; }
     listBtn.disabled = true;
     try {
       await addSources({ users:[], lists:urls });
@@ -2407,13 +2363,7 @@ async function render() {
 
   const tmdbInput = document.getElementById('tmdbKeyInput');
   const tmdbSave = document.getElementById('tmdbSave');
-  const tmdbVerify = document.getElementById('tmdbVerify');
-  const tmdbStatus = document.getElementById('tmdbStatus');
   if (tmdbInput) tmdbInput.value = prefs.tmdbKey || "";
-  if (tmdbStatus) {
-    tmdbStatus.textContent = prefs.tmdbKey ? 'Saved (not verified)' : 'Not verified';
-    tmdbStatus.className = 'mini muted tmdb-status';
-  }
 
   function renderPills(id, arr, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
@@ -2877,36 +2827,112 @@ async function render() {
 
   container.appendChild(table);
 
+  const advancedPanel = document.getElementById('advancedPanel');
   const advancedToggle = document.getElementById('advancedToggle');
-  const customizeSection = document.getElementById('section-customize');
-  if (advancedToggle && customizeSection) {
+  if (advancedToggle && advancedPanel) {
     advancedToggle.onclick = () => {
-      customizeSection.classList.toggle('advanced-on');
-      advancedToggle.textContent = customizeSection.classList.contains('advanced-on') ? 'Hide advanced options' : 'Advanced options';
+      advancedPanel.classList.toggle('active');
+      advancedToggle.textContent = advancedPanel.classList.contains('active') ? 'Hide advanced options' : 'Advanced options';
     };
   }
 
-  const mergeBar = document.getElementById('mergeBar');
-  const mergeBtn = document.getElementById('mergeListsBtn');
-  const mergeName = document.getElementById('mergeName');
-  const selectedMerge = new Set();
-  if (mergeBar && mergeBtn) {
-    mergeBtn.onclick = async () => {
-      const selected = Array.from(selectedMerge);
-      if (selected.length < 2) { alert('Select at least two lists to merge.'); return; }
-      if (selected.length > 4) { alert('Select up to 4 lists to merge.'); return; }
-      mergeBtn.disabled = true;
-      try {
-        await fetch('/api/merge-lists?admin='+ADMIN, {
+  function renderAdvanced() {
+    const listWrap = document.getElementById('advancedListActions');
+    const mergeWrap = document.getElementById('mergeListOptions');
+    if (!listWrap || !mergeWrap) return;
+    listWrap.innerHTML = '';
+    mergeWrap.innerHTML = '';
+    const frozenSet = new Set(prefs.frozen || []);
+
+    order.forEach(lsid => {
+      const row = el('div', {class:'adv-row'});
+      const header = el('div', {class:'mini', text: listDisplayName(lsid)});
+      const sub = el('div', {class:'mini muted', text: lsid});
+      const actions = el('div', {class:'adv-actions'});
+
+      const starBtn = el('button', {class:'star-btn', type:'button', text: frozenSet.has(lsid) ? '★ Frozen' : '☆ Freeze'});
+      if (frozenSet.has(lsid)) starBtn.classList.add('active');
+      starBtn.onclick = async () => {
+        const nowFrozen = !frozenSet.has(lsid);
+        await fetch('/api/freeze-list?admin='+ADMIN, {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ sourceIds: selected, name: mergeName ? mergeName.value : "" })
+          body: JSON.stringify({ lsid, frozen: nowFrozen })
+        });
+        if (nowFrozen) frozenSet.add(lsid);
+        else frozenSet.delete(lsid);
+        prefs.frozen = Array.from(frozenSet);
+        starBtn.textContent = nowFrozen ? '★ Frozen' : '☆ Freeze';
+        starBtn.classList.toggle('active', nowFrozen);
+        refreshBtn.style.display = nowFrozen ? '' : 'none';
+      };
+
+      const renameInput = el('input', {type:'text', placeholder:'Custom name', value: prefs.listNames[lsid] || ''});
+      const renameBtn = el('button', {type:'button', text:'Rename'});
+      renameBtn.onclick = async () => {
+        await fetch('/api/rename-list?admin='+ADMIN, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lsid, name: renameInput.value })
         });
         location.reload();
-      } finally {
-        mergeBtn.disabled = false;
-      }
-    };
+      };
+
+      const dupBtn = el('button', {type:'button', text:'Duplicate'});
+      dupBtn.onclick = async () => {
+        await fetch('/api/duplicate-list?admin='+ADMIN, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lsid })
+        });
+        location.reload();
+      };
+
+      const refreshBtn = el('button', {type:'button', text:'Sync frozen', style: frozenSet.has(lsid) ? '' : 'display:none'});
+      refreshBtn.onclick = async () => {
+        refreshBtn.disabled = true;
+        await fetch('/api/refresh-frozen?admin='+ADMIN, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lsid })
+        });
+        refreshBtn.disabled = false;
+      };
+
+      actions.appendChild(starBtn);
+      actions.appendChild(renameInput);
+      actions.appendChild(renameBtn);
+      actions.appendChild(dupBtn);
+      actions.appendChild(refreshBtn);
+
+      row.appendChild(header);
+      row.appendChild(sub);
+      row.appendChild(actions);
+      listWrap.appendChild(row);
+
+      const mergeItem = el('label', {class:'pill'});
+      const mergeCb = el('input', {type:'checkbox', value: lsid});
+      mergeItem.appendChild(mergeCb);
+      mergeItem.appendChild(el('span', {text: listDisplayName(lsid)}));
+      mergeWrap.appendChild(mergeItem);
+    });
+
+    const mergeBtn = document.getElementById('mergeListsBtn');
+    const mergeName = document.getElementById('mergeName');
+    if (mergeBtn) {
+      mergeBtn.onclick = async () => {
+        const selected = Array.from(mergeWrap.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+        if (selected.length < 2) { alert('Select at least two lists to merge.'); return; }
+        mergeBtn.disabled = true;
+        try {
+          await fetch('/api/merge-lists?admin='+ADMIN, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ sourceIds: selected, name: mergeName.value })
+          });
+          location.reload();
+        } finally {
+          mergeBtn.disabled = false;
+        }
+      };
+    }
   }
+  renderAdvanced();
 
   const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'});
   const saveBtn = el('button',{text:'Save', type:'button'});
@@ -2944,41 +2970,6 @@ async function render() {
     tmdbSave.onclick = async () => {
       prefs.tmdbKey = (tmdbInput && tmdbInput.value || "").trim();
       await saveAll("TMDB key saved.");
-      if (tmdbStatus) {
-        tmdbStatus.textContent = prefs.tmdbKey ? 'Saved (not verified)' : 'Not verified';
-        tmdbStatus.className = 'mini muted tmdb-status';
-      }
-    };
-  }
-  if (tmdbVerify) {
-    tmdbVerify.onclick = async () => {
-      const key = (tmdbInput && tmdbInput.value || "").trim();
-      if (!key) { alert('Enter a TMDB API key first.'); return; }
-      tmdbVerify.disabled = true;
-      if (tmdbStatus) {
-        tmdbStatus.textContent = 'Verifying…';
-        tmdbStatus.className = 'mini muted tmdb-status';
-      }
-      try {
-        const r = await fetch('/api/tmdb-verify?admin='+ADMIN, {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ key })
-        });
-        if (r.ok) {
-          if (tmdbStatus) {
-            tmdbStatus.textContent = 'Verified ✓';
-            tmdbStatus.className = 'mini tmdb-status ok';
-          }
-        } else {
-          const data = await r.json().catch(()=>({ error: 'Invalid TMDB key' }));
-          if (tmdbStatus) {
-            tmdbStatus.textContent = data.error || 'Invalid TMDB key';
-            tmdbStatus.className = 'mini tmdb-status bad';
-          }
-        }
-      } finally {
-        tmdbVerify.disabled = false;
-      }
     };
   }
 }
