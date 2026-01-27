@@ -1073,6 +1073,9 @@ async function fullSync({ rediscover = true } = {}) {
     }
     const blocked = new Set(PREFS.blocked || []);
     for (const id of Object.keys(LISTS)) {
+      const isCustom = isCustomListId(id);
+      const hasCustomMeta = !!(PREFS.customLists && PREFS.customLists[id]);
+      if (isCustom && !hasCustomMeta) continue;
       if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
     }
 
@@ -1752,6 +1755,11 @@ app.post("/api/delete-custom-list", async (req, res) => {
     if (PREFS.customLists) delete PREFS.customLists[lsid];
     if (PREFS.displayNames) delete PREFS.displayNames[lsid];
     if (PREFS.frozenLists) delete PREFS.frozenLists[lsid];
+    if (PREFS.listEdits) delete PREFS.listEdits[lsid];
+    if (PREFS.customOrder) delete PREFS.customOrder[lsid];
+    if (PREFS.perListSort) delete PREFS.perListSort[lsid];
+    if (PREFS.sortOptions) delete PREFS.sortOptions[lsid];
+    if (PREFS.sortReverse) delete PREFS.sortReverse[lsid];
     PREFS.enabled = (PREFS.enabled || []).filter(id => id !== lsid);
     PREFS.order = (PREFS.order || []).filter(id => id !== lsid);
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
