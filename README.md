@@ -8,6 +8,7 @@ This project turns IMDb and Trakt lists into cached Stremio catalogs with a buil
 - Admin console provides snapshot view, add sources page, and customize page with drag-and-drop **and** arrow buttons for remote-friendly ordering.
 - Per-list sort options (IMDb order, IMDb popularity when available, IMDb release date order when available, rating/runtime/name/date, or custom order) with manifest version bumping when catalogs change.
 - Optional GitHub-based snapshot persistence so the addon remembers state across restarts.
+- Optional TMDB metadata enrichment (posters, backdrops, and descriptions) via a TMDB API key.
 - Catalogs use a custom "My Lists" catalog type so they appear in their own Discover section.
 
 ## Requirements
@@ -36,6 +37,7 @@ Change the `ADMIN_PASSWORD` environment variable in production.
 | `UPGRADE_EPISODES` | `true` to upgrade episodes to their parent series. |
 | `IMDB_FETCH_RELEASE_ORDERS` | `true` to mirror IMDb release-date ordering. |
 | `TRAKT_CLIENT_ID` | Public Trakt API key required for Trakt list support. |
+| `TMDB_API_KEY` | Optional TMDB API key for richer posters/metadata (can also be set in the admin UI). |
 | `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_BRANCH` | Enable optional snapshot persistence on GitHub. |
 
 ## Adding sources
@@ -50,6 +52,7 @@ Open the **Customize** page to:
 - Enable/disable catalogs and reorder them via drag-and-drop or the up/down buttons (useful on remotes).
 - Choose per-list default sort and which sort options appear in Stremio.
 - Open a drawer for each list to adjust custom item order, reset edits, and add/remove items.
+- Use the **Advanced options** panel to freeze lists, rename/duplicate lists, and merge lists into a new frozen copy.
 
 Saving preferences bumps the manifest revision automatically so Stremio refreshes.
 
