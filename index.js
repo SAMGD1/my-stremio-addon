@@ -2066,7 +2066,6 @@ app.get("/admin", async (req,res)=>{
 
   <section id="section-snapshot" class="section active">
     <div class="card center-card">
-      <h3>Current Snapshot</h3>
       <div class="rowtools">
         <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
           <button class="btn2" type="submit">🔁 Sync Lists Now</button>
@@ -2095,7 +2094,8 @@ app.get("/admin", async (req,res)=>{
         <div class="mini muted">When set, catalogs and metadata use TMDB images/details instead of default sources.</div>
       </div>
       <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, or ordering change.</p>
-      <ul style="margin-top:14px">${rows}</ul>
+      <h3 style="margin-top:14px;">Current Snapshot</h3>
+      <ul style="margin-top:8px">${rows}</ul>
     </div>
   </section>
 
@@ -2176,9 +2176,21 @@ const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 const HOST_URL = ${JSON.stringify(base)};
 const SECRET = ${JSON.stringify(SHARED_SECRET)};
 
-async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
-async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
-async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
+async function getPrefs(){
+  const r = await fetch('/api/prefs?admin='+ADMIN);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function getLists(){
+  const r = await fetch('/api/lists?admin='+ADMIN);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function getListItems(lsid){
+  const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid));
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
 async function saveCustomOrder(lsid, order){
   const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
   if (!r.ok) throw new Error('save failed');
@@ -2245,10 +2257,14 @@ function normalizeListIdOrUrl2(v){
 
 }
 async function addSources(payload){
-  await fetch('/api/add-sources?admin='+ADMIN, {
+  const r = await fetch('/api/add-sources?admin='+ADMIN, {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify(payload)
   });
+  if (!r.ok) {
+    const t = await r.text().catch(()=> "");
+    throw new Error(t || 'Failed to add sources');
+  }
 }
 function wireAddButtons(){
   const userBtn = document.getElementById('addUser');
@@ -2279,8 +2295,9 @@ function wireAddButtons(){
       await addSources(payload);
       if (invalid.length) alert('Skipped invalid entries: ' + invalid.join(', '));
       location.reload();
-    }
-    finally { userBtn.disabled = false; }
+    } catch (err) {
+      alert(err.message || 'Failed to add users');
+    } finally { userBtn.disabled = false; }
   };
 
   listBtn.onclick = async (e) => {
@@ -2300,8 +2317,9 @@ function wireAddButtons(){
       await addSources({ users:[], lists:urls });
       if (invalid.length) alert('Skipped invalid entries: ' + invalid.join(', '));
       location.reload();
-    }
-    finally { listBtn.disabled = false; }
+    } catch (err) {
+      alert(err.message || 'Failed to add lists');
+    } finally { listBtn.disabled = false; }
   };
 
 
@@ -2397,9 +2415,20 @@ function stableSortClient(items, sortKey){
   }).map(x=>x.m);
 }
 
-async function render() {
-  const prefs = await getPrefs();
-  const lists = await getLists();
+  async function render() {
+  let prefs;
+  let lists;
+  try {
+    prefs = await getPrefs();
+    lists = await getLists();
+  } catch (err) {
+    const container = document.getElementById('prefs');
+    if (container) {
+      container.innerHTML = '<div class="mini muted">Failed to load lists. Check admin key and reload.</div>';
+    }
+    alert(err.message || 'Failed to load lists');
+    return;
+  }
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
   prefs.listNames = prefs.listNames || {};
   prefs.frozen = Array.isArray(prefs.frozen) ? prefs.frozen : [];
@@ -2947,7 +2976,11 @@ async function render() {
     };
     msg.textContent = "Saving…";
     const r = await fetch('/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const t = await r.text();
+    const t = await r.text().catch(()=> "");
+    if (!r.ok) {
+      msg.textContent = t || "Failed to save";
+      throw new Error(t || "Failed to save");
+    }
     msg.textContent = text || t || "Saved.";
     setTimeout(()=>{ msg.textContent = ""; }, 1800);
   }
@@ -2956,10 +2989,14 @@ async function render() {
   if (tmdbSave) {
     tmdbSave.onclick = async () => {
       prefs.tmdbKey = (tmdbInput && tmdbInput.value || "").trim();
-      await saveAll("TMDB key saved.");
-      if (tmdbStatus) {
-        tmdbStatus.textContent = prefs.tmdbKey ? 'Saved (not verified)' : 'Not verified';
-        tmdbStatus.className = 'mini muted tmdb-status';
+      try {
+        await saveAll("TMDB key saved.");
+        if (tmdbStatus) {
+          tmdbStatus.textContent = prefs.tmdbKey ? 'Saved (not verified)' : 'Not verified';
+          tmdbStatus.className = 'mini muted tmdb-status';
+        }
+      } catch (err) {
+        alert(err.message || 'Failed to save TMDB key');
       }
     };
   }
