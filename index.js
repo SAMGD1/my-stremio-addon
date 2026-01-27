@@ -1927,7 +1927,7 @@ app.get("/admin", async (req,res)=>{
   }
   .pill input{margin-right:4px}
   .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
-  input[type="text"]{
+  input[type="text"], textarea{
     background:#1c1837;
     color:var(--text);
     border:1px solid var(--border);
@@ -1936,6 +1936,7 @@ app.get("/admin", async (req,res)=>{
     width:100%;
     font-size:13px;
   }
+  textarea{resize:vertical;min-height:64px;}
   .row{
     display:grid;
     gap:10px;
@@ -2018,7 +2019,6 @@ app.get("/admin", async (req,res)=>{
   <section id="section-snapshot" class="section active">
     <div class="card center-card">
       <h3>Current Snapshot</h3>
-      <ul>${rows}</ul>
       <div class="rowtools">
         <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
           <button class="btn2" type="submit">🔁 Sync Lists Now</button>
@@ -2043,6 +2043,7 @@ app.get("/admin", async (req,res)=>{
         <div class="mini muted">When set, catalogs and metadata use TMDB images/details instead of default sources.</div>
       </div>
       <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, or ordering change.</p>
+      <ul style="margin-top:14px">${rows}</ul>
     </div>
   </section>
 
@@ -2053,7 +2054,7 @@ app.get("/admin", async (req,res)=>{
 
       <div class="row">
         <div><label class="mini">Add IMDb/Trakt <b>User</b> URL</label>
-          <input id="userInput" placeholder="IMDb user /lists URL or Trakt user" />
+          <textarea id="userInput" placeholder="IMDb user /lists URL or Trakt user (one per line)"></textarea>
         </div>
         <div><button id="addUser" type="button">Add</button></div>
       </div>
@@ -2111,6 +2112,11 @@ app.get("/admin", async (req,res)=>{
         </div>
       </div>
       <div id="prefs"></div>
+      <div id="mergeBar" class="merge-bar">
+        <span class="mini muted">Merge up to 4 lists into a new list:</span>
+        <input id="mergeName" type="text" placeholder="Merged list name" />
+        <button id="mergeListsBtn" type="button">Create merged list</button>
+      </div>
     </div>
   </section>
 
@@ -2166,6 +2172,12 @@ function normalizeUserListsUrl(v){
   if (trakt) return { kind:'trakt', value: 'https://trakt.tv/users/' + trakt[1] + '/lists' };
   return { kind:'trakt', value: 'https://trakt.tv/users/' + v + '/lists' };
 }
+function splitBulkLines(input){
+  return String(input || "")
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
 function normalizeListIdOrUrl2(v){
   v = String(v||'').trim();
   if (!v) return null;
@@ -2200,14 +2212,24 @@ function wireAddButtons(){
 
   userBtn.onclick = async (e) => {
     e.preventDefault();
-    const norm = normalizeUserListsUrl(userInp.value);
-    if (!norm) { alert('Enter a valid IMDb user /lists URL, ur… id, or Trakt user'); return; }
-    userBtn.disabled = true;
-    try {
-      const payload = { users:[], lists:[], traktUsers:[] };
+    const entries = splitBulkLines(userInp.value);
+    if (!entries.length) { alert('Enter a valid IMDb user /lists URL, ur… id, or Trakt user'); return; }
+    const payload = { users:[], lists:[], traktUsers:[] };
+    const invalid = [];
+    entries.forEach(val => {
+      const norm = normalizeUserListsUrl(val);
+      if (!norm) { invalid.push(val); return; }
       if (norm.kind === 'trakt') payload.traktUsers.push(norm.value);
       else payload.users.push(norm.value);
+    });
+    if (!payload.users.length && !payload.traktUsers.length) {
+      alert('Enter a valid IMDb user /lists URL, ur… id, or Trakt user');
+      return;
+    }
+    userBtn.disabled = true;
+    try {
       await addSources(payload);
+      if (invalid.length) alert('Skipped invalid entries: ' + invalid.join(', '));
       location.reload();
     }
     finally { userBtn.disabled = false; }
@@ -2218,7 +2240,11 @@ function wireAddButtons(){
     const url = normalizeListIdOrUrl2(listInp.value);
     if (!url) { alert('Enter a valid IMDb list/watchlist URL, ls… id, or Trakt list/watchlist URL'); return; }
     listBtn.disabled = true;
-    try { await addSources({ users:[], lists:[url] }); location.reload(); }
+    try {
+      await addSources({ users:[], lists:urls });
+      if (invalid.length) alert('Skipped invalid entries: ' + invalid.join(', '));
+      location.reload();
+    }
     finally { listBtn.disabled = false; }
   };
 
@@ -2656,6 +2682,75 @@ async function render() {
     const nameCell = el('td',{}); 
     nameCell.appendChild(el('div',{text:listDisplayName(lsid)}));
     nameCell.appendChild(el('small',{text:lsid}));
+
+    const mergeWrap = el('label', {class:'pill merge-check'});
+    const mergeCb = el('input', {type:'checkbox', value: lsid});
+    mergeCb.onchange = () => {
+      if (mergeCb.checked && selectedMerge.size >= 4) {
+        mergeCb.checked = false;
+        alert('You can merge up to 4 lists at once.');
+        return;
+      }
+      if (mergeCb.checked) selectedMerge.add(lsid);
+      else selectedMerge.delete(lsid);
+    };
+    mergeWrap.appendChild(mergeCb);
+    mergeWrap.appendChild(el('span', {text:'Include in merge'}));
+    nameCell.appendChild(mergeWrap);
+
+    const advCell = el('div', {class:'adv-cell'});
+    const actions = el('div', {class:'adv-actions'});
+    const starBtn = el('button', {class:'star-btn', type:'button', text: (prefs.frozen || []).includes(lsid) ? '★ Frozen' : '☆ Freeze'});
+    if ((prefs.frozen || []).includes(lsid)) starBtn.classList.add('active');
+    const renameInput = el('input', {type:'text', placeholder:'Custom name', value: prefs.listNames[lsid] || ''});
+    const saveNameBtn = el('button', {type:'button', text:'Save changes'});
+    const dupBtn = el('button', {type:'button', text:'Duplicate'});
+    const refreshBtn = el('button', {type:'button', text:'Sync frozen', style: (prefs.frozen || []).includes(lsid) ? '' : 'display:none'});
+
+    starBtn.onclick = async () => {
+      const nowFrozen = !((prefs.frozen || []).includes(lsid));
+      await fetch('/api/freeze-list?admin='+ADMIN, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ lsid, frozen: nowFrozen })
+      });
+      const nextFrozen = new Set(prefs.frozen || []);
+      if (nowFrozen) nextFrozen.add(lsid);
+      else nextFrozen.delete(lsid);
+      prefs.frozen = Array.from(nextFrozen);
+      starBtn.textContent = nowFrozen ? '★ Frozen' : '☆ Freeze';
+      starBtn.classList.toggle('active', nowFrozen);
+      refreshBtn.style.display = nowFrozen ? '' : 'none';
+    };
+    saveNameBtn.onclick = async () => {
+      await fetch('/api/rename-list?admin='+ADMIN, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ lsid, name: renameInput.value })
+      });
+      location.reload();
+    };
+    dupBtn.onclick = async () => {
+      await fetch('/api/duplicate-list?admin='+ADMIN, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ lsid })
+      });
+      location.reload();
+    };
+    refreshBtn.onclick = async () => {
+      refreshBtn.disabled = true;
+      await fetch('/api/refresh-frozen?admin='+ADMIN, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ lsid })
+      });
+      refreshBtn.disabled = false;
+    };
+
+    actions.appendChild(starBtn);
+    actions.appendChild(renameInput);
+    actions.appendChild(saveNameBtn);
+    actions.appendChild(dupBtn);
+    actions.appendChild(refreshBtn);
+    advCell.appendChild(actions);
+    nameCell.appendChild(advCell);
 
     const count = el('td',{text:String((L.ids||[]).length)});
 
