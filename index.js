@@ -2446,6 +2446,11 @@ async function render() {
     .sort((a,b)=>( listDisplayName(a).localeCompare(listDisplayName(b)) ));
   const order = baseOrder.concat(missing);
 
+  const mergeBar = document.getElementById('mergeBar');
+  const mergeBtn = document.getElementById('mergeListsBtn');
+  const mergeName = document.getElementById('mergeName');
+  const selectedMerge = new Set();
+
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
     el('th',{text:''}),
