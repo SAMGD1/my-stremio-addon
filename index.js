@@ -655,6 +655,11 @@ async function fetchImdbSearchOrPageIds(url, maxPages = 20) {
 function getTmdbKey() {
   return String(PREFS.tmdbKey || TMDB_API_KEY || "").trim();
 }
+function isLikelyTmdbToken(key) {
+  if (!key) return false;
+  const text = String(key);
+  return text.startsWith("eyJ") && text.split(".").length >= 2;
+}
 function tmdbEnabled() {
   const key = getTmdbKey();
   if (!key) return false;
@@ -666,8 +671,13 @@ function tmdbImage(path, size = "w500") {
   return `${TMDB_IMG_BASE}/${size}${path}`;
 }
 async function fetchTmdbJson(path, apiKey) {
-  const url = `${TMDB_BASE}${path}${path.includes("?") ? "&" : "?"}api_key=${encodeURIComponent(apiKey)}`;
-  const r = await fetch(url, { headers: { "User-Agent": UA, "Accept": "application/json" }, redirect: "follow" });
+  const useToken = isLikelyTmdbToken(apiKey);
+  const url = useToken
+    ? `${TMDB_BASE}${path}`
+    : `${TMDB_BASE}${path}${path.includes("?") ? "&" : "?"}api_key=${encodeURIComponent(apiKey)}`;
+  const headers = { "User-Agent": UA, "Accept": "application/json" };
+  if (useToken) headers.Authorization = `Bearer ${apiKey}`;
+  const r = await fetch(url, { headers, redirect: "follow" });
   if (r.status === 401 || r.status === 403) {
     PREFS.tmdbKeyValid = false;
     await saveSnapshot({
@@ -1442,6 +1452,20 @@ function listIdsWithEdits(lsid) {
   for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
   return ids;
 }
+
+async function rebuildAllCards() {
+  const unique = new Set();
+  for (const id of Object.keys(LISTS)) {
+    listIdsWithEdits(id).forEach(tt => unique.add(tt));
+  }
+  BEST.clear();
+  FALLBK.clear();
+  CARD.clear();
+  for (const tt of unique) {
+    await getBestMeta(tt);
+    CARD.set(tt, cardFor(tt));
+  }
+}
 app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
   try{
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
@@ -1578,6 +1602,9 @@ app.post("/api/tmdb-verify", async (req, res) => {
     const rec = await fetchTmdbMeta(TMDB_PLACEHOLDER_IMDB);
     if (rec && rec.meta) {
       PREFS.tmdbKeyValid = true;
+      await rebuildAllCards();
+      LAST_MANIFEST_KEY = "";
+      MANIFEST_REV++;
       await persistSnapshot();
       return res.json({ ok: true, message: "TMDB key verified and in use." });
     }
@@ -1598,6 +1625,12 @@ app.post("/api/tmdb-save", async (req, res) => {
     PREFS.tmdbKey = key;
     PREFS.tmdbKeyValid = key ? PREFS.tmdbKeyValid : null;
     TMDB_CACHE.clear();
+    if (!key) {
+      BEST.clear();
+      CARD.clear();
+      LAST_MANIFEST_KEY = "";
+      MANIFEST_REV++;
+    }
     await persistSnapshot();
     res.json({ ok: true });
   } catch (e) { res.status(500).send("TMDB save failed"); }
@@ -2368,6 +2401,7 @@ app.get("/admin", async (req,res)=>{
               <button id="tmdbSaveBtn" type="button">Save</button>
               <button id="tmdbVerifyBtn" type="button" class="btn2">Verify</button>
             </div>
+            <div class="mini muted">Use a TMDB v3 API key or a v4 Read Access Token.</div>
             <div id="tmdbStatus" class="mini muted"></div>
           </div>
         </div>
@@ -2432,6 +2466,7 @@ app.get("/admin", async (req,res)=>{
 
       
       <h4 style="margin-top:14px">Discovered</h4>
+      <div id="discoveredStatus" class="mini muted"></div>
       <ul id="discoveredList"></ul>
     </div>
   </section>
@@ -2456,6 +2491,8 @@ const ADMIN="${ADMIN_PASSWORD}";
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 const HOST_URL = ${JSON.stringify(base)};
 const SECRET = ${JSON.stringify(SHARED_SECRET)};
+let discoveredCache = null;
+let discoveredLoading = false;
 
 async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
@@ -2740,11 +2777,10 @@ async function render() {
 
   async function renderDiscovered() {
     const wrap = document.getElementById('discoveredList');
+    const status = document.getElementById('discoveredStatus');
     if (!wrap) return;
-    wrap.innerHTML = '';
-    try {
-      const data = await getDiscovered();
-      const items = data?.lists || [];
+    const renderItems = (items) => {
+      wrap.innerHTML = '';
       if (!items.length) { wrap.textContent = '(none)'; return; }
       items.forEach(d => {
         const li = el('li');
@@ -2754,8 +2790,25 @@ async function render() {
         li.appendChild(urlWrap);
         wrap.appendChild(li);
       });
-    } catch {
-      wrap.textContent = '(failed to load)';
+    };
+    if (Array.isArray(discoveredCache)) {
+      renderItems(discoveredCache);
+    } else {
+      wrap.textContent = 'Loading…';
+    }
+    if (status) status.textContent = 'Loading…';
+    if (discoveredLoading) return;
+    discoveredLoading = true;
+    try {
+      const data = await getDiscovered();
+      const items = data?.lists || [];
+      discoveredCache = items;
+      renderItems(items);
+      if (status) status.textContent = '';
+    } catch (e) {
+      if (status) status.textContent = 'Failed to refresh discovered lists; showing last results.';
+    } finally {
+      discoveredLoading = false;
     }
   }
 
