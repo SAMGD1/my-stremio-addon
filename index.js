@@ -33,7 +33,6 @@ const SNAP_LOCAL    = "data/snapshot.json";
 
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
-const TMDB_API_KEY = process.env.TMDB_API_KEY || "";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.3.3";
 const REQ_HEADERS = {
@@ -83,10 +82,6 @@ let PREFS = {
   sortReverse: {},        // { listId: true } => reverse default sort order
   sortOptions: {},        // { listId: ['custom', 'date_desc', ...] }
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
-  listNames: {},          // { listId: "Custom Name" }
-  frozen: [],             // listIds that should not auto-update
-  customLists: {},        // { listId: { name, ids } }
-  tmdbKey: "",
   upgradeEpisodes: UPGRADE_EPISODES,
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
@@ -144,24 +139,6 @@ function imdbCustomIdFor(url) {
   } catch {
     return `imdb:${hashString(String(url||''))}`;
   }
-}
-function decodeHtmlEntities(str) {
-  if (!str) return str;
-  const named = {
-    "&amp;": "&",
-    "&lt;": "<",
-    "&gt;": ">",
-    "&quot;": "\"",
-    "&#39;": "'",
-    "&#x27;": "'"
-  };
-  return String(str).replace(/(&amp;|&lt;|&gt;|&quot;|&#39;|&#x27;)/g, m => named[m] || m)
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, num) => String.fromCodePoint(parseInt(num, 10)));
-}
-function createCustomListId(label) {
-  const seed = `${label || "custom"}-${Date.now()}-${Math.random()}`;
-  return imdbCustomIdFor(`custom:${seed}`);
 }
 
 const minutes = ms => Math.round(ms/60000);
@@ -497,12 +474,9 @@ async function fetchListName(listUrl) {
     /<h1[^>]+data-testid=["']list-header-title["'][^>]*>(.*?)<\/h1>/i,
     /<h1[^>]*class=["'][^"']*header[^"']*["'][^>]*>(.*?)<\/h1>/i,
   ];
-  for (const rx of tries) {
-    const m = html.match(rx);
-    if (m) return decodeHtmlEntities(m[1].replace(/<[^>]+>/g,"").replace(/\s+/g," ").trim());
-  }
+  for (const rx of tries) { const m = html.match(rx); if (m) return m[1].replace(/<[^>]+>/g,"").replace(/\s+/g," ").trim(); }
   const t = html.match(/<title>(.*?)<\/title>/i);
-  return t ? decodeHtmlEntities(t[1].replace(/\s+\-\s*IMDb.*$/i,"").trim()) : listUrl;
+  return t ? t[1].replace(/\s+\-\s*IMDb.*$/i,"").trim() : listUrl;
 }
 function tconstsFromHtml(html) {
   const out = []; const seen = new Set(); let m;
@@ -606,60 +580,6 @@ async function fetchImdbSearchOrPageIds(url, maxPages = 20) {
 }
 
 // ----------------- METADATA -----------------
-function tmdbKey() {
-  return (PREFS.tmdbKey && String(PREFS.tmdbKey).trim()) || TMDB_API_KEY;
-}
-function tmdbImage(path, size = "w780") {
-  if (!path) return null;
-  return `https://image.tmdb.org/t/p/${size}${path}`;
-}
-async function fetchTmdbFind(imdbId) {
-  const key = tmdbKey();
-  if (!key) return null;
-  const url = `https://api.themoviedb.org/3/find/${encodeURIComponent(imdbId)}?api_key=${encodeURIComponent(key)}&external_source=imdb_id`;
-  return fetchJson(url);
-}
-async function verifyTmdbKey(key) {
-  if (!key) return { ok: false, error: "Missing TMDB key" };
-  const url = `https://api.themoviedb.org/3/configuration?api_key=${encodeURIComponent(key)}`;
-  const data = await fetchJson(url);
-  if (data && data.images) return { ok: true };
-  return { ok: false, error: "Invalid TMDB key" };
-}
-function tmdbMetaFromFind(data) {
-  if (!data) return null;
-  const movie = Array.isArray(data.movie_results) && data.movie_results[0];
-  const show = Array.isArray(data.tv_results) && data.tv_results[0];
-  if (movie) {
-    return {
-      kind: "movie",
-      meta: {
-        name: movie.title || movie.original_title,
-        poster: tmdbImage(movie.poster_path, "w500"),
-        background: tmdbImage(movie.backdrop_path, "w780"),
-        released: movie.release_date || undefined,
-        year: movie.release_date ? Number(String(movie.release_date).slice(0,4)) : undefined,
-        imdbRating: movie.vote_average ?? undefined,
-        description: movie.overview || undefined
-      }
-    };
-  }
-  if (show) {
-    return {
-      kind: "series",
-      meta: {
-        name: show.name || show.original_name,
-        poster: tmdbImage(show.poster_path, "w500"),
-        background: tmdbImage(show.backdrop_path, "w780"),
-        released: show.first_air_date || undefined,
-        year: show.first_air_date ? Number(String(show.first_air_date).slice(0,4)) : undefined,
-        imdbRating: show.vote_average ?? undefined,
-        description: show.overview || undefined
-      }
-    };
-  }
-  return null;
-}
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -691,10 +611,6 @@ async function episodeParentSeries(imdbId) {
 }
 async function getBestMeta(imdbId) {
   if (BEST.has(imdbId)) return BEST.get(imdbId);
-  try {
-    const tmdb = tmdbMetaFromFind(await fetchTmdbFind(imdbId));
-    if (tmdb && tmdb.meta) { BEST.set(imdbId, tmdb); return tmdb; }
-  } catch {/* ignore */}
   let meta = await fetchCinemeta("series", imdbId);
   if (meta) { const rec = { kind: "series", meta }; BEST.set(imdbId, rec); return rec; }
   meta = await fetchCinemeta("movie", imdbId);
@@ -743,11 +659,6 @@ function cardFor(imdbId) {
   };
 }
 
-function displayListName(lsid) {
-  const raw = (PREFS.listNames && PREFS.listNames[lsid]) || (LISTS[lsid] && LISTS[lsid].name) || lsid;
-  return decodeHtmlEntities(String(raw));
-}
-
 function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
 function stableSort(items, sortKey) {
   const s = String(sortKey || "name_asc").toLowerCase();
@@ -791,7 +702,7 @@ function sortByOrderKey(metas, lsid, key) {
 // ----------------- SYNC -----------------
 function manifestKey() {
   const enabled = (PREFS.enabled && PREFS.enabled.length) ? PREFS.enabled : Object.keys(LISTS);
-  const names   = enabled.map(id => displayListName(id)).sort().join("|");
+  const names   = enabled.map(id => LISTS[id]?.name || id).sort().join("|");
   const perSort = JSON.stringify(PREFS.perListSort || {});
   const perOpts = JSON.stringify(PREFS.sortOptions || {});
   const perReverse = JSON.stringify(PREFS.sortReverse || {});
@@ -925,50 +836,19 @@ async function fullSync({ rediscover = true } = {}) {
 
     const next = Object.create(null);
     const seen = new Set();
-    const frozenSet = new Set((PREFS.frozen || []).filter(isListId));
-    const customLists = PREFS.customLists && typeof PREFS.customLists === "object" ? PREFS.customLists : {};
-
     for (const d of discovered) {
-      if (frozenSet.has(d.id) && LISTS[d.id]) {
-        const existing = LISTS[d.id];
-        next[d.id] = {
-          id: existing.id,
-          name: existing.name || d.name || existing.id,
-          url: existing.url || d.url,
-          ids: Array.isArray(existing.ids) ? existing.ids.slice() : [],
-          orders: existing.orders || {}
-        };
-      } else {
-        next[d.id] = {
-          id: d.id,
-          name: d.name || d.id,
-          url: d.url,
-          ids: [],
-          orders: d.orders || {}
-        };
-      }
+      next[d.id] = {
+        id: d.id,
+        name: d.name || d.id,
+        url: d.url,
+        ids: [],
+        orders: d.orders || {}
+      };
       seen.add(d.id);
     }
     const blocked = new Set(PREFS.blocked || []);
     for (const id of Object.keys(LISTS)) {
       if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
-    }
-    for (const [id, data] of Object.entries(customLists)) {
-      if (!isListId(id) || blocked.has(id)) continue;
-      const sources = Array.isArray(data?.sources) ? data.sources.filter(isListId) : [];
-      const hasSources = sources.length > 0;
-      const ids = hasSources && !frozenSet.has(id)
-        ? customListIdsFromSources(sources)
-        : (Array.isArray(data?.ids) ? data.ids.filter(isImdb) : []);
-      next[id] = {
-        id,
-        name: data?.name || id,
-        url: data?.url || (hasSources ? "custom:merge" : "custom"),
-        ids: ids.slice(),
-        orders: { imdb: ids.slice() }
-      };
-      if (hasSources) customLists[id].ids = ids.slice();
-      seen.add(id);
     }
 
     // pull items for each list (IMDb or Trakt)
@@ -976,13 +856,6 @@ async function fullSync({ rediscover = true } = {}) {
     for (const id of Object.keys(next)) {
       const list = next[id];
       let raw = [];
-
-      if (frozenSet.has(id)) {
-        list.orders = list.orders || {};
-        list.orders.imdb = (list.ids || []).slice();
-        (list.ids || []).forEach(tt => uniques.add(tt));
-        continue;
-      }
 
       if (isTraktListId(id)) {
         const ts = parseTraktListKey(id);
@@ -1168,7 +1041,7 @@ function getEnabledOrderedIds() {
   const enabled = new Set(PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds);
   const base    = (PREFS.order && PREFS.order.length ? PREFS.order.filter(id => LISTS[id]) : []);
   const missing = allIds.filter(id => !base.includes(id))
-    .sort((a,b)=>( displayListName(a).localeCompare(displayListName(b)) ));
+    .sort((a,b)=>( (LISTS[a]?.name||a).localeCompare(LISTS[b]?.name||b) ));
   const ordered = base.concat(missing);
   return ordered.filter(id => enabled.has(id));
 }
@@ -1177,7 +1050,7 @@ function catalogs(){
   return ids.map(lsid => ({
     type: "my lists",
     id: `list:${lsid}`,
-    name: `🗂 ${displayListName(lsid)}`,
+    name: `🗂 ${LISTS[lsid]?.name || lsid}`,
     extraSupported: ["search","skip","limit","sort"],
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
@@ -1329,31 +1202,6 @@ app.post("/api/prefs", async (req,res) => {
     if (body.customOrder && typeof body.customOrder === "object") {
       PREFS.customOrder = body.customOrder;
     }
-    if (body.listNames && typeof body.listNames === "object") {
-      PREFS.listNames = Object.fromEntries(
-        Object.entries(body.listNames)
-          .filter(([id]) => isListId(id))
-          .map(([id, name]) => [id, String(name || "").trim()])
-          .filter(([, name]) => name)
-      );
-    }
-    if (body.customLists && typeof body.customLists === "object") {
-      PREFS.customLists = Object.fromEntries(
-        Object.entries(body.customLists)
-          .filter(([id, val]) => isListId(id) && val && typeof val === "object")
-          .map(([id, val]) => [id, {
-            name: String(val.name || id),
-            ids: Array.isArray(val.ids) ? val.ids.filter(isImdb) : [],
-            sources: Array.isArray(val.sources) ? val.sources.filter(isListId) : []
-          }])
-      );
-    }
-    if (Array.isArray(body.frozen)) {
-      PREFS.frozen = body.frozen.filter(isListId);
-    }
-    if (typeof body.tmdbKey === "string") {
-      PREFS.tmdbKey = body.tmdbKey.trim();
-    }
 
     const src = body.sources || {};
     PREFS.sources = {
@@ -1381,73 +1229,6 @@ app.post("/api/prefs", async (req,res) => {
   }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
 });
 
-function effectiveListIds(lsid) {
-  const list = LISTS[lsid];
-  if (!list) return [];
-  let ids = (list.ids || []).slice();
-  const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
-  const removed = new Set((ed.removed || []).filter(isImdb));
-  ids = ids.filter(id => !removed.has(id));
-  const added = (ed.added || []).filter(isImdb);
-  for (const id of added) if (!ids.includes(id)) ids.push(id);
-  return Array.from(new Set(ids));
-}
-
-function customListIdsFromSources(sources) {
-  const ids = [];
-  const seen = new Set();
-  (sources || []).forEach(src => {
-    if (!isListId(src)) return;
-    for (const id of effectiveListIds(src)) {
-      if (!seen.has(id)) { seen.add(id); ids.push(id); }
-    }
-  });
-  return ids;
-}
-
-async function refreshListFromSource(lsid) {
-  const list = LISTS[lsid];
-  if (!list) return;
-  if (PREFS.customLists && PREFS.customLists[lsid] && Array.isArray(PREFS.customLists[lsid].sources)) {
-    const ids = customListIdsFromSources(PREFS.customLists[lsid].sources);
-    PREFS.customLists[lsid].ids = ids.slice();
-    list.ids = ids.slice();
-    list.orders = list.orders || {};
-    list.orders.imdb = list.ids.slice();
-    for (const tt of ids) {
-      await getBestMeta(tt);
-      CARD.set(tt, cardFor(tt));
-    }
-    return;
-  }
-  let raw = [];
-  if (isTraktListId(lsid)) {
-    const ts = parseTraktListKey(lsid);
-    if (ts && TRAKT_CLIENT_ID) raw = await fetchTraktListImdbIds(ts);
-  } else {
-    const url = list.url || `https://www.imdb.com/list/${lsid}/`;
-    raw = (isImdbListId(lsid) || isImdbWatchlistUrl(url))
-      ? await fetchImdbListIdsAllPages(url)
-      : await fetchImdbSearchOrPageIds(url);
-    if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(lsid)) {
-      const asc  = await fetchImdbOrder(url, "release_date,asc");
-      const desc = await fetchImdbOrder(url, "release_date,desc");
-      const pop  = await fetchImdbOrder(url, "moviemeter,asc");
-      list.orders = list.orders || {};
-      list.orders.date_asc  = asc.slice();
-      list.orders.date_desc = desc.slice();
-      list.orders.popularity = pop.slice();
-    }
-  }
-  list.ids = raw.slice();
-  list.orders = list.orders || {};
-  list.orders.imdb = list.ids.slice();
-  for (const tt of raw) {
-    await getBestMeta(tt);
-    CARD.set(tt, cardFor(tt));
-  }
-}
-
 // unblock a previously removed list
 app.post("/api/unblock-list", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -1458,124 +1239,6 @@ app.post("/api/unblock-list", async (req,res)=>{
     await fullSync({ rediscover:true });
     scheduleNextSync();
     res.status(200).send("Unblocked & synced");
-  }catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
-app.post("/api/freeze-list", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const lsid = String(req.body.lsid || "");
-    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    const frozen = !!req.body.frozen;
-    const set = new Set((PREFS.frozen || []).filter(isListId));
-    if (frozen) set.add(lsid);
-    else set.delete(lsid);
-    PREFS.frozen = Array.from(set);
-    if (frozen && PREFS.customLists && PREFS.customLists[lsid] && Array.isArray(PREFS.customLists[lsid].sources)) {
-      PREFS.customLists[lsid].ids = customListIdsFromSources(PREFS.customLists[lsid].sources);
-    }
-    const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
-    res.status(200).send("Frozen updated");
-  }catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
-app.post("/api/rename-list", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const lsid = String(req.body.lsid || "");
-    const name = String(req.body.name || "").trim();
-    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    PREFS.listNames = PREFS.listNames || {};
-    if (name) PREFS.listNames[lsid] = name;
-    else delete PREFS.listNames[lsid];
-    const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
-    res.status(200).send("Renamed");
-  }catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
-app.post("/api/tmdb-verify", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const key = String(req.body.key || PREFS.tmdbKey || "").trim();
-    const result = await verifyTmdbKey(key);
-    if (!result.ok) return res.status(400).json(result);
-    res.json({ ok: true });
-  }catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
-app.post("/api/duplicate-list", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const lsid = String(req.body.lsid || "");
-    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    const baseName = displayListName(lsid);
-    const name = String(req.body.name || `${baseName} (Copy)`).trim() || `${baseName} (Copy)`;
-    const ids = effectiveListIds(lsid);
-    const id = createCustomListId(name);
-    PREFS.customLists = PREFS.customLists || {};
-    PREFS.customLists[id] = { name, ids };
-    PREFS.frozen = Array.from(new Set([...(PREFS.frozen || []).filter(isListId), id]));
-    const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
-    await fullSync({ rediscover: true });
-    res.json({ id, name });
-  }catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
-app.post("/api/merge-lists", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const sourceIds = Array.isArray(req.body.sourceIds) ? req.body.sourceIds.filter(isListId) : [];
-    if (sourceIds.length < 2) return res.status(400).send("Pick at least two lists");
-    if (sourceIds.length > 4) return res.status(400).send("Pick up to 4 lists");
-    const name = String(req.body.name || "Merged List").trim() || "Merged List";
-    const ids = customListIdsFromSources(sourceIds);
-    const id = createCustomListId(name);
-    PREFS.customLists = PREFS.customLists || {};
-    PREFS.customLists[id] = { name, ids, sources: sourceIds };
-    const key = manifestKey();
-    if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
-    await fullSync({ rediscover: true });
-    res.json({ id, name });
-  }catch(e){ console.error(e); res.status(500).send("Failed"); }
-});
-
-app.post("/api/refresh-frozen", async (req,res)=>{
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try{
-    const lsid = String(req.body.lsid || "");
-    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    await refreshListFromSource(lsid);
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
-    res.status(200).send("Refreshed");
   }catch(e){ console.error(e); res.status(500).send("Failed"); }
 });
 
@@ -1741,16 +1404,10 @@ app.post("/api/remove-list", async (req,res)=>{
   try{
     const lsid = String(req.body.lsid||"");
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    const isCustom = PREFS.customLists && PREFS.customLists[lsid];
     delete LISTS[lsid];
-    if (PREFS.customLists && PREFS.customLists[lsid]) delete PREFS.customLists[lsid];
-    if (PREFS.listNames && PREFS.listNames[lsid]) delete PREFS.listNames[lsid];
-    PREFS.frozen = (PREFS.frozen || []).filter(id => id !== lsid);
     PREFS.enabled = (PREFS.enabled||[]).filter(id => id!==lsid);
     PREFS.order   = (PREFS.order||[]).filter(id => id!==lsid);
-    if (!isCustom) {
-      PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
-    }
+    PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
 
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
     await saveSnapshot({
@@ -1807,10 +1464,10 @@ app.get("/admin", async (req,res)=>{
 
   const rows = Object.keys(LISTS).map(id => {
     const L = LISTS[id]; const count=(L.ids||[]).length;
-    return `<li><b>${displayListName(id)}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
+    return `<li><b>${L.name||id}</b> <small>(${count} items)</small><br/><small>${L.url||""}</small></li>`;
   }).join("") || "<li>(none)</li>";
 
-  const disc = discovered.map(d=>`<li><b>${decodeHtmlEntities(d.name||d.id)}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
+  const disc = discovered.map(d=>`<li><b>${d.name||d.id}</b><br/><small>${d.url}</small></li>`).join("") || "<li>(none)</li>";
 
   const lastSyncText = LAST_SYNC_AT
     ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
@@ -1973,7 +1630,7 @@ app.get("/admin", async (req,res)=>{
   }
   .pill input{margin-right:4px}
   .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
-  input[type="text"], textarea{
+  input[type="text"]{
     background:#1c1837;
     color:var(--text);
     border:1px solid var(--border);
@@ -1982,7 +1639,6 @@ app.get("/admin", async (req,res)=>{
     width:100%;
     font-size:13px;
   }
-  textarea{resize:vertical;min-height:64px;}
   .row{
     display:grid;
     gap:10px;
@@ -2004,21 +1660,6 @@ app.get("/admin", async (req,res)=>{
   .mini{font-size:12px}
   a.link{color:#b1b9ff;text-decoration:none}
   a.link:hover{text-decoration:underline}
-  .tmdb-row{margin-top:12px;display:flex;flex-direction:column;gap:8px;}
-  .tmdb-status{display:inline-flex;align-items:center;gap:6px;}
-  .tmdb-status.ok{color:#64f5a0;}
-  .tmdb-status.bad{color:#ff9f9f;}
-  .advanced-toggle{display:flex;justify-content:flex-end;margin-bottom:8px;}
-  .advanced-on .adv-cell{display:block;}
-  .adv-cell{display:none;margin-top:6px;padding:8px;border-radius:10px;background:rgba(12,11,29,.7);border:1px solid var(--border);}
-  .adv-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
-  .adv-actions input[type="text"]{font-size:12px;}
-  .star-btn{border-radius:999px;padding:6px 10px;background:rgba(255,255,255,.08);border:1px solid var(--border);}
-  .star-btn.active{background:var(--accent2);color:#fff;box-shadow:0 6px 16px rgba(139,124,247,.35);}
-  .merge-bar{display:none;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:12px;background:rgba(12,11,29,.7);}
-  .advanced-on .merge-bar{display:flex;}
-  .merge-check{display:none;}
-  .advanced-on .merge-check{display:inline-flex;}
   .installRow{
     display:flex;
     flex-wrap:wrap;
@@ -2059,13 +1700,15 @@ app.get("/admin", async (req,res)=>{
   </div>
 
   <div class="nav">
-    <button class="nav-btn active" data-target="snapshot" onclick="switchSection('snapshot')">Snapshot</button>
-    <button class="nav-btn" data-target="add" onclick="switchSection('add')">Add Lists</button>
-    <button class="nav-btn" data-target="customize" onclick="switchSection('customize')">Customize Layout</button>
+    <button class="nav-btn active" data-target="snapshot">Snapshot</button>
+    <button class="nav-btn" data-target="add">Add Lists</button>
+    <button class="nav-btn" data-target="customize">Customize Layout</button>
   </div>
 
   <section id="section-snapshot" class="section active">
     <div class="card center-card">
+      <h3>Current Snapshot</h3>
+      <ul>${rows}</ul>
       <div class="rowtools">
         <form method="POST" action="/api/sync?admin=${ADMIN_PASSWORD}">
           <button class="btn2" type="submit">🔁 Sync Lists Now</button>
@@ -2081,21 +1724,7 @@ app.get("/admin", async (req,res)=>{
         <button type="button" class="btn2" id="installBtn">⭐ Install to Stremio</button>
         <span class="mini muted">If the button doesn’t work, copy the manifest URL into Stremio manually.</span>
       </div>
-      <div class="tmdb-row">
-        <label class="mini">TMDB API Key (optional)</label>
-        <div class="row">
-          <div><input id="tmdbKeyInput" placeholder="Paste TMDB API key to enrich posters & metadata" /></div>
-          <div><button id="tmdbSave" type="button">Save</button></div>
-        </div>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button id="tmdbVerify" type="button">Verify</button>
-          <span id="tmdbStatus" class="mini muted">Not verified</span>
-        </div>
-        <div class="mini muted">When set, catalogs and metadata use TMDB images/details instead of default sources.</div>
-      </div>
       <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, or ordering change.</p>
-      <h3 style="margin-top:14px;">Current Snapshot</h3>
-      <ul style="margin-top:8px">${rows}</ul>
     </div>
   </section>
 
@@ -2106,13 +1735,13 @@ app.get("/admin", async (req,res)=>{
 
       <div class="row">
         <div><label class="mini">Add IMDb/Trakt <b>User</b> URL</label>
-          <textarea id="userInput" placeholder="IMDb user /lists URL or Trakt user (one per line)"></textarea>
+          <input id="userInput" placeholder="IMDb user /lists URL or Trakt user" />
         </div>
         <div><button id="addUser" type="button">Add</button></div>
       </div>
       <div class="row">
         <div><label class="mini">Add IMDb/Trakt <b>List</b> URL</label>
-          <textarea id="listInput" placeholder="IMDb ls…/watchlist or Trakt list/watchlist URL (one per line)"></textarea>
+          <input id="listInput" placeholder="IMDb ls…/watchlist or Trakt list/watchlist URL" />
         </div>
         <div><button id="addList" type="button">Add</button></div>
       </div>
@@ -2144,53 +1773,21 @@ app.get("/admin", async (req,res)=>{
     <div class="card center-card">
       <h3>Customize (enable, order, sort)</h3>
       <p class="muted">Drag rows to reorder lists or use the arrows. Click ▾ to open the drawer and tune sort options or custom order.</p>
-      <div class="advanced-toggle">
-        <button type="button" id="advancedToggle">Advanced options</button>
-      </div>
       <div id="prefs"></div>
-      <div id="mergeBar" class="merge-bar">
-        <span class="mini muted">Merge up to 4 lists into a new list:</span>
-        <input id="mergeName" type="text" placeholder="Merged list name" />
-        <button id="mergeListsBtn" type="button">Create merged list</button>
-      </div>
     </div>
   </section>
 
 </div>
 
-  <script>
-  function switchSection(target) {
-    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.nav-btn').forEach(btn => {
-      if (btn.dataset.target === target) btn.classList.add('active');
-    });
-    document.querySelectorAll('.section').forEach(sec => {
-      sec.classList.toggle('active', sec.id === 'section-' + target);
-    });
-  }
-  </script>
-
-  <script>
+<script>
 const ADMIN="${ADMIN_PASSWORD}";
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 const HOST_URL = ${JSON.stringify(base)};
 const SECRET = ${JSON.stringify(SHARED_SECRET)};
 
-async function getPrefs(){
-  const r = await fetch('/api/prefs?admin='+ADMIN);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-async function getLists(){
-  const r = await fetch('/api/lists?admin='+ADMIN);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-async function getListItems(lsid){
-  const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid));
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
+async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
+async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
+async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
 async function saveCustomOrder(lsid, order){
   const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
   if (!r.ok) throw new Error('save failed');
@@ -2232,12 +1829,6 @@ function normalizeUserListsUrl(v){
   if (trakt) return { kind:'trakt', value: 'https://trakt.tv/users/' + trakt[1] + '/lists' };
   return { kind:'trakt', value: 'https://trakt.tv/users/' + v + '/lists' };
 }
-function splitBulkLines(input){
-  return String(input || "")
-    .split(/\r?\n/)
-    .map(s => s.trim())
-    .filter(Boolean);
-}
 function normalizeListIdOrUrl2(v){
   v = String(v||'').trim();
   if (!v) return null;
@@ -2257,14 +1848,10 @@ function normalizeListIdOrUrl2(v){
 
 }
 async function addSources(payload){
-  const r = await fetch('/api/add-sources?admin='+ADMIN, {
+  await fetch('/api/add-sources?admin='+ADMIN, {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify(payload)
   });
-  if (!r.ok) {
-    const t = await r.text().catch(()=> "");
-    throw new Error(t || 'Failed to add sources');
-  }
 }
 function wireAddButtons(){
   const userBtn = document.getElementById('addUser');
@@ -2276,50 +1863,26 @@ function wireAddButtons(){
 
   userBtn.onclick = async (e) => {
     e.preventDefault();
-    const entries = splitBulkLines(userInp.value);
-    if (!entries.length) { alert('Enter a valid IMDb user /lists URL, ur… id, or Trakt user'); return; }
-    const payload = { users:[], lists:[], traktUsers:[] };
-    const invalid = [];
-    entries.forEach(val => {
-      const norm = normalizeUserListsUrl(val);
-      if (!norm) { invalid.push(val); return; }
-      if (norm.kind === 'trakt') payload.traktUsers.push(norm.value);
-      else payload.users.push(norm.value);
-    });
-    if (!payload.users.length && !payload.traktUsers.length) {
-      alert('Enter a valid IMDb user /lists URL, ur… id, or Trakt user');
-      return;
-    }
+    const norm = normalizeUserListsUrl(userInp.value);
+    if (!norm) { alert('Enter a valid IMDb user /lists URL, ur… id, or Trakt user'); return; }
     userBtn.disabled = true;
     try {
+      const payload = { users:[], lists:[], traktUsers:[] };
+      if (norm.kind === 'trakt') payload.traktUsers.push(norm.value);
+      else payload.users.push(norm.value);
       await addSources(payload);
-      if (invalid.length) alert('Skipped invalid entries: ' + invalid.join(', '));
       location.reload();
-    } catch (err) {
-      alert(err.message || 'Failed to add users');
-    } finally { userBtn.disabled = false; }
+    }
+    finally { userBtn.disabled = false; }
   };
 
   listBtn.onclick = async (e) => {
     e.preventDefault();
-    const entries = splitBulkLines(listInp.value);
-    if (!entries.length) { alert('Enter a valid IMDb list/watchlist URL, ls… id, or Trakt list/watchlist URL'); return; }
-    const urls = [];
-    const invalid = [];
-    entries.forEach(val => {
-      const url = normalizeListIdOrUrl2(val);
-      if (url) urls.push(url);
-      else invalid.push(val);
-    });
-    if (!urls.length) { alert('Enter a valid IMDb list/watchlist URL, ls… id, or Trakt list/watchlist URL'); return; }
+    const url = normalizeListIdOrUrl2(listInp.value);
+    if (!url) { alert('Enter a valid IMDb list/watchlist URL, ls… id, or Trakt list/watchlist URL'); return; }
     listBtn.disabled = true;
-    try {
-      await addSources({ users:[], lists:urls });
-      if (invalid.length) alert('Skipped invalid entries: ' + invalid.join(', '));
-      location.reload();
-    } catch (err) {
-      alert(err.message || 'Failed to add lists');
-    } finally { listBtn.disabled = false; }
+    try { await addSources({ users:[], lists:[url] }); location.reload(); }
+    finally { listBtn.disabled = false; }
   };
 
 
@@ -2415,46 +1978,10 @@ function stableSortClient(items, sortKey){
   }).map(x=>x.m);
 }
 
-  async function render() {
-  let prefs;
-  let lists;
-  try {
-    prefs = await getPrefs();
-    lists = await getLists();
-  } catch (err) {
-    const container = document.getElementById('prefs');
-    if (container) {
-      container.innerHTML = '<div class="mini muted">Failed to load lists. Check admin key and reload.</div>';
-    }
-    alert(err.message || 'Failed to load lists');
-    return;
-  }
+async function render() {
+  const prefs = await getPrefs();
+  const lists = await getLists();
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
-  prefs.listNames = prefs.listNames || {};
-  prefs.frozen = Array.isArray(prefs.frozen) ? prefs.frozen : [];
-  prefs.customLists = prefs.customLists && typeof prefs.customLists === "object" ? prefs.customLists : {};
-  prefs.tmdbKey = prefs.tmdbKey || "";
-
-  function decodeHtml(str){
-    return String(str || "")
-      .replace(/&#x27;/g, "'")
-      .replace(/&#39;/g, "'")
-      .replace(/&quot;/g, '"')
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">");
-  }
-  const listDisplayName = (id) => decodeHtml(prefs.listNames[id] || lists[id]?.name || id);
-
-  const tmdbInput = document.getElementById('tmdbKeyInput');
-  const tmdbSave = document.getElementById('tmdbSave');
-  const tmdbVerify = document.getElementById('tmdbVerify');
-  const tmdbStatus = document.getElementById('tmdbStatus');
-  if (tmdbInput) tmdbInput.value = prefs.tmdbKey || "";
-  if (tmdbStatus) {
-    tmdbStatus.textContent = prefs.tmdbKey ? 'Saved (not verified)' : 'Not verified';
-    tmdbStatus.className = 'mini muted tmdb-status';
-  }
 
   function renderPills(id, arr, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
@@ -2534,13 +2061,8 @@ function stableSortClient(items, sortKey){
   const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
   const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
   const missing   = Object.keys(lists).filter(id => !baseOrder.includes(id))
-    .sort((a,b)=>( listDisplayName(a).localeCompare(listDisplayName(b)) ));
+    .sort((a,b)=>( (lists[a]?.name||a).localeCompare(lists[b]?.name||b) ));
   const order = baseOrder.concat(missing);
-
-  const mergeBar = document.getElementById('mergeBar');
-  const mergeBtn = document.getElementById('mergeListsBtn');
-  const mergeName = document.getElementById('mergeName');
-  const selectedMerge = new Set();
 
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
@@ -2776,77 +2298,8 @@ function stableSortClient(items, sortKey){
     const moveTd = el('td',{},[moveWrap]);
 
     const nameCell = el('td',{}); 
-    nameCell.appendChild(el('div',{text:listDisplayName(lsid)}));
+    nameCell.appendChild(el('div',{text:(L.name||lsid)}));
     nameCell.appendChild(el('small',{text:lsid}));
-
-    const mergeWrap = el('label', {class:'pill merge-check'});
-    const mergeCb = el('input', {type:'checkbox', value: lsid});
-    mergeCb.onchange = () => {
-      if (mergeCb.checked && selectedMerge.size >= 4) {
-        mergeCb.checked = false;
-        alert('You can merge up to 4 lists at once.');
-        return;
-      }
-      if (mergeCb.checked) selectedMerge.add(lsid);
-      else selectedMerge.delete(lsid);
-    };
-    mergeWrap.appendChild(mergeCb);
-    mergeWrap.appendChild(el('span', {text:'Include in merge'}));
-    nameCell.appendChild(mergeWrap);
-
-    const advCell = el('div', {class:'adv-cell'});
-    const actions = el('div', {class:'adv-actions'});
-    const starBtn = el('button', {class:'star-btn', type:'button', text: (prefs.frozen || []).includes(lsid) ? '★ Frozen' : '☆ Freeze'});
-    if ((prefs.frozen || []).includes(lsid)) starBtn.classList.add('active');
-    const renameInput = el('input', {type:'text', placeholder:'Custom name', value: prefs.listNames[lsid] || ''});
-    const saveNameBtn = el('button', {type:'button', text:'Save changes'});
-    const dupBtn = el('button', {type:'button', text:'Duplicate'});
-    const refreshBtn = el('button', {type:'button', text:'Sync frozen', style: (prefs.frozen || []).includes(lsid) ? '' : 'display:none'});
-
-    starBtn.onclick = async () => {
-      const nowFrozen = !((prefs.frozen || []).includes(lsid));
-      await fetch('/api/freeze-list?admin='+ADMIN, {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ lsid, frozen: nowFrozen })
-      });
-      const nextFrozen = new Set(prefs.frozen || []);
-      if (nowFrozen) nextFrozen.add(lsid);
-      else nextFrozen.delete(lsid);
-      prefs.frozen = Array.from(nextFrozen);
-      starBtn.textContent = nowFrozen ? '★ Frozen' : '☆ Freeze';
-      starBtn.classList.toggle('active', nowFrozen);
-      refreshBtn.style.display = nowFrozen ? '' : 'none';
-    };
-    saveNameBtn.onclick = async () => {
-      await fetch('/api/rename-list?admin='+ADMIN, {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ lsid, name: renameInput.value })
-      });
-      location.reload();
-    };
-    dupBtn.onclick = async () => {
-      await fetch('/api/duplicate-list?admin='+ADMIN, {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ lsid })
-      });
-      location.reload();
-    };
-    refreshBtn.onclick = async () => {
-      refreshBtn.disabled = true;
-      await fetch('/api/refresh-frozen?admin='+ADMIN, {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ lsid })
-      });
-      refreshBtn.disabled = false;
-    };
-
-    actions.appendChild(starBtn);
-    actions.appendChild(renameInput);
-    actions.appendChild(saveNameBtn);
-    actions.appendChild(dupBtn);
-    actions.appendChild(refreshBtn);
-    advCell.appendChild(actions);
-    nameCell.appendChild(advCell);
 
     const count = el('td',{text:String((L.ids||[]).length)});
 
@@ -2923,33 +2376,6 @@ function stableSortClient(items, sortKey){
 
   container.appendChild(table);
 
-  const advancedToggle = document.getElementById('advancedToggle');
-  const customizeSection = document.getElementById('section-customize');
-  if (advancedToggle && customizeSection) {
-    advancedToggle.onclick = () => {
-      customizeSection.classList.toggle('advanced-on');
-      advancedToggle.textContent = customizeSection.classList.contains('advanced-on') ? 'Hide advanced options' : 'Advanced options';
-    };
-  }
-
-  if (mergeBar && mergeBtn) {
-    mergeBtn.onclick = async () => {
-      const selected = Array.from(selectedMerge);
-      if (selected.length < 2) { alert('Select at least two lists to merge.'); return; }
-      if (selected.length > 4) { alert('Select up to 4 lists to merge.'); return; }
-      mergeBtn.disabled = true;
-      try {
-        await fetch('/api/merge-lists?admin='+ADMIN, {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ sourceIds: selected, name: mergeName ? mergeName.value : "" })
-        });
-        location.reload();
-      } finally {
-        mergeBtn.disabled = false;
-      }
-    };
-  }
-
   const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'});
   const saveBtn = el('button',{text:'Save', type:'button'});
   const msg = el('span',{class:'inline-note'});
@@ -2968,69 +2394,16 @@ function stableSortClient(items, sortKey){
       sortOptions: prefs.sortOptions || {},
       upgradeEpisodes: prefs.upgradeEpisodes || false,
       sources: prefs.sources || {},
-      blocked: prefs.blocked || [],
-      listNames: prefs.listNames || {},
-      frozen: prefs.frozen || [],
-      customLists: prefs.customLists || {},
-      tmdbKey: prefs.tmdbKey || ""
+      blocked: prefs.blocked || []
     };
     msg.textContent = "Saving…";
     const r = await fetch('/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const t = await r.text().catch(()=> "");
-    if (!r.ok) {
-      msg.textContent = t || "Failed to save";
-      throw new Error(t || "Failed to save");
-    }
+    const t = await r.text();
     msg.textContent = text || t || "Saved.";
     setTimeout(()=>{ msg.textContent = ""; }, 1800);
   }
 
   saveBtn.onclick = ()=> saveAll();
-  if (tmdbSave) {
-    tmdbSave.onclick = async () => {
-      prefs.tmdbKey = (tmdbInput && tmdbInput.value || "").trim();
-      try {
-        await saveAll("TMDB key saved.");
-        if (tmdbStatus) {
-          tmdbStatus.textContent = prefs.tmdbKey ? 'Saved (not verified)' : 'Not verified';
-          tmdbStatus.className = 'mini muted tmdb-status';
-        }
-      } catch (err) {
-        alert(err.message || 'Failed to save TMDB key');
-      }
-    };
-  }
-  if (tmdbVerify) {
-    tmdbVerify.onclick = async () => {
-      const key = (tmdbInput && tmdbInput.value || "").trim();
-      if (!key) { alert('Enter a TMDB API key first.'); return; }
-      tmdbVerify.disabled = true;
-      if (tmdbStatus) {
-        tmdbStatus.textContent = 'Verifying…';
-        tmdbStatus.className = 'mini muted tmdb-status';
-      }
-      try {
-        const r = await fetch('/api/tmdb-verify?admin='+ADMIN, {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ key })
-        });
-        if (r.ok) {
-          if (tmdbStatus) {
-            tmdbStatus.textContent = 'Verified ✓';
-            tmdbStatus.className = 'mini tmdb-status ok';
-          }
-        } else {
-          const data = await r.json().catch(()=>({ error: 'Invalid TMDB key' }));
-          if (tmdbStatus) {
-            tmdbStatus.textContent = data.error || 'Invalid TMDB key';
-            tmdbStatus.className = 'mini tmdb-status bad';
-          }
-        }
-      } finally {
-        tmdbVerify.disabled = false;
-      }
-    };
-  }
 }
 
 wireAddButtons();
