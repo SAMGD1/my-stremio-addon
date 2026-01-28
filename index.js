@@ -1657,6 +1657,10 @@ app.post("/api/prefs", async (req,res) => {
       : (PREFS.sortOptions || {});
 
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
+    if (typeof body.tmdbKey === "string") {
+      PREFS.tmdbKey = body.tmdbKey.trim();
+      if (!PREFS.tmdbKey) PREFS.tmdbKeyValid = null;
+    }
 
     if (body.customOrder && typeof body.customOrder === "object") {
       PREFS.customOrder = body.customOrder;
