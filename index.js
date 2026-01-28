@@ -3760,6 +3760,15 @@ async function render() {
       cloudBtn.onclick = async () => {
         cloudBtn.disabled = true;
         try {
+          const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+          if (drawer && drawer.style.display !== "none" && sortSel.value === 'custom') {
+            const listEl = drawer.querySelector('ul.thumbs');
+            if (listEl) {
+              let ids = Array.from(listEl.querySelectorAll('li.thumb[data-id]')).map(li=>li.getAttribute('data-id'));
+              if (prefs.sortReverse && prefs.sortReverse[lsid]) ids = ids.slice().reverse();
+              await saveCustomOrder(lsid, ids);
+            }
+          }
           await fetch('/api/link-backup?admin=' + ADMIN, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
