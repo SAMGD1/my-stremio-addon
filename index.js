@@ -3592,6 +3592,7 @@ async function render() {
         const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
       }
+      saveAll('Saved');
     };
     updateReverseBtn();
     const sortWrap = el('div',{class:'sort-wrap'},[sortSel, reverseBtn]);
@@ -3603,6 +3604,7 @@ async function render() {
         const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
       }
+      saveAll('Saved');
     });
 
     const rmBtn = el('button',{text: isCustom ? 'Delete' : 'Remove', type:'button'});
@@ -3771,12 +3773,7 @@ async function render() {
   updateAdvancedPanels();
   renderMergeBuilder();
 
-  const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'});
-  const saveBtn = el('button',{text:'Save', type:'button'});
   const msg = el('span',{class:'inline-note'});
-  saveWrap.appendChild(saveBtn); saveWrap.appendChild(msg);
-  container.appendChild(saveWrap);
-
   async function saveAll(text){
     const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
     const enabled = Array.from(enabledSet);
@@ -3797,6 +3794,11 @@ async function render() {
     msg.textContent = text || t || "Saved.";
     setTimeout(()=>{ msg.textContent = ""; }, 1800);
   }
+
+  const saveWrap = el('div',{style:'margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'});
+  const saveBtn = el('button',{text:'Save', type:'button'});
+  saveWrap.appendChild(saveBtn); saveWrap.appendChild(msg);
+  container.appendChild(saveWrap);
 
   saveBtn.onclick = ()=> saveAll();
 }
