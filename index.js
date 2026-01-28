@@ -31,6 +31,7 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
 const FROZEN_DIR    = "data/frozen";
+const BACKUP_DIR    = "data/backup";
 
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
@@ -95,6 +96,7 @@ let PREFS = {
   frozenLists: {},        // { listId: { ids:[], orders:{}, name, url, frozenAt, sortKey, sortReverse, customOrder } }
   customLists: {},        // { listId: { kind, sources, createdAt } }
   linkBackups: [],        // array of list URLs/IDs to keep as backup links
+  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, savedAt } }
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
@@ -222,6 +224,9 @@ function base64Url(str) {
 function frozenBackupPath(lsid) {
   return `${FROZEN_DIR}/${base64Url(lsid)}.json`;
 }
+function linkBackupPath(lsid) {
+  return `${BACKUP_DIR}/${base64Url(lsid)}.json`;
+}
 
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -325,6 +330,7 @@ async function persistSnapshot() {
     ep2ser: Object.fromEntries(EP2SER)
   });
   await persistFrozenBackups();
+  await persistLinkBackupConfigs();
 }
 
 async function saveFrozenBackup(lsid, frozen) {
@@ -361,12 +367,106 @@ async function deleteFrozenBackup(lsid) {
 async function persistFrozenBackups() {
   const frozen = PREFS.frozenLists || {};
   for (const [lsid, entry] of Object.entries(frozen)) {
-    if (!entry.sortKey) entry.sortKey = PREFS.perListSort?.[lsid] || "";
+    if (!entry.sortKey) entry.sortKey = PREFS.perListSort?.[lsid] || "name_asc";
     entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
     if (!Array.isArray(entry.customOrder) || !entry.customOrder.length) {
       entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
     }
     await saveFrozenBackup(lsid, entry);
+  }
+}
+async function saveLinkBackupConfig(lsid, config) {
+  const payload = {
+    id: lsid,
+    name: sanitizeName(config?.name || LISTS[lsid]?.name || listDisplayName(lsid)),
+    url: config?.url || LISTS[lsid]?.url,
+    sortKey: config?.sortKey || "",
+    sortReverse: !!config?.sortReverse,
+    customOrder: Array.isArray(config?.customOrder) ? config.customOrder : [],
+    savedAt: config?.savedAt || Date.now()
+  };
+  const path = linkBackupPath(lsid);
+  try {
+    await fs.mkdir(BACKUP_DIR, { recursive: true });
+    await fs.writeFile(path, JSON.stringify(payload, null, 2), "utf8");
+  } catch {/* ignore */}
+  if (!GH_ENABLED) return;
+  const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
+  const relPath = `data/backup/${base64Url(lsid)}.json`;
+  const sha = await ghGetSha(relPath);
+  const body = { message: `Update backup ${lsid}`, content, branch: GITHUB_BRANCH };
+  if (sha) body.sha = sha;
+  await gh("PUT", `/contents/${encodeURIComponent(relPath)}`, body);
+}
+async function deleteLinkBackupConfig(lsid) {
+  const path = linkBackupPath(lsid);
+  try { await fs.unlink(path); } catch {/* ignore */}
+  await ghDeleteFile(`data/backup/${base64Url(lsid)}.json`);
+}
+async function persistLinkBackupConfigs() {
+  const configs = PREFS.backupConfigs || {};
+  for (const [lsid, entry] of Object.entries(configs)) {
+    entry.sortKey = PREFS.perListSort?.[lsid] || entry.sortKey || "name_asc";
+    entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
+    entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : (entry.customOrder || []);
+    await saveLinkBackupConfig(lsid, entry);
+  }
+}
+async function loadLinkBackupConfigs() {
+  const backups = new Map();
+  try {
+    const files = await fs.readdir(BACKUP_DIR);
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const txt = await fs.readFile(`${BACKUP_DIR}/${file}`, "utf8");
+        const data = JSON.parse(txt);
+        if (data?.id) backups.set(String(data.id), data);
+      } catch {/* ignore */}
+    }
+  } catch {/* ignore */}
+  if (GH_ENABLED) {
+    const entries = await ghListDir("data/backup");
+    for (const entry of entries) {
+      if (!entry?.path || entry.type !== "file" || !entry.path.endsWith(".json")) continue;
+      if (backups.size && Array.from(backups.keys()).some(id => entry.path.endsWith(`${base64Url(id)}.json`))) continue;
+      try {
+        const data = await gh("GET", `/contents/${encodeURIComponent(entry.path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+        const buf = Buffer.from(data.content, "base64").toString("utf8");
+        const parsed = JSON.parse(buf);
+        if (parsed?.id) backups.set(String(parsed.id), parsed);
+      } catch {/* ignore */}
+    }
+  }
+  return backups;
+}
+function restoreLinkBackupConfigEntry(lsid, data) {
+  PREFS.backupConfigs = PREFS.backupConfigs || {};
+  PREFS.backupConfigs[lsid] = {
+    id: lsid,
+    name: sanitizeName(data?.name || lsid),
+    url: data?.url,
+    sortKey: data?.sortKey || "",
+    sortReverse: !!data?.sortReverse,
+    customOrder: Array.isArray(data?.customOrder) ? data.customOrder.slice() : [],
+    savedAt: data?.savedAt || Date.now()
+  };
+  PREFS.linkBackups = Array.isArray(PREFS.linkBackups) ? PREFS.linkBackups : [];
+  const backupValue = data?.url || lsid;
+  if (backupValue && !PREFS.linkBackups.includes(backupValue)) PREFS.linkBackups.push(backupValue);
+  if (data?.sortKey) {
+    PREFS.perListSort = PREFS.perListSort || {};
+    if (!PREFS.perListSort[lsid]) PREFS.perListSort[lsid] = data.sortKey;
+  }
+  if (data?.sortReverse) {
+    PREFS.sortReverse = PREFS.sortReverse || {};
+    if (!PREFS.sortReverse[lsid]) PREFS.sortReverse[lsid] = true;
+  }
+  if (Array.isArray(data?.customOrder) && data.customOrder.length) {
+    PREFS.customOrder = PREFS.customOrder || {};
+    if (!Array.isArray(PREFS.customOrder[lsid]) || !PREFS.customOrder[lsid].length) {
+      PREFS.customOrder[lsid] = data.customOrder.slice();
+    }
   }
 }
 async function loadFrozenBackups() {
@@ -2171,10 +2271,20 @@ app.post("/api/link-backup", async (req,res) => {
       value = list?.url || lsid;
     }
     PREFS.linkBackups = Array.isArray(PREFS.linkBackups) ? PREFS.linkBackups : [];
+    PREFS.backupConfigs = PREFS.backupConfigs || {};
     if (enabled) {
       PREFS.linkBackups = Array.from(new Set([ ...PREFS.linkBackups, value ]));
+      const sortKey = PREFS.perListSort?.[lsid] || "name_asc";
+      const sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
+      const customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
+      const name = listDisplayName(lsid);
+      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, savedAt: Date.now() };
+      PREFS.backupConfigs[lsid] = config;
+      await saveLinkBackupConfig(lsid, config);
     } else {
       PREFS.linkBackups = PREFS.linkBackups.filter(v => v !== value && v !== lsid);
+      if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
+      await deleteLinkBackupConfig(lsid);
     }
     await persistSnapshot();
     res.json({ ok: true, enabled });
@@ -2202,6 +2312,8 @@ app.post("/api/block-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
+    if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
+    await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
       PREFS.linkBackups = PREFS.linkBackups.filter(v => !removeValues.has(v));
     }
@@ -2230,6 +2342,8 @@ app.post("/api/remove-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
+    if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
+    await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
       PREFS.linkBackups = PREFS.linkBackups.filter(v => !removeValues.has(v));
     }
@@ -2744,8 +2858,8 @@ app.get("/admin", async (req,res)=>{
             <div id="listPills"></div>
           </div>
           <div style="margin-top:8px">
-            <div class="mini muted">Backed up links:</div>
-            <div id="backupPills"></div>
+            <div class="mini muted">Backups:</div>
+            <div id="backupConfigs"></div>
           </div>
           <div style="margin-top:12px">
             <div class="mini muted">Blocked lists (won't re-add on sync):</div>
@@ -3031,16 +3145,37 @@ async function render() {
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
   });
-  renderPills('backupPills', prefs.linkBackups || [], async (i)=>{
-    const value = (prefs.linkBackups || [])[i];
-    if (!value) return;
-    await fetch('/api/link-backup?admin='+ADMIN, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ value, enabled: false })
-    });
-    await render();
-  });
+  {
+    const backupWrap = document.getElementById('backupConfigs');
+    if (backupWrap) {
+      backupWrap.innerHTML = '';
+      const configs = prefs.backupConfigs || {};
+      const entries = Object.values(configs);
+      if (!entries.length) {
+        backupWrap.textContent = '(none)';
+      } else {
+        entries.sort((a,b)=>String(a.name||a.id).localeCompare(String(b.name||b.id))).forEach(cfg=>{
+          const sortLabel = cfg.sortKey || 'name_asc';
+          const sortNote = sortLabel + (cfg.sortReverse ? ' (reversed)' : '');
+          const title = (cfg.name || cfg.id) + ' (' + cfg.id + ')';
+          const pill = el('span', {class:'pill'}, [
+            el('span',{text: title + ' — ' + sortNote}),
+            el('span',{class:'x',text:'✕'})
+          ]);
+          pill.querySelector('.x').onclick = async ()=>{
+            await fetch('/api/link-backup?admin='+ADMIN, {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({ lsid: cfg.id, enabled: false })
+            });
+            await render();
+          };
+          backupWrap.appendChild(pill);
+          backupWrap.appendChild(document.createTextNode(' '));
+        });
+      }
+    }
+  }
 
   // Blocked pills with Unblock action
   {
@@ -3830,8 +3965,8 @@ render();
       console.log("[BOOT] snapshot loaded");
     }
     const frozenBackups = await loadFrozenBackups();
+    let restored = false;
     if (frozenBackups.size) {
-      let restored = false;
       for (const [lsid, data] of frozenBackups.entries()) {
         const missingList = !LISTS[lsid];
         const missingFrozen = !(PREFS.frozenLists && PREFS.frozenLists[lsid]);
@@ -3845,6 +3980,24 @@ render();
         MANIFEST_REV++;
         await persistSnapshot();
         console.log("[BOOT] restored frozen lists from backup");
+      }
+    }
+
+    const linkBackupConfigs = await loadLinkBackupConfigs();
+    if (linkBackupConfigs.size) {
+      let restoredLinks = false;
+      for (const [lsid, data] of linkBackupConfigs.entries()) {
+        const hasConfig = PREFS.backupConfigs && PREFS.backupConfigs[lsid];
+        if (!hasConfig) {
+          restoreLinkBackupConfigEntry(lsid, data);
+          restoredLinks = true;
+        }
+      }
+      if (restoredLinks) {
+        LAST_MANIFEST_KEY = "";
+        MANIFEST_REV++;
+        await persistSnapshot();
+        console.log("[BOOT] restored link backup configs");
       }
     }
   } catch(e){ console.warn("[BOOT] load snapshot failed:", e.message); }
