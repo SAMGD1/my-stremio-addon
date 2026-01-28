@@ -30,6 +30,7 @@ const GITHUB_REPO   = process.env.GITHUB_REPO   || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
+const FROZEN_DIR    = "data/frozen";
 
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
@@ -197,6 +198,16 @@ function imdbCustomIdFor(url) {
     return `imdb:${hashString(String(url||''))}`;
   }
 }
+function base64Url(str) {
+  return Buffer.from(String(str || ""), "utf8")
+    .toString("base64")
+    .replace(/=+$/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+function frozenBackupPath(lsid) {
+  return `${FROZEN_DIR}/${base64Url(lsid)}.json`;
+}
 
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -254,6 +265,25 @@ async function saveSnapshot(obj) {
   if (sha) body.sha = sha;
   await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
 }
+async function ghDeleteFile(path) {
+  if (!GH_ENABLED) return;
+  const sha = await ghGetSha(path);
+  if (!sha) return;
+  await gh("DELETE", `/contents/${encodeURIComponent(path)}`, {
+    message: `Delete ${path}`,
+    sha,
+    branch: GITHUB_BRANCH
+  });
+}
+async function ghListDir(path) {
+  if (!GH_ENABLED) return [];
+  try {
+    const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
 async function loadSnapshot() {
   // try GitHub first
   if (GH_ENABLED) {
@@ -280,6 +310,93 @@ async function persistSnapshot() {
     cards: Object.fromEntries(CARD),
     ep2ser: Object.fromEntries(EP2SER)
   });
+  await persistFrozenBackups();
+}
+
+async function saveFrozenBackup(lsid, frozen) {
+  const payload = {
+    id: lsid,
+    name: sanitizeName(frozen?.name || LISTS[lsid]?.name || listDisplayName(lsid)),
+    displayName: listDisplayName(lsid),
+    url: frozen?.url || LISTS[lsid]?.url,
+    ids: Array.isArray(frozen?.ids) ? frozen.ids : [],
+    orders: frozen?.orders || {},
+    frozenAt: frozen?.frozenAt || Date.now()
+  };
+  const path = frozenBackupPath(lsid);
+  try {
+    await fs.mkdir(FROZEN_DIR, { recursive: true });
+    await fs.writeFile(path, JSON.stringify(payload, null, 2), "utf8");
+  } catch {/* ignore */}
+  if (!GH_ENABLED) return;
+  const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
+  const relPath = `data/frozen/${base64Url(lsid)}.json`;
+  const sha = await ghGetSha(relPath);
+  const body = { message: `Update frozen ${lsid}`, content, branch: GITHUB_BRANCH };
+  if (sha) body.sha = sha;
+  await gh("PUT", `/contents/${encodeURIComponent(relPath)}`, body);
+}
+async function deleteFrozenBackup(lsid) {
+  const path = frozenBackupPath(lsid);
+  try { await fs.unlink(path); } catch {/* ignore */}
+  await ghDeleteFile(`data/frozen/${base64Url(lsid)}.json`);
+}
+async function persistFrozenBackups() {
+  const frozen = PREFS.frozenLists || {};
+  for (const [lsid, entry] of Object.entries(frozen)) {
+    await saveFrozenBackup(lsid, entry);
+  }
+}
+async function loadFrozenBackups() {
+  const backups = new Map();
+  try {
+    const files = await fs.readdir(FROZEN_DIR);
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const txt = await fs.readFile(`${FROZEN_DIR}/${file}`, "utf8");
+        const data = JSON.parse(txt);
+        if (data?.id) backups.set(String(data.id), data);
+      } catch {/* ignore */}
+    }
+  } catch {/* ignore */}
+  if (GH_ENABLED) {
+    const entries = await ghListDir("data/frozen");
+    for (const entry of entries) {
+      if (!entry?.path || entry.type !== "file" || !entry.path.endsWith(".json")) continue;
+      if (backups.size && Array.from(backups.keys()).some(id => entry.path.endsWith(`${base64Url(id)}.json`))) continue;
+      try {
+        const data = await gh("GET", `/contents/${encodeURIComponent(entry.path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+        const buf = Buffer.from(data.content, "base64").toString("utf8");
+        const parsed = JSON.parse(buf);
+        if (parsed?.id) backups.set(String(parsed.id), parsed);
+      } catch {/* ignore */}
+    }
+  }
+  return backups;
+}
+function restoreFrozenBackupEntry(lsid, data) {
+  PREFS.frozenLists = PREFS.frozenLists || {};
+  PREFS.frozenLists[lsid] = {
+    ids: Array.isArray(data?.ids) ? data.ids.slice() : [],
+    orders: data?.orders || {},
+    name: sanitizeName(data?.name || data?.displayName || lsid),
+    url: data?.url,
+    frozenAt: data?.frozenAt || Date.now()
+  };
+  if (!LISTS[lsid]) {
+    LISTS[lsid] = {
+      id: lsid,
+      name: sanitizeName(data?.name || data?.displayName || lsid),
+      url: data?.url || `https://www.imdb.com/list/${lsid}/`,
+      ids: Array.isArray(data?.ids) ? data.ids.slice() : [],
+      orders: data?.orders || { imdb: Array.isArray(data?.ids) ? data.ids.slice() : [] }
+    };
+  }
+  PREFS.order = Array.isArray(PREFS.order) ? PREFS.order : [];
+  if (!PREFS.order.includes(lsid)) PREFS.order.push(lsid);
+  PREFS.enabled = Array.isArray(PREFS.enabled) ? PREFS.enabled : [];
+  if (!PREFS.enabled.includes(lsid)) PREFS.enabled.push(lsid);
 }
 
 // ----------------- TRAKT HELPERS -----------------
@@ -670,6 +787,15 @@ function tmdbImage(path, size = "w500") {
   if (!path) return null;
   return `${TMDB_IMG_BASE}/${size}${path}`;
 }
+function mergeMetaPrefer(base, override) {
+  const out = { ...(base || {}) };
+  if (!override) return out;
+  for (const [key, value] of Object.entries(override)) {
+    if (value === undefined || value === null || value === "") continue;
+    out[key] = value;
+  }
+  return out;
+}
 async function fetchTmdbJson(path, apiKey) {
   const useToken = isLikelyTmdbToken(apiKey);
   const url = useToken
@@ -795,17 +921,15 @@ async function getBestMeta(imdbId) {
   const cineMovie = cineSeries ? null : await fetchCinemeta("movie", imdbId);
 
   if (tmdbRec && tmdbRec.meta) {
-    meta = { ...tmdbRec.meta };
-    if (cineSeries || cineMovie) {
-      const cine = cineSeries || cineMovie;
-      meta = {
-        ...cine,
-        ...meta,
-        imdbRating: meta.imdbRating ?? cine?.imdbRating,
-        runtime: meta.runtime ?? cine?.runtime,
-        year: meta.year ?? cine?.year,
-        released: meta.released ?? cine?.released
-      };
+    const cine = cineSeries || cineMovie || null;
+    meta = mergeMetaPrefer(cine, tmdbRec.meta);
+    if (cine) {
+      meta.imdbRating = meta.imdbRating ?? cine.imdbRating;
+      meta.runtime = meta.runtime ?? cine.runtime;
+      meta.year = meta.year ?? cine.year;
+      meta.released = meta.released ?? cine.released;
+      meta.poster = meta.poster ?? cine.poster;
+      meta.background = meta.background ?? cine.background ?? cine.poster;
       if (!kind) kind = cineSeries ? "series" : "movie";
     }
   } else if (cineSeries) {
@@ -1333,6 +1457,7 @@ async function syncSingleList(lsid, { manual = false } = {}) {
       url: list.url,
       frozenAt: PREFS.frozenLists[lsid]?.frozenAt || Date.now()
     };
+    await saveFrozenBackup(lsid, PREFS.frozenLists[lsid]);
   }
 
   for (const tt of idsToUse) {
@@ -1671,8 +1796,10 @@ app.post("/api/list-freeze", async (req, res) => {
         url: list.url,
         frozenAt: PREFS.frozenLists[lsid]?.frozenAt || Date.now()
       };
+      await saveFrozenBackup(lsid, PREFS.frozenLists[lsid]);
     } else {
       delete PREFS.frozenLists[lsid];
+      await deleteFrozenBackup(lsid);
     }
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
     await persistSnapshot();
@@ -1762,6 +1889,7 @@ app.post("/api/delete-custom-list", async (req, res) => {
     if (PREFS.sortReverse) delete PREFS.sortReverse[lsid];
     PREFS.enabled = (PREFS.enabled || []).filter(id => id !== lsid);
     PREFS.order = (PREFS.order || []).filter(id => id !== lsid);
+    await deleteFrozenBackup(lsid);
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
     await persistSnapshot();
     res.json({ ok: true });
@@ -3474,6 +3602,24 @@ render();
       }
 
       console.log("[BOOT] snapshot loaded");
+    }
+    const frozenBackups = await loadFrozenBackups();
+    if (frozenBackups.size) {
+      let restored = false;
+      for (const [lsid, data] of frozenBackups.entries()) {
+        const missingList = !LISTS[lsid];
+        const missingFrozen = !(PREFS.frozenLists && PREFS.frozenLists[lsid]);
+        if (missingList || missingFrozen) {
+          restoreFrozenBackupEntry(lsid, data);
+          restored = true;
+        }
+      }
+      if (restored) {
+        LAST_MANIFEST_KEY = "";
+        MANIFEST_REV++;
+        await persistSnapshot();
+        console.log("[BOOT] restored frozen lists from backup");
+      }
     }
   } catch(e){ console.warn("[BOOT] load snapshot failed:", e.message); }
 
