@@ -409,6 +409,7 @@ async function persistLinkBackupConfigs() {
     entry.sortKey = PREFS.perListSort?.[lsid] || entry.sortKey || "name_asc";
     entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
     entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : (entry.customOrder || []);
+    entry.savedAt = Date.now();
     await saveLinkBackupConfig(lsid, entry);
   }
 }
@@ -1513,15 +1514,7 @@ async function fullSync({ rediscover = true } = {}) {
       console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
     }
 
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
+    await persistSnapshot();
 
     console.log(`[SYNC] ok – ${Object.values(LISTS).reduce((n,L)=>n+(L.ids?.length||0),0)} items across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
   } catch (e) {
@@ -2137,15 +2130,7 @@ app.post("/api/list-add", async (req, res) => {
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
 
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
+    await persistSnapshot();
 
     res.status(200).send("Added");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
@@ -2167,15 +2152,7 @@ app.post("/api/list-remove", async (req, res) => {
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
 
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
+    await persistSnapshot();
 
     res.status(200).send("Removed");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
@@ -2190,15 +2167,7 @@ app.post("/api/list-reset", async (req, res) => {
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
 
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
+    await persistSnapshot();
 
     res.status(200).send("Reset");
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
@@ -2225,15 +2194,7 @@ app.post("/api/custom-order", async (req,res) => {
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
+    await persistSnapshot();
 
     res.status(200).json({ ok:true, manifestRev: MANIFEST_REV });
   }catch(e){ console.error("custom-order:", e); res.status(500).send("Failed"); }
@@ -2349,15 +2310,7 @@ app.post("/api/remove-list", async (req,res)=>{
     }
 
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
-    await saveSnapshot({
-      lastSyncAt: LAST_SYNC_AT,
-      manifestRev: MANIFEST_REV,
-      lists: LISTS,
-      prefs: PREFS,
-      fallback: Object.fromEntries(FALLBK),
-      cards: Object.fromEntries(CARD),
-      ep2ser: Object.fromEntries(EP2SER)
-    });
+    await persistSnapshot();
     res.status(200).send("Removed & blocked");
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
