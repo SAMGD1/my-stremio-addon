@@ -2756,8 +2756,14 @@ app.get("/admin", async (req,res)=>{
 
       
       <h4 style="margin-top:14px">Discovered</h4>
-      <div id="discoveredStatus" class="mini muted"></div>
-      <ul id="discoveredList"></ul>
+      <button class="collapse-toggle" type="button" data-target="discoveredBody" aria-expanded="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.6 7.4a1 1 0 0 1 1.4 0L10 10.4l3-3a1 1 0 1 1 1.4 1.4l-3.7 3.7a1 1 0 0 1-1.4 0L5.6 8.8a1 1 0 0 1 0-1.4z"/></svg>
+        <span>Show</span>
+      </button>
+      <div id="discoveredBody" class="collapse-body">
+        <div id="discoveredStatus" class="mini muted"></div>
+        <ul id="discoveredList"></ul>
+      </div>
     </div>
   </section>
 
