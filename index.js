@@ -92,8 +92,9 @@ let PREFS = {
   tmdbKey: TMDB_API_KEY || "",
   tmdbKeyValid: null,
   displayNames: {},       // { listId: "Custom Name" }
-  frozenLists: {},        // { listId: { ids:[], orders:{}, name, url, frozenAt } }
+  frozenLists: {},        // { listId: { ids:[], orders:{}, name, url, frozenAt, sortKey, sortReverse, customOrder } }
   customLists: {},        // { listId: { kind, sources, createdAt } }
+  linkBackups: [],        // array of list URLs/IDs to keep as backup links
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
@@ -167,6 +168,19 @@ function listDisplayName(lsid) {
 
 function isFrozenList(lsid) {
   return !!(PREFS.frozenLists && PREFS.frozenLists[lsid]);
+}
+
+function frozenEntryFor(lsid, list) {
+  return {
+    ids: (list?.ids || []).slice(),
+    orders: list?.orders || {},
+    name: listDisplayName(lsid),
+    url: list?.url,
+    frozenAt: PREFS.frozenLists?.[lsid]?.frozenAt || Date.now(),
+    sortKey: PREFS.perListSort?.[lsid] || "",
+    sortReverse: !!(PREFS.sortReverse && PREFS.sortReverse[lsid]),
+    customOrder: Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : []
+  };
 }
 
 function makeTraktListKey(user, slug) {
@@ -321,7 +335,10 @@ async function saveFrozenBackup(lsid, frozen) {
     url: frozen?.url || LISTS[lsid]?.url,
     ids: Array.isArray(frozen?.ids) ? frozen.ids : [],
     orders: frozen?.orders || {},
-    frozenAt: frozen?.frozenAt || Date.now()
+    frozenAt: frozen?.frozenAt || Date.now(),
+    sortKey: frozen?.sortKey || "",
+    sortReverse: !!frozen?.sortReverse,
+    customOrder: Array.isArray(frozen?.customOrder) ? frozen.customOrder : []
   };
   const path = frozenBackupPath(lsid);
   try {
@@ -344,6 +361,11 @@ async function deleteFrozenBackup(lsid) {
 async function persistFrozenBackups() {
   const frozen = PREFS.frozenLists || {};
   for (const [lsid, entry] of Object.entries(frozen)) {
+    if (!entry.sortKey) entry.sortKey = PREFS.perListSort?.[lsid] || "";
+    entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
+    if (!Array.isArray(entry.customOrder) || !entry.customOrder.length) {
+      entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
+    }
     await saveFrozenBackup(lsid, entry);
   }
 }
@@ -382,8 +404,25 @@ function restoreFrozenBackupEntry(lsid, data) {
     orders: data?.orders || {},
     name: sanitizeName(data?.name || data?.displayName || lsid),
     url: data?.url,
-    frozenAt: data?.frozenAt || Date.now()
+    frozenAt: data?.frozenAt || Date.now(),
+    sortKey: data?.sortKey || "",
+    sortReverse: !!data?.sortReverse,
+    customOrder: Array.isArray(data?.customOrder) ? data.customOrder.slice() : []
   };
+  if (data?.sortKey) {
+    PREFS.perListSort = PREFS.perListSort || {};
+    if (!PREFS.perListSort[lsid]) PREFS.perListSort[lsid] = data.sortKey;
+  }
+  if (data?.sortReverse) {
+    PREFS.sortReverse = PREFS.sortReverse || {};
+    if (!PREFS.sortReverse[lsid]) PREFS.sortReverse[lsid] = true;
+  }
+  if (Array.isArray(data?.customOrder) && data.customOrder.length) {
+    PREFS.customOrder = PREFS.customOrder || {};
+    if (!Array.isArray(PREFS.customOrder[lsid]) || !PREFS.customOrder[lsid].length) {
+      PREFS.customOrder[lsid] = data.customOrder.slice();
+    }
+  }
   if (!LISTS[lsid]) {
     LISTS[lsid] = {
       id: lsid,
@@ -1097,7 +1136,8 @@ async function harvestSources() {
   }
 
   // 3) explicit list URLs or IDs (IMDb or Trakt) + IMDB_LIST_IDS fallback
-  const addlRaw = (PREFS.sources?.lists || []).concat(IMDB_LIST_IDS || []);
+  const backups = Array.isArray(PREFS.linkBackups) ? PREFS.linkBackups : [];
+  const addlRaw = (PREFS.sources?.lists || []).concat(backups, IMDB_LIST_IDS || []);
   for (const raw of addlRaw) {
     const val = String(raw || "").trim();
     if (!val) continue;
@@ -1330,6 +1370,9 @@ async function fullSync({ rediscover = true } = {}) {
         if (PREFS.frozenLists && PREFS.frozenLists[id]) {
           PREFS.frozenLists[id].ids = next[id].ids.slice();
           PREFS.frozenLists[id].orders = next[id].orders;
+          PREFS.frozenLists[id].sortKey = PREFS.perListSort?.[id] || PREFS.frozenLists[id].sortKey || "";
+          PREFS.frozenLists[id].sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[id]);
+          PREFS.frozenLists[id].customOrder = Array.isArray(PREFS.customOrder?.[id]) ? PREFS.customOrder[id].slice() : (PREFS.frozenLists[id].customOrder || []);
         }
       }
     } else {
@@ -1450,13 +1493,7 @@ async function syncSingleList(lsid, { manual = false } = {}) {
   list.orders = { ...orders, imdb: idsToUse.slice() };
 
   if (isFrozenList(lsid)) {
-    PREFS.frozenLists[lsid] = {
-      ids: list.ids.slice(),
-      orders: list.orders,
-      name: listDisplayName(lsid),
-      url: list.url,
-      frozenAt: PREFS.frozenLists[lsid]?.frozenAt || Date.now()
-    };
+    PREFS.frozenLists[lsid] = frozenEntryFor(lsid, list);
     await saveFrozenBackup(lsid, PREFS.frozenLists[lsid]);
   }
 
@@ -1789,13 +1826,7 @@ app.post("/api/list-freeze", async (req, res) => {
     if (frozen) {
       const list = LISTS[lsid];
       if (!list) return res.status(404).send("List not found");
-      PREFS.frozenLists[lsid] = {
-        ids: (list.ids || []).slice(),
-        orders: list.orders || {},
-        name: listDisplayName(lsid),
-        url: list.url,
-        frozenAt: PREFS.frozenLists[lsid]?.frozenAt || Date.now()
-      };
+      PREFS.frozenLists[lsid] = frozenEntryFor(lsid, list);
       await saveFrozenBackup(lsid, PREFS.frozenLists[lsid]);
     } else {
       delete PREFS.frozenLists[lsid];
@@ -2125,6 +2156,61 @@ app.post("/api/add-sources", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
+// backup or remove a list link for recovery
+app.post("/api/link-backup", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const lsid = String(req.body.lsid || "");
+    const enabled = req.body.enabled !== false;
+    const rawValue = String(req.body.value || "").trim();
+    let value = rawValue;
+    if (!value) {
+      if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+      if (isCustomListId(lsid)) return res.status(400).send("Custom lists have no backup link");
+      const list = LISTS[lsid];
+      value = list?.url || lsid;
+    }
+    PREFS.linkBackups = Array.isArray(PREFS.linkBackups) ? PREFS.linkBackups : [];
+    if (enabled) {
+      PREFS.linkBackups = Array.from(new Set([ ...PREFS.linkBackups, value ]));
+    } else {
+      PREFS.linkBackups = PREFS.linkBackups.filter(v => v !== value && v !== lsid);
+    }
+    await persistSnapshot();
+    res.json({ ok: true, enabled });
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Failed to update backup link");
+  }
+});
+
+// block a list before it syncs
+app.post("/api/block-list", async (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try{
+    const lsid = String(req.body.lsid||"");
+    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+    const list = LISTS[lsid];
+    delete LISTS[lsid];
+    const removeValues = new Set([lsid]);
+    if (list?.url) removeValues.add(list.url);
+    PREFS.enabled = (PREFS.enabled||[]).filter(id => id!==lsid);
+    PREFS.order   = (PREFS.order||[]).filter(id => id!==lsid);
+    PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
+    if (PREFS.frozenLists) delete PREFS.frozenLists[lsid];
+    if (PREFS.displayNames) delete PREFS.displayNames[lsid];
+    if (PREFS.sources?.lists) {
+      PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
+    }
+    if (PREFS.linkBackups) {
+      PREFS.linkBackups = PREFS.linkBackups.filter(v => !removeValues.has(v));
+    }
+    LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
+    await persistSnapshot();
+    res.status(200).send("Blocked");
+  }catch(e){ console.error(e); res.status(500).send("Failed to block"); }
+});
+
 // remove/block a list
 app.post("/api/remove-list", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -2132,12 +2218,21 @@ app.post("/api/remove-list", async (req,res)=>{
     const lsid = String(req.body.lsid||"");
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
     if (isCustomListId(lsid)) return res.status(400).send("Use delete for custom lists");
+    const list = LISTS[lsid];
     delete LISTS[lsid];
+    const removeValues = new Set([lsid]);
+    if (list?.url) removeValues.add(list.url);
     PREFS.enabled = (PREFS.enabled||[]).filter(id => id!==lsid);
     PREFS.order   = (PREFS.order||[]).filter(id => id!==lsid);
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
     if (PREFS.frozenLists) delete PREFS.frozenLists[lsid];
     if (PREFS.displayNames) delete PREFS.displayNames[lsid];
+    if (PREFS.sources?.lists) {
+      PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
+    }
+    if (PREFS.linkBackups) {
+      PREFS.linkBackups = PREFS.linkBackups.filter(v => !removeValues.has(v));
+    }
 
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++; // force bump
     await saveSnapshot({
@@ -2493,6 +2588,46 @@ app.get("/admin", async (req,res)=>{
   .section.active{display:block;}
   .center-card{max-width:980px;margin:0 auto;}
   .wrap{display:flex;flex-direction:column;align-items:center;}
+  .collapse-toggle{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    margin-top:6px;
+    background:var(--card);
+    border:1px solid var(--border);
+    color:var(--text);
+    padding:6px 10px;
+    border-radius:999px;
+    cursor:pointer;
+    font-size:12px;
+  }
+  .collapse-toggle svg{width:14px;height:14px;fill:currentColor;transition:transform .2s ease;}
+  .collapse-toggle[aria-expanded="true"] svg{transform:rotate(180deg);}
+  .collapse-body{margin-top:8px;display:none;}
+  .collapse-body.open{display:block;}
+  .link-tools{margin-top:8px;}
+  .link-pills{margin-top:6px;}
+  .icon-btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap:6px;
+    padding:6px 10px;
+    border-radius:10px;
+    border:1px solid var(--border);
+    background:var(--card);
+    color:var(--text);
+    cursor:pointer;
+  }
+  .icon-btn svg{width:16px;height:16px;fill:currentColor;}
+  .icon-btn.cloud.active{background:rgba(108,92,231,.2);border-color:#7f78ff;color:#b3b0ff;}
+  .icon-btn.danger{color:#ff9b9b;border-color:#6b2f2f;background:rgba(107,47,47,.2);}
+  .discovered-item{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:10px;
+  }
 </style>
 </head><body>
 <div class="wrap">
@@ -2543,7 +2678,13 @@ app.get("/admin", async (req,res)=>{
         </div>
       </div>
       <h3 style="margin-top:18px;">Current Snapshot</h3>
-      <ul id="snapshotList"></ul>
+      <button class="collapse-toggle" type="button" data-target="snapshotBody" aria-expanded="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.6 7.4a1 1 0 0 1 1.4 0L10 10.4l3-3a1 1 0 1 1 1.4 1.4l-3.7 3.7a1 1 0 0 1-1.4 0L5.6 8.8a1 1 0 0 1 0-1.4z"/></svg>
+        <span>Show</span>
+      </button>
+      <div id="snapshotBody" class="collapse-body">
+        <ul id="snapshotList"></ul>
+      </div>
     </div>
   </section>
 
@@ -2583,27 +2724,46 @@ app.get("/admin", async (req,res)=>{
         </div>
       </div>
 
-      <div style="margin-top:10px">
-        <div class="mini muted">Your IMDb users:</div>
-        <div id="userPills"></div>
-      </div>
-      <div style="margin-top:8px">
-        <div class="mini muted">Trakt users to scan:</div>
-        <div id="traktUserPills"></div>
-      </div>
-      <div style="margin-top:8px">
-        <div class="mini muted">Your extra lists:</div>
-        <div id="listPills"></div>
-      </div>
-      <div style="margin-top:12px">
-        <div class="mini muted">Blocked lists (won't re-add on sync):</div>
-        <div id="blockedPills"></div>
+      <div class="link-tools">
+        <h4>Link Managers</h4>
+        <button class="collapse-toggle" type="button" data-target="linkManagers" aria-expanded="false">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.6 7.4a1 1 0 0 1 1.4 0L10 10.4l3-3a1 1 0 1 1 1.4 1.4l-3.7 3.7a1 1 0 0 1-1.4 0L5.6 8.8a1 1 0 0 1 0-1.4z"/></svg>
+          <span>Show</span>
+        </button>
+        <div id="linkManagers" class="collapse-body">
+          <div style="margin-top:10px">
+            <div class="mini muted">Your IMDb users:</div>
+            <div id="userPills"></div>
+          </div>
+          <div style="margin-top:8px">
+            <div class="mini muted">Trakt users to scan:</div>
+            <div id="traktUserPills"></div>
+          </div>
+          <div style="margin-top:8px">
+            <div class="mini muted">Your extra lists:</div>
+            <div id="listPills"></div>
+          </div>
+          <div style="margin-top:8px">
+            <div class="mini muted">Backed up links:</div>
+            <div id="backupPills"></div>
+          </div>
+          <div style="margin-top:12px">
+            <div class="mini muted">Blocked lists (won't re-add on sync):</div>
+            <div id="blockedPills"></div>
+          </div>
+        </div>
       </div>
 
       
       <h4 style="margin-top:14px">Discovered</h4>
-      <div id="discoveredStatus" class="mini muted"></div>
-      <ul id="discoveredList"></ul>
+      <button class="collapse-toggle" type="button" data-target="discoveredBody" aria-expanded="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.6 7.4a1 1 0 0 1 1.4 0L10 10.4l3-3a1 1 0 1 1 1.4 1.4l-3.7 3.7a1 1 0 0 1-1.4 0L5.6 8.8a1 1 0 0 1 0-1.4z"/></svg>
+        <span>Show</span>
+      </button>
+      <div id="discoveredBody" class="collapse-body">
+        <div id="discoveredStatus" class="mini muted"></div>
+        <ul id="discoveredList"></ul>
+      </div>
     </div>
   </section>
 
@@ -2660,6 +2820,18 @@ document.addEventListener('DOMContentLoaded', () => {
       document.querySelectorAll('.section').forEach(sec => {
         sec.classList.toggle('active', sec.id === 'section-' + target);
       });
+    });
+  });
+
+  document.querySelectorAll('.collapse-toggle').forEach(btn => {
+    const target = document.getElementById(btn.dataset.target || '');
+    if (!target) return;
+    btn.addEventListener('click', () => {
+      const open = !target.classList.contains('open');
+      target.classList.toggle('open', open);
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      const label = btn.querySelector('span');
+      if (label) label.textContent = open ? 'Hide' : 'Show';
     });
   });
 });
@@ -2859,6 +3031,16 @@ async function render() {
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
   });
+  renderPills('backupPills', prefs.linkBackups || [], async (i)=>{
+    const value = (prefs.linkBackups || [])[i];
+    if (!value) return;
+    await fetch('/api/link-backup?admin='+ADMIN, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ value, enabled: false })
+    });
+    await render();
+  });
 
   // Blocked pills with Unblock action
   {
@@ -2920,10 +3102,26 @@ async function render() {
       if (!items.length) { wrap.textContent = '(none)'; return; }
       items.forEach(d => {
         const li = el('li');
-        li.appendChild(el('b', { text: d.name || d.id }));
+        const row = el('div', { class: 'discovered-item' });
+        const info = el('div');
+        info.appendChild(el('b', { text: d.name || d.id }));
         const urlWrap = el('div');
         urlWrap.appendChild(el('small', { text: d.url || '' }));
-        li.appendChild(urlWrap);
+        info.appendChild(urlWrap);
+        row.appendChild(info);
+        const blockBtn = el('button', { class: 'icon-btn danger', title: 'Block before sync', type: 'button' });
+        blockBtn.innerHTML = '✕';
+        blockBtn.onclick = async () => {
+          if (!confirm('Block this list before it syncs?')) return;
+          await fetch('/api/block-list?admin='+ADMIN, {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ lsid: d.id })
+          });
+          await render();
+        };
+        row.appendChild(blockBtn);
+        li.appendChild(row);
         wrap.appendChild(li);
       });
     };
@@ -3127,6 +3325,7 @@ async function render() {
     el('th',{text:'List (id)'}),
     el('th',{text:'Items'}),
     el('th',{text:'Default sort'}),
+    el('th',{text:'Backup'}),
     el('th',{text:'Remove'})
   ])]);
   table.appendChild(thead);
@@ -3134,7 +3333,7 @@ async function render() {
 
   function makeDrawer(lsid) {
     const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
-    const td = el('td',{colspan:'7'});
+    const td = el('td',{colspan:'8'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
 
@@ -3412,6 +3611,30 @@ async function render() {
       return removeList(lsid);
     };
 
+    const backupValue = (L?.url || lsid);
+    const backupActive = (prefs.linkBackups || []).includes(backupValue);
+    const cloudBtn = el('button', { type: 'button', class: 'icon-btn cloud', title: 'Backup list link' });
+    cloudBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 18a4.5 4.5 0 0 1-.5-8.98A6 6 0 0 1 18 8a4 4 0 0 1 .5 7.98H7.5zm8-6.5a1 1 0 0 0-1.7-.7l-1.3 1.3V9.5a1 1 0 1 0-2 0v2.6l-1.3-1.3a1 1 0 1 0-1.4 1.4l3 3a1 1 0 0 0 1.4 0l3-3a1 1 0 0 0 .3-.7z"/></svg>';
+    if (backupActive) cloudBtn.classList.add('active');
+    if (isCustom) {
+      cloudBtn.disabled = true;
+      cloudBtn.title = 'Custom lists have no backup link';
+    } else {
+      cloudBtn.onclick = async () => {
+        cloudBtn.disabled = true;
+        try {
+          await fetch('/api/link-backup?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, enabled: !backupActive })
+          });
+          await refresh();
+        } finally {
+          cloudBtn.disabled = false;
+        }
+      };
+    }
+
     const advancedPanel = el('div', { class: 'advanced-panel' });
     const renameRow = el('div', { class: 'advanced-row' });
     const renameInput = el('input', { type: 'text', value: displayName(lsid), placeholder: 'Rename list' });
@@ -3516,6 +3739,7 @@ async function render() {
     tr.appendChild(nameCell);
     tr.appendChild(count);
     tr.appendChild(el('td',{},[sortWrap]));
+    tr.appendChild(el('td',{},[cloudBtn]));
     tr.appendChild(el('td',{},[rmBtn]));
     nameCell.appendChild(advancedPanel);
 
