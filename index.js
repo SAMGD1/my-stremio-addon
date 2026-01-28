@@ -43,6 +43,7 @@ const REQ_HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
   "Cache-Control": "no-cache"
 };
+const CINEMETA = "https://v3-cinemeta.strem.io";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG_BASE = "https://image.tmdb.org/t/p";
 const TMDB_CACHE_TTL = 1000 * 60 * 60 * 24;
@@ -769,7 +770,7 @@ async function fetchImdbSearchOrPageIds(url, maxPages = 20) {
 
 // ----------------- METADATA -----------------
 function getTmdbKey() {
-  return String(TMDB_API_KEY || "").trim();
+  return String(PREFS.tmdbKey || TMDB_API_KEY || "").trim();
 }
 function isLikelyTmdbToken(key) {
   if (!key) return false;
@@ -785,6 +786,15 @@ function tmdbEnabled() {
 function tmdbImage(path, size = "w500") {
   if (!path) return null;
   return `${TMDB_IMG_BASE}/${size}${path}`;
+}
+function mergeMetaPrefer(base, override) {
+  const out = { ...(base || {}) };
+  if (!override) return out;
+  for (const [key, value] of Object.entries(override)) {
+    if (value === undefined || value === null || value === "") continue;
+    out[key] = value;
+  }
+  return out;
 }
 async function fetchTmdbJson(path, apiKey) {
   const useToken = isLikelyTmdbToken(apiKey);
@@ -872,6 +882,12 @@ async function fetchTmdbMeta(imdbId) {
     return null;
   }
 }
+async function fetchCinemeta(kind, imdbId) {
+  try {
+    const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
+    return j && j.meta ? j.meta : null;
+  } catch { return null; }
+}
 async function imdbJsonLd(imdbId) {
   try {
     const html = await fetchText(`https://www.imdb.com/title/${imdbId}/`);
@@ -901,8 +917,27 @@ async function getBestMeta(imdbId) {
   let meta = null;
   let kind = tmdbRec?.kind || null;
 
+  const cineSeries = await fetchCinemeta("series", imdbId);
+  const cineMovie = cineSeries ? null : await fetchCinemeta("movie", imdbId);
+
   if (tmdbRec && tmdbRec.meta) {
-    meta = { ...tmdbRec.meta };
+    const cine = cineSeries || cineMovie || null;
+    meta = mergeMetaPrefer(cine, tmdbRec.meta);
+    if (cine) {
+      meta.imdbRating = meta.imdbRating ?? cine.imdbRating;
+      meta.runtime = meta.runtime ?? cine.runtime;
+      meta.year = meta.year ?? cine.year;
+      meta.released = meta.released ?? cine.released;
+      meta.poster = meta.poster ?? cine.poster;
+      meta.background = meta.background ?? cine.background ?? cine.poster;
+      if (!kind) kind = cineSeries ? "series" : "movie";
+    }
+  } else if (cineSeries) {
+    meta = cineSeries;
+    kind = "series";
+  } else if (cineMovie) {
+    meta = cineMovie;
+    kind = "movie";
   }
 
   if (meta) {
@@ -1684,6 +1719,50 @@ app.post("/api/prefs", async (req,res) => {
   }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
 });
 
+app.post("/api/tmdb-verify", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const key = String(req.body.key || "").trim();
+    if (!key) return res.status(400).send("Missing TMDB key");
+    PREFS.tmdbKey = key;
+    PREFS.tmdbKeyValid = null;
+    TMDB_CACHE.clear();
+    const rec = await fetchTmdbMeta(TMDB_PLACEHOLDER_IMDB);
+    if (rec && rec.meta) {
+      PREFS.tmdbKeyValid = true;
+      await rebuildAllCards();
+      LAST_MANIFEST_KEY = "";
+      MANIFEST_REV++;
+      await persistSnapshot();
+      return res.json({ ok: true, message: "TMDB key verified and in use." });
+    }
+    PREFS.tmdbKeyValid = false;
+    await persistSnapshot();
+    return res.status(400).json({ ok: false, message: "TMDB key is invalid or not authorized." });
+  } catch (e) {
+    PREFS.tmdbKeyValid = false;
+    await persistSnapshot();
+    res.status(500).json({ ok: false, message: e.message || "TMDB verification failed." });
+  }
+});
+
+app.post("/api/tmdb-save", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const key = String(req.body.key || "").trim();
+    PREFS.tmdbKey = key;
+    PREFS.tmdbKeyValid = key ? PREFS.tmdbKeyValid : null;
+    TMDB_CACHE.clear();
+    if (!key) {
+      BEST.clear();
+      CARD.clear();
+      LAST_MANIFEST_KEY = "";
+      MANIFEST_REV++;
+    }
+    await persistSnapshot();
+    res.json({ ok: true });
+  } catch (e) { res.status(500).send("TMDB save failed"); }
+});
 
 app.post("/api/list-rename", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -2320,6 +2399,14 @@ app.get("/admin", async (req,res)=>{
     border-radius:14px;
     padding:12px 14px;
   }
+  .tmdb-box{margin-top:12px;}
+  .tmdb-row{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+  }
+  .tmdb-row input{flex:1; min-width:180px;}
   .bulk-box{
     margin-top:14px;
     padding:12px;
@@ -2443,6 +2530,16 @@ app.get("/admin", async (req,res)=>{
             </form>
           </div>
           <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
+          <div class="tmdb-box">
+            <label class="mini">TMDB API Key (optional)</label>
+            <div class="tmdb-row">
+              <input id="tmdbKeyInput" type="text" placeholder="Enter TMDB API key" />
+              <button id="tmdbSaveBtn" type="button">Save</button>
+              <button id="tmdbVerifyBtn" type="button" class="btn2">Verify</button>
+            </div>
+            <div class="mini muted">Use a TMDB v3 API key or a v4 Read Access Token.</div>
+            <div id="tmdbStatus" class="mini muted"></div>
+          </div>
         </div>
       </div>
       <h3 style="margin-top:18px;">Current Snapshot</h3>
@@ -2851,6 +2948,61 @@ async function render() {
     }
   }
 
+  function wireTmdbControls() {
+    const input = document.getElementById('tmdbKeyInput');
+    const status = document.getElementById('tmdbStatus');
+    const saveBtn = document.getElementById('tmdbSaveBtn');
+    const verifyBtn = document.getElementById('tmdbVerifyBtn');
+    if (!input || !status || !saveBtn || !verifyBtn) return;
+    input.value = prefs.tmdbKey || '';
+
+    const setStatus = (ok, text) => {
+      status.textContent = text || '';
+      status.className = 'mini muted';
+      if (ok === true) status.className = 'status-pill ok';
+      if (ok === false) status.className = 'status-pill bad';
+    };
+    if (prefs.tmdbKeyValid === true) setStatus(true, '✓ TMDB key verified and active');
+    else if (prefs.tmdbKeyValid === false) setStatus(false, 'TMDB key invalid or unauthorized');
+    else setStatus(null, 'Not verified yet.');
+
+    saveBtn.onclick = async () => {
+      saveBtn.disabled = true;
+      try {
+        const r = await fetch('/api/tmdb-save?admin=' + ADMIN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: input.value })
+        });
+        if (!r.ok) throw new Error(await r.text());
+        setStatus(null, 'TMDB key saved.');
+      } catch (e) {
+        setStatus(false, e.message || 'Failed to save TMDB key.');
+      } finally {
+        saveBtn.disabled = false;
+      }
+    };
+
+    verifyBtn.onclick = async () => {
+      verifyBtn.disabled = true;
+      setStatus(null, 'Verifying…');
+      try {
+        const r = await fetch('/api/tmdb-verify?admin=' + ADMIN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: input.value })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.ok) throw new Error(data.message || 'TMDB verification failed.');
+        setStatus(true, data.message || 'TMDB key verified.');
+      } catch (e) {
+        setStatus(false, e.message || 'TMDB verification failed.');
+      } finally {
+        verifyBtn.disabled = false;
+      }
+    };
+  }
+
   function wireBulkAdd() {
     const btn = document.getElementById('bulkAddBtn');
     const usersInput = document.getElementById('bulkUsers');
@@ -2881,6 +3033,7 @@ async function render() {
     };
   }
 
+  wireTmdbControls();
   wireBulkAdd();
   renderSnapshotList();
   renderDiscovered();
