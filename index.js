@@ -944,6 +944,15 @@ function extractEpisodeInfo(ld) {
     return null;
   }
 }
+function extractEpisodeInfoFromCinemeta(meta) {
+  if (!meta) return null;
+  const episode = Number(meta.episode);
+  const season = Number(meta.season);
+  const seriesId = meta.seriesId || meta.imdbSeriesId || meta.series_imdb_id || meta.seriesImdbId;
+  const m = seriesId ? String(seriesId).match(/tt\d{7,}/i) : null;
+  if (!Number.isFinite(episode) || !Number.isFinite(season) || !m) return null;
+  return { episode, season, seriesImdb: m[0] };
+}
 function mergeMetaPrefer(base, override) {
   const out = { ...(base || {}) };
   if (!override) return out;
@@ -1033,7 +1042,11 @@ async function fetchTmdbMeta(imdbId) {
     }
     if (!rec) {
       const ld = await imdbJsonLd(imdbId);
-      const epInfo = extractEpisodeInfo(ld);
+      let epInfo = extractEpisodeInfo(ld);
+      if (!epInfo) {
+        const cineEpisode = await fetchCinemeta("series", imdbId);
+        epInfo = extractEpisodeInfoFromCinemeta(cineEpisode);
+      }
       if (epInfo) {
         const seriesFind = await fetchTmdbJson(`/find/${encodeURIComponent(epInfo.seriesImdb)}?external_source=imdb_id`, apiKey);
         const series = seriesFind?.tv_results?.[0];
