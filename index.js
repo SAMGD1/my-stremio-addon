@@ -927,6 +927,23 @@ function tmdbImage(path, size = "w500") {
   if (!path) return null;
   return `${TMDB_IMG_BASE}/${size}${path}`;
 }
+function extractEpisodeInfo(ld) {
+  try {
+    const node = Array.isArray(ld && ld["@graph"])
+      ? ld["@graph"].find(x => /TVEpisode/i.test(x["@type"])) || ld["@graph"][0]
+      : ld;
+    if (!node) return null;
+    const ep = Number(node.episodeNumber || node.episode || node.partOfSeason?.episodeNumber);
+    const season = Number(node.partOfSeason?.seasonNumber || node.seasonNumber);
+    const part = node.partOfSeries || node.partOfTVSeries || (node.partOfSeason && node.partOfSeason.partOfSeries);
+    const url = typeof part === "string" ? part : (part && (part.url || part.sameAs || part["@id"]));
+    const m = url ? String(url).match(/tt\d{7,}/i) : null;
+    if (!Number.isFinite(ep) || !Number.isFinite(season) || !m) return null;
+    return { episode: ep, season, seriesImdb: m[0] };
+  } catch {
+    return null;
+  }
+}
 function mergeMetaPrefer(base, override) {
   const out = { ...(base || {}) };
   if (!override) return out;
@@ -1013,6 +1030,31 @@ async function fetchTmdbMeta(imdbId) {
           imdbRating: ep.vote_average ? Number(ep.vote_average) : undefined
         }
       };
+    }
+    if (!rec) {
+      const ld = await imdbJsonLd(imdbId);
+      const epInfo = extractEpisodeInfo(ld);
+      if (epInfo) {
+        const seriesFind = await fetchTmdbJson(`/find/${encodeURIComponent(epInfo.seriesImdb)}?external_source=imdb_id`, apiKey);
+        const series = seriesFind?.tv_results?.[0];
+        if (series?.id) {
+          const epData = await fetchTmdbJson(`/tv/${series.id}/season/${epInfo.season}/episode/${epInfo.episode}`, apiKey);
+          if (epData) {
+            rec = {
+              kind: "series",
+              meta: {
+                name: epData.name || epData.show_name,
+                poster: tmdbImage(epData.still_path, "w500"),
+                background: tmdbImage(epData.still_path, "w780"),
+                released: epData.air_date || undefined,
+                year: epData.air_date ? Number(String(epData.air_date).slice(0, 4)) : undefined,
+                description: epData.overview || undefined,
+                imdbRating: epData.vote_average ? Number(epData.vote_average) : undefined
+              }
+            };
+          }
+        }
+      }
     }
     TMDB_CACHE.set(imdbId, { ts: now, rec, ok: !!rec });
     if (rec) PREFS.tmdbKeyValid = true;
