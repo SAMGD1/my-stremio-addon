@@ -1771,20 +1771,29 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 });
 
 // ------- Meta -------
-app.get("/meta/:type/:id.json", async (req,res)=>{
-  try{
-    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
-    maybeBackgroundSync();
+  app.get("/meta/:type/:id.json", async (req,res)=>{
+    try{
+      if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+      maybeBackgroundSync();
 
-    const imdbId = req.params.id;
-    if (!isImdb(imdbId)) return res.json({ meta:{ id: imdbId, type:"movie", name:"Unknown item" } });
+      const imdbId = req.params.id;
+      if (!isImdb(imdbId)) return res.json({ meta:{ id: imdbId, type:"movie", name:"Unknown item" } });
 
-    let rec = BEST.get(imdbId);
-    if (!rec) rec = await getBestMeta(imdbId);
-    if (!rec || !rec.meta) {
-      const fb = FALLBK.get(imdbId) || {};
-      return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
-    }
+      let rec = BEST.get(imdbId);
+      if (!rec) rec = await getBestMeta(imdbId);
+      if (tmdbEnabled()) {
+        const tmdbRec = await fetchTmdbMeta(imdbId);
+        if (tmdbRec && tmdbRec.meta) {
+          const nextMeta = mergeMetaPrefer(rec?.meta || {}, tmdbRec.meta);
+          rec = { kind: tmdbRec.kind || rec?.kind || "movie", meta: nextMeta };
+          BEST.set(imdbId, rec);
+          CARD.set(imdbId, cardFor(imdbId));
+        }
+      }
+      if (!rec || !rec.meta) {
+        const fb = FALLBK.get(imdbId) || {};
+        return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
+      }
 
     const m = rec.meta;
     res.json({
