@@ -166,6 +166,24 @@ async function addImdbToMainList(imdbId) {
   return { ok: true, mainList };
 }
 
+async function removeImdbFromMainList(imdbId) {
+  const mainList = PREFS.mainList;
+  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
+  const list = LISTS[mainList];
+  if (!list) return { ok: false, reason: "missing" };
+  PREFS.listEdits = PREFS.listEdits || {};
+  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  edits.added = Array.isArray(edits.added) ? edits.added : [];
+  edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
+
+  edits.added = edits.added.filter(id => id !== imdbId);
+  if (!edits.removed.includes(imdbId)) edits.removed.push(imdbId);
+  PREFS.listEdits[mainList] = edits;
+
+  await persistSnapshot();
+  return { ok: true, mainList };
+}
+
 const TMDB_PLACEHOLDER_IMDB = "tt0111161";
 
 function decodeHtmlEntities(str) {
@@ -1934,6 +1952,15 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 
     const listName = listDisplayName(mainList);
     const keyParam = SHARED_SECRET ? `?key=${encodeURIComponent(SHARED_SECRET)}` : "";
+    const inList = listIdsWithEdits(mainList).includes(imdbId);
+    if (inList) {
+      return res.json({
+        streams: [{
+          title: `➖ Remove this title from ${listName}`,
+          url: `${absoluteBase(req)}/stream-remove/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
+        }]
+      });
+    }
     return res.json({
       streams: [{
         title: `➕ Save this title to ${listName}`,
@@ -1956,6 +1983,20 @@ app.get("/stream-add/:type/:id", async (req, res) => {
     res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
   } catch (e) {
     console.error("stream-add:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+app.get("/stream-remove/:type/:id", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const imdbId = resolveStreamImdbId(req.params.id);
+    if (imdbId) {
+      await removeImdbFromMainList(imdbId);
+    }
+    res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
+  } catch (e) {
+    console.error("stream-remove:", e);
     res.status(500).send("Internal Server Error");
   }
 });
