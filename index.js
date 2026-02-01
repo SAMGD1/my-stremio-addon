@@ -90,13 +90,14 @@ let PREFS = {
   sortOptions: {},        // { listId: ['custom', 'date_desc', ...] }
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
   upgradeEpisodes: UPGRADE_EPISODES,
+  mainList: "",
   tmdbKey: TMDB_API_KEY || "",
   tmdbKeyValid: null,
   displayNames: {},       // { listId: "Custom Name" }
   frozenLists: {},        // { listId: { ids:[], orders:{}, name, url, frozenAt, sortKey, sortReverse, customOrder } }
   customLists: {},        // { listId: { kind, sources, createdAt } }
   linkBackups: [],        // array of list URLs/IDs to keep as backup links
-  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, savedAt } }
+  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, main, savedAt } }
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
@@ -128,6 +129,62 @@ const isImdbCustomId = v => /^imdb:[a-z0-9._-]+$/i.test(String(v||""));
 const isTraktListId = v => /^trakt:[^:]+:[^:]+$/i.test(String(v||""));
 const isCustomListId = v => /^custom:[a-z0-9._:-]+$/i.test(String(v||""));
 const isListId = v => isImdbListId(v) || isTraktListId(v) || isImdbCustomId(v) || isCustomListId(v);
+
+function extractImdbId(value) {
+  const m = String(value || "").match(/tt\d{7,}/i);
+  return m ? m[0] : "";
+}
+
+function resolveStreamImdbId(rawId) {
+  const base = extractImdbId(rawId);
+  if (!base) return "";
+  if (EP2SER && EP2SER.has(base)) return EP2SER.get(base);
+  return base;
+}
+
+async function addImdbToMainList(imdbId) {
+  const mainList = PREFS.mainList;
+  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
+  const list = LISTS[mainList];
+  if (!list) return { ok: false, reason: "missing" };
+  PREFS.listEdits = PREFS.listEdits || {};
+  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  edits.added = Array.isArray(edits.added) ? edits.added : [];
+  edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
+
+  const current = new Set(listIdsWithEdits(mainList));
+  if (!current.has(imdbId)) {
+    edits.added = edits.added.filter(id => id !== imdbId);
+    edits.added.push(imdbId);
+  }
+  edits.removed = edits.removed.filter(id => id !== imdbId);
+  PREFS.listEdits[mainList] = edits;
+  syncFrozenEdits(mainList);
+
+  await getBestMeta(imdbId).catch(() => null);
+  CARD.set(imdbId, cardFor(imdbId));
+  await persistSnapshot();
+  return { ok: true, mainList };
+}
+
+async function removeImdbFromMainList(imdbId) {
+  const mainList = PREFS.mainList;
+  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
+  const list = LISTS[mainList];
+  if (!list) return { ok: false, reason: "missing" };
+  PREFS.listEdits = PREFS.listEdits || {};
+  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  edits.added = Array.isArray(edits.added) ? edits.added : [];
+  edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
+
+  edits.added = edits.added.filter(id => id !== imdbId);
+  if (!edits.removed.includes(imdbId)) edits.removed.push(imdbId);
+  PREFS.listEdits[mainList] = edits;
+  syncFrozenEdits(mainList);
+
+  await persistSnapshot();
+  return { ok: true, mainList };
+}
 
 const TMDB_PLACEHOLDER_IMDB = "tt0111161";
 
@@ -271,6 +328,23 @@ async function ghGetSha(path) {
     return data && data.sha || null;
   } catch { return null; }
 }
+async function ghPutWithRetry(path, bodyBuilder, attempts = 3) {
+  if (!GH_ENABLED) return;
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const body = await bodyBuilder();
+      await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e && e.message || "");
+      if (msg.includes(" 409:") && i < attempts - 1) continue;
+      break;
+    }
+  }
+  if (lastErr) console.warn("[GH] update failed:", lastErr.message || lastErr);
+}
 async function saveSnapshot(obj) {
   // local (best effort)
   try {
@@ -281,10 +355,12 @@ async function saveSnapshot(obj) {
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
   const path = "data/snapshot.json";
-  const sha = await ghGetSha(path);
-  const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
-  if (sha) body.sha = sha;
-  await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
+  await ghPutWithRetry(path, async () => {
+    const sha = await ghGetSha(path);
+    const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
+    if (sha) body.sha = sha;
+    return body;
+  });
 }
 async function ghDeleteFile(path) {
   if (!GH_ENABLED) return;
@@ -356,10 +432,12 @@ async function saveFrozenBackup(lsid, frozen) {
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
   const relPath = `data/frozen/${base64Url(lsid)}.json`;
-  const sha = await ghGetSha(relPath);
-  const body = { message: `Update frozen ${lsid}`, content, branch: GITHUB_BRANCH };
-  if (sha) body.sha = sha;
-  await gh("PUT", `/contents/${encodeURIComponent(relPath)}`, body);
+  await ghPutWithRetry(relPath, async () => {
+    const sha = await ghGetSha(relPath);
+    const body = { message: `Update frozen ${lsid}`, content, branch: GITHUB_BRANCH };
+    if (sha) body.sha = sha;
+    return body;
+  });
 }
 async function deleteFrozenBackup(lsid) {
   const path = frozenBackupPath(lsid);
@@ -385,6 +463,7 @@ async function saveLinkBackupConfig(lsid, config) {
     sortKey: config?.sortKey || "",
     sortReverse: !!config?.sortReverse,
     customOrder: Array.isArray(config?.customOrder) ? config.customOrder : [],
+    main: !!config?.main,
     savedAt: config?.savedAt || Date.now()
   };
   const path = linkBackupPath(lsid);
@@ -395,10 +474,12 @@ async function saveLinkBackupConfig(lsid, config) {
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
   const relPath = `data/backup/${base64Url(lsid)}.json`;
-  const sha = await ghGetSha(relPath);
-  const body = { message: `Update backup ${lsid}`, content, branch: GITHUB_BRANCH };
-  if (sha) body.sha = sha;
-  await gh("PUT", `/contents/${encodeURIComponent(relPath)}`, body);
+  await ghPutWithRetry(relPath, async () => {
+    const sha = await ghGetSha(relPath);
+    const body = { message: `Update backup ${lsid}`, content, branch: GITHUB_BRANCH };
+    if (sha) body.sha = sha;
+    return body;
+  });
 }
 async function deleteLinkBackupConfig(lsid) {
   const path = linkBackupPath(lsid);
@@ -411,6 +492,7 @@ async function persistLinkBackupConfigs() {
     entry.sortKey = PREFS.perListSort?.[lsid] || entry.sortKey || "name_asc";
     entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
     entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : (entry.customOrder || []);
+    entry.main = PREFS.mainList === lsid;
     entry.savedAt = Date.now();
     await saveLinkBackupConfig(lsid, entry);
   }
@@ -452,6 +534,7 @@ function restoreLinkBackupConfigEntry(lsid, data) {
     sortKey: data?.sortKey || "",
     sortReverse: !!data?.sortReverse,
     customOrder: Array.isArray(data?.customOrder) ? data.customOrder.slice() : [],
+    main: !!data?.main,
     savedAt: data?.savedAt || Date.now()
   };
   PREFS.linkBackups = Array.isArray(PREFS.linkBackups) ? PREFS.linkBackups : [];
@@ -470,6 +553,9 @@ function restoreLinkBackupConfigEntry(lsid, data) {
     if (!Array.isArray(PREFS.customOrder[lsid]) || !PREFS.customOrder[lsid].length) {
       PREFS.customOrder[lsid] = data.customOrder.slice();
     }
+  }
+  if (data?.main && !PREFS.mainList) {
+    PREFS.mainList = lsid;
   }
 }
 async function loadFrozenBackups() {
@@ -1254,7 +1340,7 @@ function manifestKey() {
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
 
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${PREFS.mainList || ""}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
 }
 
 async function harvestSources() {
@@ -1702,7 +1788,7 @@ const baseManifest = {
   version: "12.4.0",
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
-  resources: ["catalog","meta"],
+  resources: ["catalog","meta","stream"],
   types: ["my lists","movie","series"],
   idPrefixes: ["tt"],
   behaviorHints: {
@@ -1782,6 +1868,15 @@ function listIdsWithEdits(lsid) {
   return ids;
 }
 
+function syncFrozenEdits(lsid) {
+  if (!PREFS.frozenLists || !PREFS.frozenLists[lsid]) return;
+  const ids = listIdsWithEdits(lsid);
+  PREFS.frozenLists[lsid].ids = ids.slice();
+  const orders = PREFS.frozenLists[lsid].orders || {};
+  orders.imdb = ids.slice();
+  PREFS.frozenLists[lsid].orders = orders;
+}
+
 async function rebuildAllCards() {
   const unique = new Set();
   for (const id of Object.keys(LISTS)) {
@@ -1842,7 +1937,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 });
 
 // ------- Meta -------
-  app.get("/meta/:type/:id.json", async (req,res)=>{
+app.get("/meta/:type/:id.json", async (req,res)=>{
     try{
       if (!addonAllowed(req)) return res.status(403).send("Forbidden");
       maybeBackgroundSync();
@@ -1877,6 +1972,75 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
 });
 
+// ------- Stream -------
+app.get("/stream/:type/:id.json", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    maybeBackgroundSync();
+    const imdbId = resolveStreamImdbId(req.params.id);
+    if (!imdbId) return res.json({ streams: [] });
+
+    const mainList = PREFS.mainList;
+    if (!isListId(mainList)) {
+      return res.json({
+        streams: [{
+          title: "You have not selected a main list.",
+          externalUrl: `stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId}`
+        }]
+      });
+    }
+
+    const listName = listDisplayName(mainList);
+    const keyParam = SHARED_SECRET ? `?key=${encodeURIComponent(SHARED_SECRET)}` : "";
+    const inList = listIdsWithEdits(mainList).includes(imdbId);
+    if (inList) {
+      return res.json({
+        streams: [{
+          title: `➖ Remove this title from ${listName}`,
+          url: `${absoluteBase(req)}/stream-remove/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
+        }]
+      });
+    }
+    return res.json({
+      streams: [{
+        title: `➕ Save this title to ${listName}`,
+        url: `${absoluteBase(req)}/stream-add/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
+      }]
+    });
+  } catch (e) {
+    console.error("stream:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+app.get("/stream-add/:type/:id", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const imdbId = resolveStreamImdbId(req.params.id);
+    if (imdbId) {
+      await addImdbToMainList(imdbId);
+    }
+    res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
+  } catch (e) {
+    console.error("stream-add:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+app.get("/stream-remove/:type/:id", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const imdbId = resolveStreamImdbId(req.params.id);
+    if (imdbId) {
+      await removeImdbFromMainList(imdbId);
+    }
+    res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
+  } catch (e) {
+    console.error("stream-remove:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
 // ------- Admin + debug & new endpoints -------
 app.get("/api/lists", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -1893,6 +2057,7 @@ app.post("/api/prefs", async (req,res) => {
     PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
+    PREFS.mainList        = isListId(body.mainList) ? body.mainList : "";
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : (PREFS.perListSort || {});
     PREFS.sortReverse     = body.sortReverse && typeof body.sortReverse === "object"
       ? Object.fromEntries(Object.entries(body.sortReverse).map(([k,v]) => [k, !!v]))
@@ -2091,6 +2256,7 @@ app.post("/api/delete-custom-list", async (req, res) => {
     if (PREFS.perListSort) delete PREFS.perListSort[lsid];
     if (PREFS.sortOptions) delete PREFS.sortOptions[lsid];
     if (PREFS.sortReverse) delete PREFS.sortReverse[lsid];
+    if (PREFS.mainList === lsid) PREFS.mainList = "";
     PREFS.enabled = (PREFS.enabled || []).filter(id => id !== lsid);
     PREFS.order = (PREFS.order || []).filter(id => id !== lsid);
     await deleteFrozenBackup(lsid);
@@ -2206,6 +2372,7 @@ app.post("/api/list-add", async (req, res) => {
     const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
     if (!ed.added.includes(tt)) ed.added.push(tt);
     ed.removed = (ed.removed || []).filter(x => x !== tt);
+    syncFrozenEdits(lsid);
 
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
@@ -2231,6 +2398,7 @@ app.post("/api/list-remove", async (req, res) => {
 
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
+    syncFrozenEdits(lsid);
 
     await persistSnapshot();
 
@@ -2246,6 +2414,7 @@ app.post("/api/list-reset", async (req, res) => {
     if (!isListId(lsid)) return res.status(400).send("Bad input");
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
+    syncFrozenEdits(lsid);
 
     await persistSnapshot();
 
@@ -2319,7 +2488,7 @@ app.post("/api/link-backup", async (req,res) => {
       const sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
       const customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
       const name = listDisplayName(lsid);
-      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, savedAt: Date.now() };
+      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: PREFS.mainList === lsid, savedAt: Date.now() };
       PREFS.backupConfigs[lsid] = config;
       await saveLinkBackupConfig(lsid, config);
     } else {
@@ -2353,6 +2522,7 @@ app.post("/api/block-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
+    if (PREFS.mainList === lsid) PREFS.mainList = "";
     if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
     await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
@@ -2383,6 +2553,7 @@ app.post("/api/remove-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
+    if (PREFS.mainList === lsid) PREFS.mainList = "";
     if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
     await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
@@ -2699,6 +2870,10 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     align-items:center;
   }
+  tr.list-row.main{
+    background:linear-gradient(90deg, rgba(243,195,65,.18), rgba(108,92,231,.12));
+    box-shadow:inset 0 0 0 1px rgba(243,195,65,.25);
+  }
   .status-pill{
     display:inline-flex;
     align-items:center;
@@ -2769,6 +2944,9 @@ app.get("/admin", async (req,res)=>{
   .icon-btn svg{width:16px;height:16px;fill:currentColor;}
   .icon-btn.cloud.active{background:rgba(108,92,231,.2);border-color:#7f78ff;color:#b3b0ff;}
   .icon-btn.danger{color:#ff9b9b;border-color:#6b2f2f;background:rgba(107,47,47,.2);}
+  .icon-btn.home{color:#ffe68a;border-color:#6a5a1a;background:rgba(106,90,26,.25);}
+  .icon-btn.home.active{color:#ffd24a;border-color:#f3c341;background:rgba(243,195,65,.25);box-shadow:0 8px 18px rgba(243,195,65,.25);}
+  .icon-btn.home.inactive{opacity:.5;}
   .discovered-item{
     display:flex;
     align-items:flex-start;
@@ -3152,6 +3330,7 @@ async function render() {
   const lists = await getLists();
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
   const refresh = async () => { await render(); };
+  const listCount = (lsid) => (lists[lsid]?.ids || []).length;
 
   function renderPills(id, arr, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
@@ -3251,7 +3430,7 @@ async function render() {
       const title = (frozenMap[id] ? '⭐ ' : '') + displayName(id);
       li.appendChild(el('b', { text: title }));
       li.appendChild(document.createTextNode(' '));
-      li.appendChild(el('small', { text: '(' + ((lists[id]?.ids || []).length) + ' items)' }));
+      li.appendChild(el('small', { text: '(' + listCount(id) + ' items)' }));
       if (lists[id]?.url) {
         const urlWrap = el('div');
         urlWrap.appendChild(el('small', { text: lists[id]?.url || '' }));
@@ -3489,6 +3668,7 @@ async function render() {
   const thead = el('thead', {}, [el('tr',{},[
     el('th',{text:''}),
     el('th',{text:'Enabled'}),
+    el('th',{text:'Main'}),
     el('th',{text:'Move'}),
     el('th',{text:'List (id)'}),
     el('th',{text:'Items'}),
@@ -3501,7 +3681,7 @@ async function render() {
 
   function makeDrawer(lsid) {
     const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
-    const td = el('td',{colspan:'8'});
+    const td = el('td',{colspan:'9'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
 
@@ -3712,13 +3892,23 @@ async function render() {
     const customMeta = customMap[lsid];
     const isFrozen = !!frozenMap[lsid];
     const isCustom = !!customMeta;
-    const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
+    const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
 
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
     const chevTd = el('td',{},[chev]);
 
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
+
+    const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 2.8 10.7a1 1 0 0 0 1.3 1.5l1.9-1.5V20a1 1 0 0 0 1 1h4.5a1 1 0 0 0 1-1v-4h2v4a1 1 0 0 0 1 1H20a1 1 0 0 0 1-1v-9.3l1.9 1.5a1 1 0 1 0 1.3-1.5L12 3.2z"/></svg>';
+    const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    mainBtn.innerHTML = mainBtnSvg;
+
+    function handleMainToggle(e) {
+      if (e) e.preventDefault();
+      prefs.mainList = prefs.mainList === lsid ? "" : lsid;
+      saveAll('Saved').then(refresh);
+    }
 
     const moveWrap = el('div',{class:'move-btns'});
     const upBtn = el('button',{type:'button',text:'↑'});
@@ -3735,7 +3925,7 @@ async function render() {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
 
-    const count = el('td',{text:String((L.ids||[]).length)});
+    const count = el('td',{text:String(listCount(lsid))});
 
     const sortSel = el('select');
     SORT_OPTIONS.forEach(o=>{
@@ -3905,8 +4095,29 @@ async function render() {
     actionRow.appendChild(dupBtn);
     actionRow.appendChild(status);
 
+    const mainRow = el('div', { class: 'advanced-row' });
+    const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    mainBtnAdvanced.innerHTML = mainBtnSvg;
+    const mainLabel = el('span', { class: 'mini muted', text: 'Main list for Stremio save link' });
+    function updateMainBtn() {
+      const isMain = prefs.mainList === lsid;
+      tr.classList.toggle('main', isMain);
+      mainBtn.classList.toggle('active', isMain);
+      mainBtn.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtn.setAttribute('aria-pressed', isMain ? 'true' : 'false');
+      mainBtnAdvanced.classList.toggle('active', isMain);
+      mainBtnAdvanced.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtnAdvanced.setAttribute('aria-pressed', isMain ? 'true' : 'false');
+    }
+    updateMainBtn();
+    mainBtn.onclick = handleMainToggle;
+    mainBtnAdvanced.onclick = handleMainToggle;
+    mainRow.appendChild(mainBtnAdvanced);
+    mainRow.appendChild(mainLabel);
+
     advancedPanel.appendChild(renameRow);
     advancedPanel.appendChild(actionRow);
+    advancedPanel.appendChild(mainRow);
     if (isCustom) {
       const customNote = el('div', { class: 'mini muted', text: 'Custom list: delete removes it permanently.' });
       advancedPanel.appendChild(customNote);
@@ -3914,6 +4125,7 @@ async function render() {
 
     tr.appendChild(chevTd);
     tr.appendChild(el('td',{},[cb]));
+    tr.appendChild(el('td',{},[mainBtn]));
     tr.appendChild(moveTd);
     tr.appendChild(nameCell);
     tr.appendChild(count);
@@ -3958,6 +4170,7 @@ async function render() {
       enabled,
       order: newOrder,
       defaultList: prefs.defaultList || (enabled[0] || ""),
+      mainList: prefs.mainList || "",
       perListSort: prefs.perListSort || {},
       sortReverse: prefs.sortReverse || {},
       sortOptions: prefs.sortOptions || {},
