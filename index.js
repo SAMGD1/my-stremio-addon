@@ -3332,7 +3332,9 @@ async function render() {
   const refresh = async () => { await render(); };
   const isImdbId = (v) => /tt\d{7,}/i.test(String(v || ""));
   const listCount = (lsid) => {
-    const base = (lists[lsid]?.ids || []).filter(isImdbId);
+    const frozenIds = prefs.frozenLists?.[lsid]?.ids;
+    const baseSource = Array.isArray(frozenIds) ? frozenIds : (lists[lsid]?.ids || []);
+    const base = baseSource.filter(isImdbId);
     const ed = (prefs.listEdits && prefs.listEdits[lsid]) || {};
     const removed = new Set((ed.removed || []).filter(isImdbId));
     const added = (ed.added || []).filter(isImdbId);
