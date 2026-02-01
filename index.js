@@ -3330,18 +3330,7 @@ async function render() {
   const lists = await getLists();
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
   const refresh = async () => { await render(); };
-  const isImdbId = (v) => /tt\d{7,}/i.test(String(v || ""));
-  const listCount = (lsid) => {
-    const frozenIds = prefs.frozenLists?.[lsid]?.ids;
-    const baseSource = (Array.isArray(frozenIds) && frozenIds.length) ? frozenIds : (lists[lsid]?.ids || []);
-    const base = baseSource.filter(isImdbId);
-    const ed = (prefs.listEdits && prefs.listEdits[lsid]) || {};
-    const removed = new Set((ed.removed || []).filter(isImdbId));
-    const added = (ed.added || []).filter(isImdbId);
-    const set = new Set(base.filter(id => !removed.has(id)));
-    for (const tt of added) set.add(tt);
-    return set.size;
-  };
+  const listCount = (lsid) => (lists[lsid]?.ids || []).length;
 
   function renderPills(id, arr, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
