@@ -97,7 +97,7 @@ let PREFS = {
   frozenLists: {},        // { listId: { ids:[], orders:{}, name, url, frozenAt, sortKey, sortReverse, customOrder } }
   customLists: {},        // { listId: { kind, sources, createdAt } }
   linkBackups: [],        // array of list URLs/IDs to keep as backup links
-  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, savedAt } }
+  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, main, savedAt } }
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
@@ -463,6 +463,7 @@ async function saveLinkBackupConfig(lsid, config) {
     sortKey: config?.sortKey || "",
     sortReverse: !!config?.sortReverse,
     customOrder: Array.isArray(config?.customOrder) ? config.customOrder : [],
+    main: !!config?.main,
     savedAt: config?.savedAt || Date.now()
   };
   const path = linkBackupPath(lsid);
@@ -491,6 +492,7 @@ async function persistLinkBackupConfigs() {
     entry.sortKey = PREFS.perListSort?.[lsid] || entry.sortKey || "name_asc";
     entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
     entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : (entry.customOrder || []);
+    entry.main = PREFS.mainList === lsid;
     entry.savedAt = Date.now();
     await saveLinkBackupConfig(lsid, entry);
   }
@@ -532,6 +534,7 @@ function restoreLinkBackupConfigEntry(lsid, data) {
     sortKey: data?.sortKey || "",
     sortReverse: !!data?.sortReverse,
     customOrder: Array.isArray(data?.customOrder) ? data.customOrder.slice() : [],
+    main: !!data?.main,
     savedAt: data?.savedAt || Date.now()
   };
   PREFS.linkBackups = Array.isArray(PREFS.linkBackups) ? PREFS.linkBackups : [];
@@ -550,6 +553,9 @@ function restoreLinkBackupConfigEntry(lsid, data) {
     if (!Array.isArray(PREFS.customOrder[lsid]) || !PREFS.customOrder[lsid].length) {
       PREFS.customOrder[lsid] = data.customOrder.slice();
     }
+  }
+  if (data?.main && !PREFS.mainList) {
+    PREFS.mainList = lsid;
   }
 }
 async function loadFrozenBackups() {
@@ -2482,7 +2488,7 @@ app.post("/api/link-backup", async (req,res) => {
       const sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
       const customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
       const name = listDisplayName(lsid);
-      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, savedAt: Date.now() };
+      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: PREFS.mainList === lsid, savedAt: Date.now() };
       PREFS.backupConfigs[lsid] = config;
       await saveLinkBackupConfig(lsid, config);
     } else {
