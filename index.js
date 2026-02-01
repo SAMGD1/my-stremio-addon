@@ -90,6 +90,7 @@ let PREFS = {
   sortOptions: {},        // { listId: ['custom', 'date_desc', ...] }
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
   upgradeEpisodes: UPGRADE_EPISODES,
+  mainList: "",
   tmdbKey: TMDB_API_KEY || "",
   tmdbKeyValid: null,
   displayNames: {},       // { listId: "Custom Name" }
@@ -128,6 +129,60 @@ const isImdbCustomId = v => /^imdb:[a-z0-9._-]+$/i.test(String(v||""));
 const isTraktListId = v => /^trakt:[^:]+:[^:]+$/i.test(String(v||""));
 const isCustomListId = v => /^custom:[a-z0-9._:-]+$/i.test(String(v||""));
 const isListId = v => isImdbListId(v) || isTraktListId(v) || isImdbCustomId(v) || isCustomListId(v);
+
+function extractImdbId(value) {
+  const m = String(value || "").match(/tt\d{7,}/i);
+  return m ? m[0] : "";
+}
+
+function resolveStreamImdbId(rawId) {
+  const base = extractImdbId(rawId);
+  if (!base) return "";
+  if (EP2SER && EP2SER.has(base)) return EP2SER.get(base);
+  return base;
+}
+
+async function addImdbToMainList(imdbId) {
+  const mainList = PREFS.mainList;
+  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
+  const list = LISTS[mainList];
+  if (!list) return { ok: false, reason: "missing" };
+  PREFS.listEdits = PREFS.listEdits || {};
+  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  edits.added = Array.isArray(edits.added) ? edits.added : [];
+  edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
+
+  const current = new Set(listIdsWithEdits(mainList));
+  if (!current.has(imdbId)) {
+    edits.added = edits.added.filter(id => id !== imdbId);
+    edits.added.push(imdbId);
+  }
+  edits.removed = edits.removed.filter(id => id !== imdbId);
+  PREFS.listEdits[mainList] = edits;
+
+  await getBestMeta(imdbId).catch(() => null);
+  CARD.set(imdbId, cardFor(imdbId));
+  await persistSnapshot();
+  return { ok: true, mainList };
+}
+
+async function removeImdbFromMainList(imdbId) {
+  const mainList = PREFS.mainList;
+  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
+  const list = LISTS[mainList];
+  if (!list) return { ok: false, reason: "missing" };
+  PREFS.listEdits = PREFS.listEdits || {};
+  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  edits.added = Array.isArray(edits.added) ? edits.added : [];
+  edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
+
+  edits.added = edits.added.filter(id => id !== imdbId);
+  if (!edits.removed.includes(imdbId)) edits.removed.push(imdbId);
+  PREFS.listEdits[mainList] = edits;
+
+  await persistSnapshot();
+  return { ok: true, mainList };
+}
 
 const TMDB_PLACEHOLDER_IMDB = "tt0111161";
 
@@ -1254,7 +1309,7 @@ function manifestKey() {
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
 
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${PREFS.mainList || ""}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
 }
 
 async function harvestSources() {
@@ -1702,7 +1757,7 @@ const baseManifest = {
   version: "12.4.0",
   name: "My Lists",
   description: "Your IMDb & Trakt lists as catalogs (cached).",
-  resources: ["catalog","meta"],
+  resources: ["catalog","meta","stream"],
   types: ["my lists","movie","series"],
   idPrefixes: ["tt"],
   behaviorHints: {
@@ -1842,7 +1897,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 });
 
 // ------- Meta -------
-  app.get("/meta/:type/:id.json", async (req,res)=>{
+app.get("/meta/:type/:id.json", async (req,res)=>{
     try{
       if (!addonAllowed(req)) return res.status(403).send("Forbidden");
       maybeBackgroundSync();
@@ -1877,6 +1932,75 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
 });
 
+// ------- Stream -------
+app.get("/stream/:type/:id.json", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    maybeBackgroundSync();
+    const imdbId = resolveStreamImdbId(req.params.id);
+    if (!imdbId) return res.json({ streams: [] });
+
+    const mainList = PREFS.mainList;
+    if (!isListId(mainList)) {
+      return res.json({
+        streams: [{
+          title: "You have not selected a main list.",
+          externalUrl: `stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId}`
+        }]
+      });
+    }
+
+    const listName = listDisplayName(mainList);
+    const keyParam = SHARED_SECRET ? `?key=${encodeURIComponent(SHARED_SECRET)}` : "";
+    const inList = listIdsWithEdits(mainList).includes(imdbId);
+    if (inList) {
+      return res.json({
+        streams: [{
+          title: `➖ Remove this title from ${listName}`,
+          url: `${absoluteBase(req)}/stream-remove/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
+        }]
+      });
+    }
+    return res.json({
+      streams: [{
+        title: `➕ Save this title to ${listName}`,
+        url: `${absoluteBase(req)}/stream-add/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
+      }]
+    });
+  } catch (e) {
+    console.error("stream:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+app.get("/stream-add/:type/:id", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const imdbId = resolveStreamImdbId(req.params.id);
+    if (imdbId) {
+      await addImdbToMainList(imdbId);
+    }
+    res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
+  } catch (e) {
+    console.error("stream-add:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+app.get("/stream-remove/:type/:id", async (req, res) => {
+  try {
+    if (!addonAllowed(req)) return res.status(403).send("Forbidden");
+    const imdbId = resolveStreamImdbId(req.params.id);
+    if (imdbId) {
+      await removeImdbFromMainList(imdbId);
+    }
+    res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
+  } catch (e) {
+    console.error("stream-remove:", e);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
 // ------- Admin + debug & new endpoints -------
 app.get("/api/lists", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -1893,6 +2017,7 @@ app.post("/api/prefs", async (req,res) => {
     PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
+    PREFS.mainList        = isListId(body.mainList) ? body.mainList : "";
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : (PREFS.perListSort || {});
     PREFS.sortReverse     = body.sortReverse && typeof body.sortReverse === "object"
       ? Object.fromEntries(Object.entries(body.sortReverse).map(([k,v]) => [k, !!v]))
@@ -2091,6 +2216,7 @@ app.post("/api/delete-custom-list", async (req, res) => {
     if (PREFS.perListSort) delete PREFS.perListSort[lsid];
     if (PREFS.sortOptions) delete PREFS.sortOptions[lsid];
     if (PREFS.sortReverse) delete PREFS.sortReverse[lsid];
+    if (PREFS.mainList === lsid) PREFS.mainList = "";
     PREFS.enabled = (PREFS.enabled || []).filter(id => id !== lsid);
     PREFS.order = (PREFS.order || []).filter(id => id !== lsid);
     await deleteFrozenBackup(lsid);
@@ -2353,6 +2479,7 @@ app.post("/api/block-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
+    if (PREFS.mainList === lsid) PREFS.mainList = "";
     if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
     await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
@@ -2383,6 +2510,7 @@ app.post("/api/remove-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
+    if (PREFS.mainList === lsid) PREFS.mainList = "";
     if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
     await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
@@ -2699,6 +2827,10 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     align-items:center;
   }
+  tr.list-row.main{
+    background:linear-gradient(90deg, rgba(243,195,65,.18), rgba(108,92,231,.12));
+    box-shadow:inset 0 0 0 1px rgba(243,195,65,.25);
+  }
   .status-pill{
     display:inline-flex;
     align-items:center;
@@ -2769,6 +2901,9 @@ app.get("/admin", async (req,res)=>{
   .icon-btn svg{width:16px;height:16px;fill:currentColor;}
   .icon-btn.cloud.active{background:rgba(108,92,231,.2);border-color:#7f78ff;color:#b3b0ff;}
   .icon-btn.danger{color:#ff9b9b;border-color:#6b2f2f;background:rgba(107,47,47,.2);}
+  .icon-btn.home{color:#ffe68a;border-color:#6a5a1a;background:rgba(106,90,26,.25);}
+  .icon-btn.home.active{color:#ffd24a;border-color:#f3c341;background:rgba(243,195,65,.25);box-shadow:0 8px 18px rgba(243,195,65,.25);}
+  .icon-btn.home.inactive{opacity:.5;}
   .discovered-item{
     display:flex;
     align-items:flex-start;
@@ -3489,6 +3624,7 @@ async function render() {
   const thead = el('thead', {}, [el('tr',{},[
     el('th',{text:''}),
     el('th',{text:'Enabled'}),
+    el('th',{text:'Main'}),
     el('th',{text:'Move'}),
     el('th',{text:'List (id)'}),
     el('th',{text:'Items'}),
@@ -3501,7 +3637,7 @@ async function render() {
 
   function makeDrawer(lsid) {
     const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
-    const td = el('td',{colspan:'8'});
+    const td = el('td',{colspan:'9'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
 
@@ -3712,13 +3848,23 @@ async function render() {
     const customMeta = customMap[lsid];
     const isFrozen = !!frozenMap[lsid];
     const isCustom = !!customMeta;
-    const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
+    const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
 
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
     const chevTd = el('td',{},[chev]);
 
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
+
+    const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 2.8 10.7a1 1 0 0 0 1.3 1.5l1.9-1.5V20a1 1 0 0 0 1 1h4.5a1 1 0 0 0 1-1v-4h2v4a1 1 0 0 0 1 1H20a1 1 0 0 0 1-1v-9.3l1.9 1.5a1 1 0 1 0 1.3-1.5L12 3.2z"/></svg>';
+    const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    mainBtn.innerHTML = mainBtnSvg;
+
+    function handleMainToggle(e) {
+      if (e) e.preventDefault();
+      prefs.mainList = prefs.mainList === lsid ? "" : lsid;
+      saveAll('Saved').then(refresh);
+    }
 
     const moveWrap = el('div',{class:'move-btns'});
     const upBtn = el('button',{type:'button',text:'↑'});
@@ -3905,8 +4051,29 @@ async function render() {
     actionRow.appendChild(dupBtn);
     actionRow.appendChild(status);
 
+    const mainRow = el('div', { class: 'advanced-row' });
+    const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    mainBtnAdvanced.innerHTML = mainBtnSvg;
+    const mainLabel = el('span', { class: 'mini muted', text: 'Main list for Stremio save link' });
+    function updateMainBtn() {
+      const isMain = prefs.mainList === lsid;
+      tr.classList.toggle('main', isMain);
+      mainBtn.classList.toggle('active', isMain);
+      mainBtn.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtn.setAttribute('aria-pressed', isMain ? 'true' : 'false');
+      mainBtnAdvanced.classList.toggle('active', isMain);
+      mainBtnAdvanced.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtnAdvanced.setAttribute('aria-pressed', isMain ? 'true' : 'false');
+    }
+    updateMainBtn();
+    mainBtn.onclick = handleMainToggle;
+    mainBtnAdvanced.onclick = handleMainToggle;
+    mainRow.appendChild(mainBtnAdvanced);
+    mainRow.appendChild(mainLabel);
+
     advancedPanel.appendChild(renameRow);
     advancedPanel.appendChild(actionRow);
+    advancedPanel.appendChild(mainRow);
     if (isCustom) {
       const customNote = el('div', { class: 'mini muted', text: 'Custom list: delete removes it permanently.' });
       advancedPanel.appendChild(customNote);
@@ -3914,6 +4081,7 @@ async function render() {
 
     tr.appendChild(chevTd);
     tr.appendChild(el('td',{},[cb]));
+    tr.appendChild(el('td',{},[mainBtn]));
     tr.appendChild(moveTd);
     tr.appendChild(nameCell);
     tr.appendChild(count);
@@ -3958,6 +4126,7 @@ async function render() {
       enabled,
       order: newOrder,
       defaultList: prefs.defaultList || (enabled[0] || ""),
+      mainList: prefs.mainList || "",
       perListSort: prefs.perListSort || {},
       sortReverse: prefs.sortReverse || {},
       sortOptions: prefs.sortOptions || {},
