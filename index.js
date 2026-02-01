@@ -2786,6 +2786,10 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     align-items:center;
   }
+  tr.list-row.main{
+    background:linear-gradient(90deg, rgba(243,195,65,.18), rgba(108,92,231,.12));
+    box-shadow:inset 0 0 0 1px rgba(243,195,65,.25);
+  }
   .status-pill{
     display:inline-flex;
     align-items:center;
@@ -3579,6 +3583,7 @@ async function render() {
   const thead = el('thead', {}, [el('tr',{},[
     el('th',{text:''}),
     el('th',{text:'Enabled'}),
+    el('th',{text:'Main'}),
     el('th',{text:'Move'}),
     el('th',{text:'List (id)'}),
     el('th',{text:'Items'}),
@@ -3591,7 +3596,7 @@ async function render() {
 
   function makeDrawer(lsid) {
     const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
-    const td = el('td',{colspan:'8'});
+    const td = el('td',{colspan:'9'});
     td.appendChild(el('div',{text:'Loading…'}));
     tr.appendChild(td);
 
@@ -3802,13 +3807,23 @@ async function render() {
     const customMeta = customMap[lsid];
     const isFrozen = !!frozenMap[lsid];
     const isCustom = !!customMeta;
-    const tr = el('tr', {'data-lsid': lsid, draggable:'true'});
+    const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
 
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
     const chevTd = el('td',{},[chev]);
 
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
+
+    const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 2.8 10.7a1 1 0 0 0 1.3 1.5l1.9-1.5V20a1 1 0 0 0 1 1h4.5a1 1 0 0 0 1-1v-4h2v4a1 1 0 0 0 1 1H20a1 1 0 0 0 1-1v-9.3l1.9 1.5a1 1 0 1 0 1.3-1.5L12 3.2z"/></svg>';
+    const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    mainBtn.innerHTML = mainBtnSvg;
+
+    function handleMainToggle(e) {
+      if (e) e.preventDefault();
+      prefs.mainList = prefs.mainList === lsid ? "" : lsid;
+      saveAll('Saved').then(refresh);
+    }
 
     const moveWrap = el('div',{class:'move-btns'});
     const upBtn = el('button',{type:'button',text:'↑'});
@@ -3996,23 +4011,23 @@ async function render() {
     actionRow.appendChild(status);
 
     const mainRow = el('div', { class: 'advanced-row' });
-    const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
-    mainBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 2.8 10.7a1 1 0 0 0 1.3 1.5l1.9-1.5V20a1 1 0 0 0 1 1h4.5a1 1 0 0 0 1-1v-4h2v4a1 1 0 0 0 1 1H20a1 1 0 0 0 1-1v-9.3l1.9 1.5a1 1 0 1 0 1.3-1.5L12 3.2z"/></svg>';
+    const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    mainBtnAdvanced.innerHTML = mainBtnSvg;
     const mainLabel = el('span', { class: 'mini muted', text: 'Main list for Stremio save link' });
     function updateMainBtn() {
       const isMain = prefs.mainList === lsid;
+      tr.classList.toggle('main', isMain);
       mainBtn.classList.toggle('active', isMain);
       mainBtn.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
       mainBtn.setAttribute('aria-pressed', isMain ? 'true' : 'false');
+      mainBtnAdvanced.classList.toggle('active', isMain);
+      mainBtnAdvanced.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtnAdvanced.setAttribute('aria-pressed', isMain ? 'true' : 'false');
     }
     updateMainBtn();
-    mainBtn.onclick = async (e) => {
-      e.preventDefault();
-      prefs.mainList = prefs.mainList === lsid ? "" : lsid;
-      await saveAll('Saved');
-      await refresh();
-    };
-    mainRow.appendChild(mainBtn);
+    mainBtn.onclick = handleMainToggle;
+    mainBtnAdvanced.onclick = handleMainToggle;
+    mainRow.appendChild(mainBtnAdvanced);
     mainRow.appendChild(mainLabel);
 
     advancedPanel.appendChild(renameRow);
@@ -4025,6 +4040,7 @@ async function render() {
 
     tr.appendChild(chevTd);
     tr.appendChild(el('td',{},[cb]));
+    tr.appendChild(el('td',{},[mainBtn]));
     tr.appendChild(moveTd);
     tr.appendChild(nameCell);
     tr.appendChild(count);
