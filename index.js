@@ -159,6 +159,7 @@ async function addImdbToMainList(imdbId) {
   }
   edits.removed = edits.removed.filter(id => id !== imdbId);
   PREFS.listEdits[mainList] = edits;
+  syncFrozenEdits(mainList);
 
   await getBestMeta(imdbId).catch(() => null);
   CARD.set(imdbId, cardFor(imdbId));
@@ -179,6 +180,7 @@ async function removeImdbFromMainList(imdbId) {
   edits.added = edits.added.filter(id => id !== imdbId);
   if (!edits.removed.includes(imdbId)) edits.removed.push(imdbId);
   PREFS.listEdits[mainList] = edits;
+  syncFrozenEdits(mainList);
 
   await persistSnapshot();
   return { ok: true, mainList };
@@ -326,6 +328,23 @@ async function ghGetSha(path) {
     return data && data.sha || null;
   } catch { return null; }
 }
+async function ghPutWithRetry(path, bodyBuilder, attempts = 3) {
+  if (!GH_ENABLED) return;
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const body = await bodyBuilder();
+      await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e && e.message || "");
+      if (msg.includes(" 409:") && i < attempts - 1) continue;
+      break;
+    }
+  }
+  if (lastErr) console.warn("[GH] update failed:", lastErr.message || lastErr);
+}
 async function saveSnapshot(obj) {
   // local (best effort)
   try {
@@ -336,10 +355,12 @@ async function saveSnapshot(obj) {
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
   const path = "data/snapshot.json";
-  const sha = await ghGetSha(path);
-  const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
-  if (sha) body.sha = sha;
-  await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
+  await ghPutWithRetry(path, async () => {
+    const sha = await ghGetSha(path);
+    const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
+    if (sha) body.sha = sha;
+    return body;
+  });
 }
 async function ghDeleteFile(path) {
   if (!GH_ENABLED) return;
@@ -411,10 +432,12 @@ async function saveFrozenBackup(lsid, frozen) {
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
   const relPath = `data/frozen/${base64Url(lsid)}.json`;
-  const sha = await ghGetSha(relPath);
-  const body = { message: `Update frozen ${lsid}`, content, branch: GITHUB_BRANCH };
-  if (sha) body.sha = sha;
-  await gh("PUT", `/contents/${encodeURIComponent(relPath)}`, body);
+  await ghPutWithRetry(relPath, async () => {
+    const sha = await ghGetSha(relPath);
+    const body = { message: `Update frozen ${lsid}`, content, branch: GITHUB_BRANCH };
+    if (sha) body.sha = sha;
+    return body;
+  });
 }
 async function deleteFrozenBackup(lsid) {
   const path = frozenBackupPath(lsid);
@@ -450,10 +473,12 @@ async function saveLinkBackupConfig(lsid, config) {
   if (!GH_ENABLED) return;
   const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
   const relPath = `data/backup/${base64Url(lsid)}.json`;
-  const sha = await ghGetSha(relPath);
-  const body = { message: `Update backup ${lsid}`, content, branch: GITHUB_BRANCH };
-  if (sha) body.sha = sha;
-  await gh("PUT", `/contents/${encodeURIComponent(relPath)}`, body);
+  await ghPutWithRetry(relPath, async () => {
+    const sha = await ghGetSha(relPath);
+    const body = { message: `Update backup ${lsid}`, content, branch: GITHUB_BRANCH };
+    if (sha) body.sha = sha;
+    return body;
+  });
 }
 async function deleteLinkBackupConfig(lsid) {
   const path = linkBackupPath(lsid);
@@ -1837,6 +1862,15 @@ function listIdsWithEdits(lsid) {
   return ids;
 }
 
+function syncFrozenEdits(lsid) {
+  if (!PREFS.frozenLists || !PREFS.frozenLists[lsid]) return;
+  const ids = listIdsWithEdits(lsid);
+  PREFS.frozenLists[lsid].ids = ids.slice();
+  const orders = PREFS.frozenLists[lsid].orders || {};
+  orders.imdb = ids.slice();
+  PREFS.frozenLists[lsid].orders = orders;
+}
+
 async function rebuildAllCards() {
   const unique = new Set();
   for (const id of Object.keys(LISTS)) {
@@ -2332,6 +2366,7 @@ app.post("/api/list-add", async (req, res) => {
     const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
     if (!ed.added.includes(tt)) ed.added.push(tt);
     ed.removed = (ed.removed || []).filter(x => x !== tt);
+    syncFrozenEdits(lsid);
 
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
@@ -2357,6 +2392,7 @@ app.post("/api/list-remove", async (req, res) => {
 
     if (!ed.removed.includes(tt)) ed.removed.push(tt);
     ed.added = (ed.added || []).filter(x => x !== tt);
+    syncFrozenEdits(lsid);
 
     await persistSnapshot();
 
@@ -2372,6 +2408,7 @@ app.post("/api/list-reset", async (req, res) => {
     if (!isListId(lsid)) return res.status(400).send("Bad input");
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
+    syncFrozenEdits(lsid);
 
     await persistSnapshot();
 
@@ -3287,6 +3324,16 @@ async function render() {
   const lists = await getLists();
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
   const refresh = async () => { await render(); };
+  const isImdbId = (v) => /tt\d{7,}/i.test(String(v || ""));
+  const listCount = (lsid) => {
+    const base = (lists[lsid]?.ids || []).filter(isImdbId);
+    const ed = (prefs.listEdits && prefs.listEdits[lsid]) || {};
+    const removed = new Set((ed.removed || []).filter(isImdbId));
+    const added = (ed.added || []).filter(isImdbId);
+    const set = new Set(base.filter(id => !removed.has(id)));
+    for (const tt of added) set.add(tt);
+    return set.size;
+  };
 
   function renderPills(id, arr, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
@@ -3386,7 +3433,7 @@ async function render() {
       const title = (frozenMap[id] ? '⭐ ' : '') + displayName(id);
       li.appendChild(el('b', { text: title }));
       li.appendChild(document.createTextNode(' '));
-      li.appendChild(el('small', { text: '(' + ((lists[id]?.ids || []).length) + ' items)' }));
+      li.appendChild(el('small', { text: '(' + listCount(id) + ' items)' }));
       if (lists[id]?.url) {
         const urlWrap = el('div');
         urlWrap.appendChild(el('small', { text: lists[id]?.url || '' }));
@@ -3881,7 +3928,7 @@ async function render() {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
 
-    const count = el('td',{text:String((L.ids||[]).length)});
+    const count = el('td',{text:String(listCount(lsid))});
 
     const sortSel = el('select');
     SORT_OPTIONS.forEach(o=>{
