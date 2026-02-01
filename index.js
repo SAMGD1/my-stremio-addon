@@ -15,6 +15,7 @@ const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // https://www.imdb.com/user/urXXXXXXX/lists/
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
+const PRELOAD_CARDS = String(process.env.PRELOAD_CARDS || "true").toLowerCase() !== "false";
 
 // fetch IMDb’s own release-date page order so our date sort matches IMDb exactly
 const IMDB_FETCH_RELEASE_ORDERS = String(process.env.IMDB_FETCH_RELEASE_ORDERS || "true").toLowerCase() !== "false";
@@ -1631,9 +1632,13 @@ async function fullSync({ rediscover = true, force = false } = {}) {
     }
 
     // preload cards
-    for (const tt of idsToPreload) {
-      await getBestMeta(tt);
-      CARD.set(tt, cardFor(tt));
+    if (PRELOAD_CARDS) {
+      for (const tt of idsToPreload) {
+        await getBestMeta(tt);
+        CARD.set(tt, cardFor(tt));
+      }
+    } else {
+      console.log("[SYNC] card preload skipped (PRELOAD_CARDS=false)");
     }
 
     LISTS = next;
@@ -1747,9 +1752,11 @@ async function syncSingleList(lsid, { manual = false } = {}) {
     await saveFrozenBackup(lsid, PREFS.frozenLists[lsid]);
   }
 
-  for (const tt of idsToUse) {
-    await getBestMeta(tt);
-    CARD.set(tt, cardFor(tt));
+  if (PRELOAD_CARDS) {
+    for (const tt of idsToUse) {
+      await getBestMeta(tt);
+      CARD.set(tt, cardFor(tt));
+    }
   }
 
   LAST_MANIFEST_KEY = "";
