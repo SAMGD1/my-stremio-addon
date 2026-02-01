@@ -114,6 +114,8 @@ const TMDB_CACHE = new Map(); // Map<tt, { ts, rec, ok }>
 let LAST_SYNC_AT = 0;
 let syncTimer = null;
 let syncInProgress = false;
+let syncPromise = null;
+let pendingForcedSync = false;
 
 let MANIFEST_REV = 1;
 let LAST_MANIFEST_KEY = "";
@@ -1365,11 +1367,15 @@ async function harvestSources() {
   return Array.from(map.values());
 }
 
-async function fullSync({ rediscover = true } = {}) {
-  if (syncInProgress) return;
+async function fullSync({ rediscover = true, force = false } = {}) {
+  if (syncInProgress) {
+    if (force) pendingForcedSync = true;
+    return syncPromise;
+  }
   syncInProgress = true;
   const started = Date.now();
-  try {
+  syncPromise = (async () => {
+    try {
     let discovered = [];
     if (rediscover) {
       discovered = await harvestSources();
@@ -1571,11 +1577,21 @@ async function fullSync({ rediscover = true } = {}) {
 
     await persistSnapshot();
 
-    console.log(`[SYNC] ok – ${Object.values(LISTS).reduce((n,L)=>n+(L.ids?.length||0),0)} items across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
-  } catch (e) {
-    console.error("[SYNC] failed:", e);
+      console.log(`[SYNC] ok – ${Object.values(LISTS).reduce((n,L)=>n+(L.ids?.length||0),0)} items across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
+    } catch (e) {
+      console.error("[SYNC] failed:", e);
+    } finally {
+      syncInProgress = false;
+    }
+  })();
+  try {
+    await syncPromise;
   } finally {
-    syncInProgress = false;
+    syncPromise = null;
+    if (pendingForcedSync) {
+      pendingForcedSync = false;
+      await fullSync({ rediscover: true });
+    }
   }
 }
 function scheduleNextSync() {
@@ -2382,7 +2398,7 @@ app.post("/api/remove-list", async (req,res)=>{
 app.post("/api/sync", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
-    await fullSync({ rediscover:true });
+    await fullSync({ rediscover:true, force: true });
     scheduleNextSync();
     res.status(200).send(`Synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
@@ -2393,7 +2409,7 @@ app.post("/api/purge-sync", async (req,res)=>{
     LISTS = Object.create(null);
     BEST.clear(); FALLBK.clear(); EP2SER.clear(); CARD.clear();
     PREFS.customOrder = PREFS.customOrder || {};
-    await fullSync({ rediscover:true });
+    await fullSync({ rediscover:true, force: true });
     scheduleNextSync();
     res.status(200).send(`Purged & synced at ${new Date().toISOString()}. <a href="/admin?admin=${ADMIN_PASSWORD}">Back</a>`);
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
