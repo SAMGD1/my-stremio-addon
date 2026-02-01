@@ -21,6 +21,7 @@ Are you tired of Trakt’s list and item limits? Don’t worry—use IMDb’s ma
   - Manual list sync and full purge + re-sync actions.
 - **Per-list sorting**: IMDb order, IMDb popularity, IMDb release date (when available), rating/runtime/name/date, or custom order. Sort options are configurable per list.
 - **Custom edits**: Add/remove items, edit custom order, and save list-specific overrides.
+- **Stremio quick save/remove**: Pick a main list and get a Save/Remove stream link inside Stremio to add or remove the current title without leaving the app.
 - **Manifest sync**: Saving preferences bumps the manifest revision so Stremio refreshes automatically.
 - **TMDB enrichment**: Optional posters, backdrops, and descriptions using a TMDB API key.
 - **Persistence options**: Save snapshot data locally and optionally to GitHub so your configuration survives restarts.
