@@ -1,29 +1,64 @@
 # My Lists Stremio Addon
 
-This project turns IMDb and Trakt lists into cached Stremio catalogs with a built-in admin console.
+**Ever wanted to truly manage your lists?**
+
+Are you tired of Trakt’s list and item limits? Don’t worry—use IMDb’s massive limits (10k items per list, unlimited lists), bring your Trakt lists along, and skip the Trakt subscription. This addon turns IMDb + Trakt into a flexible, cached Stremio experience that you fully control.
+
+## What this addon does
+- Turns IMDb lists, IMDb watchlists, Trakt lists, and Trakt watchlists into Stremio catalogs.
+- Keeps your lists cached so Stremio loads fast.
+- Lets you reorder, sort, freeze, merge, duplicate, and customize lists from a built-in admin console.
+- Enriches posters and metadata using TMDB (optional).
 
 ## Features
-- Imports IMDb lists (including multi-page lists), IMDb watchlists, and public Trakt lists (including Trakt watchlists), with episode-to-series upgrades when desired.
-- Discovers lists from configured IMDb users, explicit IMDb/Trakt list URLs, IMDb chart/search shortcuts, and optional fallback list IDs.
-- Admin console provides snapshot view, add sources page, and customize page with drag-and-drop **and** arrow buttons for remote-friendly ordering.
-- Per-list sort options (IMDb order, IMDb popularity when available, IMDb release date order when available, rating/runtime/name/date, or custom order) with manifest version bumping when catalogs change.
-- Optional GitHub-based snapshot persistence so the addon remembers state across restarts.
-- TMDB metadata enrichment (posters, backdrops, and descriptions) via a TMDB API key set in the environment.
-- Catalogs use a custom "My Lists" catalog type so they appear in their own Discover section.
+- **IMDb + Trakt ingestion**: Import IMDb lists (including multi-page lists), IMDb watchlists, public Trakt lists, and Trakt watchlists. Episode entries can optionally be upgraded to their parent series for cleaner catalogs.
+- **Source discovery**: Auto-discover lists from configured IMDb users, explicit IMDb/Trakt list URLs, IMDb chart/search shortcuts, and fallback list IDs.
+- **Admin console**:
+  - Snapshot dashboard of all lists.
+  - Add sources in bulk (IMDb users, list URLs, Trakt users).
+  - Customize catalogs with drag-and-drop **and** arrow buttons (remote friendly).
+  - Rename, duplicate, freeze, merge, and back up lists.
+  - Manual list sync and full purge + re-sync actions.
+- **Per-list sorting**: IMDb order, IMDb popularity, IMDb release date (when available), rating/runtime/name/date, or custom order. Sort options are configurable per list.
+- **Custom edits**: Add/remove items, edit custom order, and save list-specific overrides.
+- **Manifest sync**: Saving preferences bumps the manifest revision so Stremio refreshes automatically.
+- **TMDB enrichment**: Optional posters, backdrops, and descriptions using a TMDB API key.
+- **Persistence options**: Save snapshot data locally and optionally to GitHub so your configuration survives restarts.
+- **Secure sharing**: Optional shared secret required for addon routes (`manifest.json?key=...`).
 
 ## Requirements
 - Node.js 18 or newer.
 
-## Quick start
+## Local setup
 ```bash
 npm install
 npm start
 ```
-The server listens on `PORT` (default `7000`) at `0.0.0.0`. Open the admin console at:
+The server listens on `PORT` (default `7000`) at `0.0.0.0`.
+
+Open the admin console:
 ```
 http://localhost:7000/admin?admin=Stremio_172
 ```
-Change the `ADMIN_PASSWORD` environment variable in production.
+> Change `ADMIN_PASSWORD` in production.
+
+### Install in Stremio
+The manifest is served at:
+```
+http://localhost:7000/manifest.json
+```
+If you set `SHARED_SECRET`, append `?key=YOUR_SECRET`.
+
+Use the **Install** button in the admin console or paste the manifest URL into Stremio.
+
+## Render (or any hosted server) setup
+1. Create a new Node.js web service.
+2. Build command: `npm install`
+3. Start command: `npm start`
+4. Add environment variables (see below).
+5. Deploy and open `https://YOUR-SERVICE.onrender.com/admin?admin=YOUR_PASSWORD`.
+
+**Note:** Render’s filesystem is ephemeral unless you add a persistent disk. If you don’t use GitHub snapshot persistence, your lists/reset state may be lost on redeploy/restart.
 
 ## Key environment variables
 | Variable | Purpose |
@@ -37,7 +72,7 @@ Change the `ADMIN_PASSWORD` environment variable in production.
 | `UPGRADE_EPISODES` | `true` to upgrade episodes to their parent series. |
 | `IMDB_FETCH_RELEASE_ORDERS` | `true` to mirror IMDb release-date ordering. |
 | `TRAKT_CLIENT_ID` | Public Trakt API key required for Trakt list support. |
-| `TMDB_API_KEY` | **Required for TMDB metadata.** Set this to either a TMDB v3 API key **or** a v4 Read Access Token in your Render environment variables. |
+| `TMDB_API_KEY` | TMDB v3 API key or v4 Read Access Token (for metadata). |
 | `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_BRANCH` | Enable optional snapshot persistence on GitHub. |
 
 ## Adding sources
@@ -49,10 +84,10 @@ Use the **Add sources** page in the admin console to submit new IMDb users, IMDb
 
 ## Customizing catalogs
 Open the **Customize** page to:
-- Enable/disable catalogs and reorder them via drag-and-drop or the up/down buttons (useful on remotes).
+- Enable/disable catalogs and reorder them via drag-and-drop or the up/down buttons.
 - Choose per-list default sort and which sort options appear in Stremio.
 - Open a drawer for each list to adjust custom item order, reset edits, and add/remove items.
-- Use the **Advanced options** panel to freeze lists, rename/duplicate lists, and merge lists into a new frozen copy.
+- Use the **Advanced options** panel to freeze lists, rename/duplicate lists, merge lists into a new frozen copy, and create backups.
 
 Saving preferences bumps the manifest revision automatically so Stremio refreshes.
 
