@@ -937,6 +937,36 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
   return ids;
 }
 
+// IMDb watchlist uses a different paging format; try a watchlist-tuned crawl.
+async function fetchImdbWatchlistIdsAllPages(listUrl, maxPages = 80) {
+  const seen = new Set();
+  const ids = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    let url = withParam(listUrl, "mode", "detail");
+    url = withParam(url, "sort", "list_order,asc");
+    url = withParam(url, "page", String(page));
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
+    const found = tconstsFromHtml(html);
+    let added = 0;
+    for (const tt of found) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added++;
+      }
+    }
+    if (!added) break;
+    await sleep(80);
+  }
+  return ids;
+}
+
 // fetch order IMDb shows when sorted a certain way – also using explicit ?page=N
 async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, maxPages = 80) {
   const seen = new Set();
@@ -1553,8 +1583,10 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       } else {
         const url = list.url || `https://www.imdb.com/list/${id}/`;
         try {
-          if (isImdbListId(id) || isImdbWatchlistUrl(url)) {
+          if (isImdbListId(id)) {
             raw = await fetchImdbListIdsAllPages(url);
+          } else if (isImdbWatchlistUrl(url)) {
+            raw = await fetchImdbWatchlistIdsAllPages(url);
           } else {
             raw = await fetchImdbSearchOrPageIds(url);
           }
@@ -1715,8 +1747,10 @@ async function syncSingleList(lsid, { manual = false } = {}) {
     raw = await fetchTraktListImdbIds(ts);
   } else {
     const url = list.url || `https://www.imdb.com/list/${lsid}/`;
-    if (isImdbListId(lsid) || isImdbWatchlistUrl(url)) {
+    if (isImdbListId(lsid)) {
       raw = await fetchImdbListIdsAllPages(url);
+    } else if (isImdbWatchlistUrl(url)) {
+      raw = await fetchImdbWatchlistIdsAllPages(url);
     } else {
       raw = await fetchImdbSearchOrPageIds(url);
     }
