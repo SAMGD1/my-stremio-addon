@@ -939,32 +939,67 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
 
 // IMDb watchlist uses a different paging format; try a watchlist-tuned crawl.
 async function fetchImdbWatchlistIdsAllPages(listUrl, maxPages = 80) {
-  const seen = new Set();
-  const ids = [];
-
-  for (let page = 1; page <= maxPages; page++) {
-    let url = withParam(listUrl, "mode", "detail");
-    url = withParam(url, "sort", "list_order,asc");
-    url = withParam(url, "page", String(page));
-    let html;
-    try {
-      html = await fetchText(withParam(url, "_", Date.now()));
-    } catch {
-      break;
-    }
-    const found = tconstsFromHtml(html);
-    let added = 0;
-    for (const tt of found) {
-      if (!seen.has(tt)) {
-        seen.add(tt);
-        ids.push(tt);
-        added++;
+  const crawlWithPage = async () => {
+    const seen = new Set();
+    const ids = [];
+    for (let page = 1; page <= maxPages; page++) {
+      let url = withParam(listUrl, "mode", "detail");
+      url = withParam(url, "sort", "list_order,asc");
+      url = withParam(url, "page", String(page));
+      let html;
+      try {
+        html = await fetchText(withParam(url, "_", Date.now()));
+      } catch {
+        break;
       }
+      const found = tconstsFromHtml(html);
+      let added = 0;
+      for (const tt of found) {
+        if (!seen.has(tt)) {
+          seen.add(tt);
+          ids.push(tt);
+          added++;
+        }
+      }
+      if (!added) break;
+      await sleep(80);
     }
-    if (!added) break;
-    await sleep(80);
-  }
-  return ids;
+    return ids;
+  };
+
+  const crawlWithStart = async () => {
+    const seen = new Set();
+    const ids = [];
+    for (let page = 0; page < maxPages; page++) {
+      const start = 1 + page * 50;
+      let url = withParam(listUrl, "mode", "detail");
+      url = withParam(url, "sort", "list_order,asc");
+      url = withParam(url, "start", String(start));
+      let html;
+      try {
+        html = await fetchText(withParam(url, "_", Date.now()));
+      } catch {
+        break;
+      }
+      const found = tconstsFromHtml(html);
+      let added = 0;
+      for (const tt of found) {
+        if (!seen.has(tt)) {
+          seen.add(tt);
+          ids.push(tt);
+          added++;
+        }
+      }
+      if (!added) break;
+      await sleep(80);
+    }
+    return ids;
+  };
+
+  const pageIds = await crawlWithPage();
+  if (pageIds.length > 25) return pageIds;
+  const startIds = await crawlWithStart();
+  return startIds.length ? startIds : pageIds;
 }
 
 // fetch order IMDb shows when sorted a certain way – also using explicit ?page=N
