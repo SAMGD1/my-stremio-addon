@@ -9,7 +9,7 @@ const fs = require("fs/promises");
 const PORT  = Number(process.env.PORT || 7000);
 const HOST  = "0.0.0.0";
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change_me";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 
 const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // https://www.imdb.com/user/urXXXXXXX/lists/
