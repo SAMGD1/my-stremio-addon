@@ -941,6 +941,51 @@ function tconstsFromHtml(html) {
   return out;
 }
 
+function toMobileImdbUrl(url) {
+  try {
+    const u = new URL(url);
+    u.hostname = "m.imdb.com";
+    if (!u.pathname.endsWith("/")) u.pathname += "/";
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+function mobileHasNextPage(html) {
+  return /aria-label=["']Next["']/.test(html) || />\s*Next\s*</i.test(html);
+}
+
+async function fetchImdbMobileIdsAllPages(listUrl, maxPages = 200) {
+  const seen = new Set();
+  const ids = [];
+  const baseUrl = toMobileImdbUrl(listUrl);
+
+  for (let page = 1; page <= maxPages; page++) {
+    let url = withParam(baseUrl, "mode", "detail");
+    url = withParam(url, "page", String(page));
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
+    const found = tconstsFromHtml(html);
+    let added = 0;
+    for (const tt of found) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added++;
+      }
+    }
+    if (!added && !mobileHasNextPage(html)) break;
+    if (!mobileHasNextPage(html)) break;
+    await sleep(120);
+  }
+  return ids;
+}
+
 /**
  * NEW multi-page implementation:
  * we explicitly request ?page=1,2,3… instead of scraping the “Next” button.
@@ -977,6 +1022,9 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
 async function fetchImdbWatchlistIdsAllPages(listUrl, maxPages = 80) {
   const graphIds = await fetchImdbWatchlistIdsGraphql(listUrl).catch(() => []);
   if (graphIds.length > 25) return graphIds;
+
+  const mobileIds = await fetchImdbMobileIdsAllPages(listUrl, maxPages).catch(() => []);
+  if (mobileIds.length > 25) return mobileIds;
 
   const crawlWithPage = async () => {
     const seen = new Set();
