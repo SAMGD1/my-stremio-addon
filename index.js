@@ -15,6 +15,7 @@ const SHARED_SECRET  = process.env.SHARED_SECRET  || "";
 const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // https://www.imdb.com/user/urXXXXXXX/lists/
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
+const PRELOAD_CARDS = String(process.env.PRELOAD_CARDS || "true").toLowerCase() !== "false";
 
 // fetch IMDb’s own release-date page order so our date sort matches IMDb exactly
 const IMDB_FETCH_RELEASE_ORDERS = String(process.env.IMDB_FETCH_RELEASE_ORDERS || "true").toLowerCase() !== "false";
@@ -936,6 +937,36 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
   return ids;
 }
 
+// IMDb watchlist uses a different paging format; try a watchlist-tuned crawl.
+async function fetchImdbWatchlistIdsAllPages(listUrl, maxPages = 80) {
+  const seen = new Set();
+  const ids = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    let url = withParam(listUrl, "mode", "detail");
+    url = withParam(url, "sort", "list_order,asc");
+    url = withParam(url, "page", String(page));
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
+    const found = tconstsFromHtml(html);
+    let added = 0;
+    for (const tt of found) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added++;
+      }
+    }
+    if (!added) break;
+    await sleep(80);
+  }
+  return ids;
+}
+
 // fetch order IMDb shows when sorted a certain way – also using explicit ?page=N
 async function fetchImdbOrder(listUrl, sortSpec /* e.g. "release_date,asc" */, maxPages = 80) {
   const seen = new Set();
@@ -1552,8 +1583,10 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       } else {
         const url = list.url || `https://www.imdb.com/list/${id}/`;
         try {
-          if (isImdbListId(id) || isImdbWatchlistUrl(url)) {
+          if (isImdbListId(id)) {
             raw = await fetchImdbListIdsAllPages(url);
+          } else if (isImdbWatchlistUrl(url)) {
+            raw = await fetchImdbWatchlistIdsAllPages(url);
           } else {
             raw = await fetchImdbSearchOrPageIds(url);
           }
@@ -1631,9 +1664,13 @@ async function fullSync({ rediscover = true, force = false } = {}) {
     }
 
     // preload cards
-    for (const tt of idsToPreload) {
-      await getBestMeta(tt);
-      CARD.set(tt, cardFor(tt));
+    if (PRELOAD_CARDS) {
+      for (const tt of idsToPreload) {
+        await getBestMeta(tt);
+        CARD.set(tt, cardFor(tt));
+      }
+    } else {
+      console.log("[SYNC] card preload skipped (PRELOAD_CARDS=false)");
     }
 
     LISTS = next;
@@ -1710,8 +1747,10 @@ async function syncSingleList(lsid, { manual = false } = {}) {
     raw = await fetchTraktListImdbIds(ts);
   } else {
     const url = list.url || `https://www.imdb.com/list/${lsid}/`;
-    if (isImdbListId(lsid) || isImdbWatchlistUrl(url)) {
+    if (isImdbListId(lsid)) {
       raw = await fetchImdbListIdsAllPages(url);
+    } else if (isImdbWatchlistUrl(url)) {
+      raw = await fetchImdbWatchlistIdsAllPages(url);
     } else {
       raw = await fetchImdbSearchOrPageIds(url);
     }
@@ -1747,9 +1786,11 @@ async function syncSingleList(lsid, { manual = false } = {}) {
     await saveFrozenBackup(lsid, PREFS.frozenLists[lsid]);
   }
 
-  for (const tt of idsToUse) {
-    await getBestMeta(tt);
-    CARD.set(tt, cardFor(tt));
+  if (PRELOAD_CARDS) {
+    for (const tt of idsToUse) {
+      await getBestMeta(tt);
+      CARD.set(tt, cardFor(tt));
+    }
   }
 
   LAST_MANIFEST_KEY = "";
@@ -4257,9 +4298,12 @@ render();
     }
   } catch(e){ console.warn("[BOOT] load snapshot failed:", e.message); }
 
-  fullSync({ rediscover: true }).then(()=> scheduleNextSync()).catch(e => {
+  try {
+    maybeBackgroundSync();
+    scheduleNextSync();
+  } catch (e) {
     console.warn("[BOOT] background sync failed:", e.message);
-  });
+  }
 
   app.listen(PORT, HOST, () => {
     console.log(`Admin:    http://localhost:${PORT}/admin?admin=${ADMIN_PASSWORD}`);
