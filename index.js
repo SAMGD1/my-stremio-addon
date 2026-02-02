@@ -16,6 +16,7 @@ const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // https://www.imdb.c
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
 const PRELOAD_CARDS = String(process.env.PRELOAD_CARDS || "true").toLowerCase() !== "false";
+const IMDB_COOKIE = process.env.IMDB_COOKIE || "";
 
 // fetch IMDb’s own release-date page order so our date sort matches IMDb exactly
 const IMDB_FETCH_RELEASE_ORDERS = String(process.env.IMDB_FETCH_RELEASE_ORDERS || "true").toLowerCase() !== "false";
@@ -50,6 +51,9 @@ const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG_BASE = "https://image.tmdb.org/t/p";
 const TMDB_CACHE_TTL = 1000 * 60 * 60 * 24;
 const TMDB_CACHE_FAIL_TTL = 1000 * 60 * 5;
+const IMDB_GRAPHQL_ENDPOINT = "https://caching.graphql.imdb.com/";
+const IMDB_HASH_TITLE_LIST_MAIN_PAGE =
+  "e3aac5739487b9f7f1398fb345dcef9b5a5baa48b71522fa514e77e41d6502e7";
 
 // include "imdb" (raw list order) and mirror IMDb’s release-date order when available
 const SORT_OPTIONS = [
@@ -291,6 +295,12 @@ function linkBackupPath(lsid) {
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
+let ghWriteQueue = Promise.resolve();
+const enqueueGhWrite = async (fn) => {
+  const next = ghWriteQueue.then(fn, fn);
+  ghWriteQueue = next.catch(() => null);
+  return next;
+};
 
 async function fetchText(url) {
   const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
@@ -303,6 +313,28 @@ async function fetchJson(url) {
   try { return await r.json(); } catch { return null; }
 }
 const withParam = (u,k,v) => { const x = new URL(u); x.searchParams.set(k,v); return x.toString(); };
+const imdbGraphqlHeaders = () => {
+  const headers = {
+    "accept": "application/graphql+json, application/json",
+    "x-imdb-client-name": "imdb-web-next-localized",
+    "user-agent": UA,
+    "origin": "https://www.imdb.com",
+    "referer": "https://www.imdb.com/"
+  };
+  if (IMDB_COOKIE) headers.cookie = IMDB_COOKIE;
+  return headers;
+};
+
+async function imdbGraphqlGet(operationName, variables, sha256Hash) {
+  const params = new URLSearchParams();
+  params.set("operationName", operationName);
+  params.set("variables", JSON.stringify(variables));
+  params.set("extensions", JSON.stringify({ persistedQuery: { sha256Hash, version: 1 } }));
+  const url = `${IMDB_GRAPHQL_ENDPOINT}?${params.toString()}`;
+  const r = await fetch(url, { method: "GET", headers: imdbGraphqlHeaders() });
+  if (!r.ok) throw new Error(`IMDb GraphQL ${r.status}`);
+  return r.json();
+}
 
 // ---- GitHub snapshot (optional) ----
 async function gh(method, path, bodyObj) {
@@ -335,12 +367,16 @@ async function ghPutWithRetry(path, bodyBuilder, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
     try {
       const body = await bodyBuilder();
-      await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
+      await enqueueGhWrite(() => gh("PUT", `/contents/${encodeURIComponent(path)}`, body));
       return;
     } catch (e) {
       lastErr = e;
       const msg = String(e && e.message || "");
-      if (msg.includes(" 409:") && i < attempts - 1) continue;
+      if ((msg.includes(" 409:") || msg.includes(" 429:")) && i < attempts - 1) {
+        const wait = msg.includes(" 429:") ? 5000 * (i + 1) : 300;
+        await sleep(wait);
+        continue;
+      }
       break;
     }
   }
@@ -367,11 +403,11 @@ async function ghDeleteFile(path) {
   if (!GH_ENABLED) return;
   const sha = await ghGetSha(path);
   if (!sha) return;
-  await gh("DELETE", `/contents/${encodeURIComponent(path)}`, {
+  await enqueueGhWrite(() => gh("DELETE", `/contents/${encodeURIComponent(path)}`, {
     message: `Delete ${path}`,
     sha,
     branch: GITHUB_BRANCH
-  });
+  }));
 }
 async function ghListDir(path) {
   if (!GH_ENABLED) return [];
@@ -905,6 +941,51 @@ function tconstsFromHtml(html) {
   return out;
 }
 
+function toMobileImdbUrl(url) {
+  try {
+    const u = new URL(url);
+    u.hostname = "m.imdb.com";
+    if (!u.pathname.endsWith("/")) u.pathname += "/";
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+function mobileHasNextPage(html) {
+  return /aria-label=["']Next["']/.test(html) || />\s*Next\s*</i.test(html);
+}
+
+async function fetchImdbMobileIdsAllPages(listUrl, maxPages = 200) {
+  const seen = new Set();
+  const ids = [];
+  const baseUrl = toMobileImdbUrl(listUrl);
+
+  for (let page = 1; page <= maxPages; page++) {
+    let url = withParam(baseUrl, "mode", "detail");
+    url = withParam(url, "page", String(page));
+    let html;
+    try {
+      html = await fetchText(withParam(url, "_", Date.now()));
+    } catch {
+      break;
+    }
+    const found = tconstsFromHtml(html);
+    let added = 0;
+    for (const tt of found) {
+      if (!seen.has(tt)) {
+        seen.add(tt);
+        ids.push(tt);
+        added++;
+      }
+    }
+    if (!added && !mobileHasNextPage(html)) break;
+    if (!mobileHasNextPage(html)) break;
+    await sleep(120);
+  }
+  return ids;
+}
+
 /**
  * NEW multi-page implementation:
  * we explicitly request ?page=1,2,3… instead of scraping the “Next” button.
@@ -939,6 +1020,12 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
 
 // IMDb watchlist uses a different paging format; try a watchlist-tuned crawl.
 async function fetchImdbWatchlistIdsAllPages(listUrl, maxPages = 80) {
+  const graphIds = await fetchImdbWatchlistIdsGraphql(listUrl).catch(() => []);
+  if (graphIds.length > 25) return graphIds;
+
+  const mobileIds = await fetchImdbMobileIdsAllPages(listUrl, maxPages).catch(() => []);
+  if (mobileIds.length > 25) return mobileIds;
+
   const crawlWithPage = async () => {
     const seen = new Set();
     const ids = [];
@@ -1000,6 +1087,63 @@ async function fetchImdbWatchlistIdsAllPages(listUrl, maxPages = 80) {
   if (pageIds.length > 25) return pageIds;
   const startIds = await crawlWithStart();
   return startIds.length ? startIds : pageIds;
+}
+
+async function fetchImdbWatchlistIdsGraphql(listUrl, { first = 250, maxPages = 1000, throttleMs = 200 } = {}) {
+  const html = await fetchText(withParam(listUrl, "_", Date.now()));
+  const listId = extractImdbListIdFromHtml(html);
+  if (!listId) return [];
+  return fetchImdbListIdsGraphql(listId, { first, maxPages, throttleMs });
+}
+
+function extractImdbListIdFromHtml(html) {
+  const patterns = [
+    /"listId"\s*:\s*"(ls\d{6,})"/i,
+    /data-list-id=["'](ls\d{6,})["']/i,
+    /\/list\/(ls\d{6,})\//i
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m) return m[1];
+  }
+  return "";
+}
+
+async function fetchImdbListIdsGraphql(lsConst, {
+  first = 250,
+  locale = "en-US",
+  sortBy = "LIST_ORDER",
+  sortOrder = "ASC",
+  throttleMs = 200,
+  maxPages = 1000
+} = {}) {
+  let after = undefined;
+  const seen = new Set();
+  const ids = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const variables = {
+      first,
+      locale,
+      lsConst,
+      sort: { by: sortBy, order: sortOrder },
+      ...(after ? { after } : {})
+    };
+    const json = await imdbGraphqlGet("TitleListMainPage", variables, IMDB_HASH_TITLE_LIST_MAIN_PAGE);
+    const edges = json?.data?.list?.titleListItemSearch?.edges ?? [];
+    for (const e of edges) {
+      const id = e?.listItem?.id;
+      if (typeof id === "string" && id.startsWith("tt") && !seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+    const pageInfo = json?.data?.list?.titleListItemSearch?.pageInfo ?? {};
+    if (!pageInfo?.hasNextPage) break;
+    after = pageInfo?.endCursor;
+    if (!after) break;
+    await sleep(throttleMs);
+  }
+  return ids;
 }
 
 // fetch order IMDb shows when sorted a certain way – also using explicit ?page=N
