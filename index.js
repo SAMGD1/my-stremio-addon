@@ -295,6 +295,12 @@ function linkBackupPath(lsid) {
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
+let ghWriteQueue = Promise.resolve();
+const enqueueGhWrite = async (fn) => {
+  const next = ghWriteQueue.then(fn, fn);
+  ghWriteQueue = next.catch(() => null);
+  return next;
+};
 
 async function fetchText(url) {
   const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
@@ -361,12 +367,16 @@ async function ghPutWithRetry(path, bodyBuilder, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
     try {
       const body = await bodyBuilder();
-      await gh("PUT", `/contents/${encodeURIComponent(path)}`, body);
+      await enqueueGhWrite(() => gh("PUT", `/contents/${encodeURIComponent(path)}`, body));
       return;
     } catch (e) {
       lastErr = e;
       const msg = String(e && e.message || "");
-      if (msg.includes(" 409:") && i < attempts - 1) continue;
+      if ((msg.includes(" 409:") || msg.includes(" 429:")) && i < attempts - 1) {
+        const wait = msg.includes(" 429:") ? 5000 * (i + 1) : 300;
+        await sleep(wait);
+        continue;
+      }
       break;
     }
   }
@@ -393,11 +403,11 @@ async function ghDeleteFile(path) {
   if (!GH_ENABLED) return;
   const sha = await ghGetSha(path);
   if (!sha) return;
-  await gh("DELETE", `/contents/${encodeURIComponent(path)}`, {
+  await enqueueGhWrite(() => gh("DELETE", `/contents/${encodeURIComponent(path)}`, {
     message: `Delete ${path}`,
     sha,
     branch: GITHUB_BRANCH
-  });
+  }));
 }
 async function ghListDir(path) {
   if (!GH_ENABLED) return [];
