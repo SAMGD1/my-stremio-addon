@@ -51,7 +51,7 @@ The server listens on `PORT` (default `7000`) at `0.0.0.0`.
 
 Open the admin console:
 ```
-http://localhost:7000/admin?admin=Stremio_172
+http://localhost:7000/admin?admin=YOUR_PASSWORD
 ```
 > Change `ADMIN_PASSWORD` in production.
 
