@@ -941,6 +941,46 @@ function tconstsFromHtml(html) {
   return out;
 }
 
+function extractImdbNextData(html) {
+  const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/i);
+  if (!m) return null;
+  try { return JSON.parse(m[1]); } catch { return null; }
+}
+
+function findTitleListItemSearch(node) {
+  if (!node || typeof node !== "object") return null;
+  const direct = node?.mainColumnData?.predefinedList?.titleListItemSearch;
+  if (direct?.edges) return direct;
+  const seen = new Set();
+  const walk = (obj) => {
+    if (!obj || typeof obj !== "object") return null;
+    if (seen.has(obj)) return null;
+    seen.add(obj);
+    if (typeof obj.total === "number" && obj.pageInfo && Array.isArray(obj.edges)) return obj;
+    for (const v of Object.values(obj)) {
+      const got = walk(v);
+      if (got) return got;
+    }
+    return null;
+  };
+  return walk(node) || null;
+}
+
+function nextDataToTconsts(nextData) {
+  const tls = findTitleListItemSearch(nextData?.props?.pageProps);
+  if (!tls?.edges) return [];
+  return tls.edges
+    .map(e => e?.listItem?.id)
+    .filter(id => typeof id === "string" && id.startsWith("tt"));
+}
+
+async function fetchImdbNextDataIds(listUrl) {
+  const html = await fetchText(withParam(listUrl, "_", Date.now()));
+  const nextData = extractImdbNextData(html);
+  if (!nextData) return [];
+  return nextDataToTconsts(nextData);
+}
+
 function toMobileImdbUrl(url) {
   try {
     const u = new URL(url);
@@ -1022,6 +1062,9 @@ async function fetchImdbListIdsAllPages(listUrl, maxPages = 80) {
 async function fetchImdbWatchlistIdsAllPages(listUrl, maxPages = 80) {
   const graphIds = await fetchImdbWatchlistIdsGraphql(listUrl).catch(() => []);
   if (graphIds.length > 25) return graphIds;
+
+  const nextDataIds = await fetchImdbNextDataIds(listUrl).catch(() => []);
+  if (nextDataIds.length > 25) return nextDataIds;
 
   const mobileIds = await fetchImdbMobileIdsAllPages(listUrl, maxPages).catch(() => []);
   if (mobileIds.length > 25) return mobileIds;
