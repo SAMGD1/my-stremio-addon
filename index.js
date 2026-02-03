@@ -34,6 +34,7 @@ const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
 const FROZEN_DIR    = "data/frozen";
 const BACKUP_DIR    = "data/backup";
+const OFFLINE_DIR   = "data/manual";
 
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
@@ -95,7 +96,7 @@ let PREFS = {
   sortOptions: {},        // { listId: ['custom', 'date_desc', ...] }
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
   upgradeEpisodes: UPGRADE_EPISODES,
-  mainList: "",
+  mainLists: [],
   tmdbKey: TMDB_API_KEY || "",
   tmdbKeyValid: null,
   displayNames: {},       // { listId: "Custom Name" }
@@ -134,10 +135,36 @@ const isImdbCustomId = v => /^imdb:[a-z0-9._-]+$/i.test(String(v||""));
 const isTraktListId = v => /^trakt:[^:]+:[^:]+$/i.test(String(v||""));
 const isCustomListId = v => /^custom:[a-z0-9._:-]+$/i.test(String(v||""));
 const isListId = v => isImdbListId(v) || isTraktListId(v) || isImdbCustomId(v) || isCustomListId(v);
+const isOfflineList = lsid => !!(PREFS.customLists && PREFS.customLists[lsid]?.kind === "offline");
 
 function extractImdbId(value) {
   const m = String(value || "").match(/tt\d{7,}/i);
   return m ? m[0] : "";
+}
+
+function parseImdbCsv(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const ids = [];
+  const seen = new Set();
+  for (const line of lines) {
+    const tt = extractImdbId(line);
+    if (!tt || seen.has(tt)) continue;
+    seen.add(tt);
+    ids.push(tt);
+  }
+  return ids;
+}
+
+function appendUniqueIds(base, incoming) {
+  const out = Array.isArray(base) ? base.slice() : [];
+  const seen = new Set(out);
+  for (const tt of incoming || []) {
+    if (!isImdb(tt)) continue;
+    if (seen.has(tt)) continue;
+    seen.add(tt);
+    out.push(tt);
+  }
+  return out;
 }
 
 function resolveStreamImdbId(rawId) {
@@ -147,48 +174,64 @@ function resolveStreamImdbId(rawId) {
   return base;
 }
 
-async function addImdbToMainList(imdbId) {
-  const mainList = PREFS.mainList;
-  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
-  const list = LISTS[mainList];
+async function addImdbToList(lsid, imdbId) {
+  if (!isListId(lsid)) return { ok: false, reason: "no_list" };
+  const list = LISTS[lsid];
   if (!list) return { ok: false, reason: "missing" };
+  if (isOfflineList(lsid)) {
+    list.ids = appendUniqueIds(list.ids || [], [imdbId]);
+    list.orders = list.orders || {};
+    list.orders.imdb = list.ids.slice();
+    await saveOfflineList(lsid);
+    await getBestMeta(imdbId).catch(() => null);
+    CARD.set(imdbId, cardFor(imdbId));
+    await persistSnapshot();
+    return { ok: true, lsid };
+  }
   PREFS.listEdits = PREFS.listEdits || {};
-  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  const edits = PREFS.listEdits[lsid] || { added: [], removed: [] };
   edits.added = Array.isArray(edits.added) ? edits.added : [];
   edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
 
-  const current = new Set(listIdsWithEdits(mainList));
+  const current = new Set(listIdsWithEdits(lsid));
   if (!current.has(imdbId)) {
     edits.added = edits.added.filter(id => id !== imdbId);
     edits.added.push(imdbId);
   }
   edits.removed = edits.removed.filter(id => id !== imdbId);
-  PREFS.listEdits[mainList] = edits;
-  syncFrozenEdits(mainList);
+  PREFS.listEdits[lsid] = edits;
+  syncFrozenEdits(lsid);
 
   await getBestMeta(imdbId).catch(() => null);
   CARD.set(imdbId, cardFor(imdbId));
   await persistSnapshot();
-  return { ok: true, mainList };
+  return { ok: true, lsid };
 }
 
-async function removeImdbFromMainList(imdbId) {
-  const mainList = PREFS.mainList;
-  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
-  const list = LISTS[mainList];
+async function removeImdbFromList(lsid, imdbId) {
+  if (!isListId(lsid)) return { ok: false, reason: "no_list" };
+  const list = LISTS[lsid];
   if (!list) return { ok: false, reason: "missing" };
+  if (isOfflineList(lsid)) {
+    list.ids = (list.ids || []).filter(id => id !== imdbId);
+    list.orders = list.orders || {};
+    list.orders.imdb = list.ids.slice();
+    await saveOfflineList(lsid);
+    await persistSnapshot();
+    return { ok: true, lsid };
+  }
   PREFS.listEdits = PREFS.listEdits || {};
-  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  const edits = PREFS.listEdits[lsid] || { added: [], removed: [] };
   edits.added = Array.isArray(edits.added) ? edits.added : [];
   edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
 
   edits.added = edits.added.filter(id => id !== imdbId);
   if (!edits.removed.includes(imdbId)) edits.removed.push(imdbId);
-  PREFS.listEdits[mainList] = edits;
-  syncFrozenEdits(mainList);
+  PREFS.listEdits[lsid] = edits;
+  syncFrozenEdits(lsid);
 
   await persistSnapshot();
-  return { ok: true, mainList };
+  return { ok: true, lsid };
 }
 
 const TMDB_PLACEHOLDER_IMDB = "tt0111161";
@@ -434,6 +477,121 @@ async function loadSnapshot() {
   } catch { return null; }
 }
 
+function offlineFileName(lsid) {
+  const safe = String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
+  return `${OFFLINE_DIR}/${safe}.json`;
+}
+function offlineRelPath(lsid) {
+  const safe = String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
+  return `data/manual/${safe}.json`;
+}
+
+async function saveOfflineList(lsid) {
+  if (!isOfflineList(lsid)) return;
+  const list = LISTS[lsid];
+  if (!list) return;
+  try {
+    await fs.mkdir(OFFLINE_DIR, { recursive: true });
+    const payload = {
+      id: lsid,
+      name: sanitizeName(listDisplayName(lsid)),
+      ids: Array.isArray(list.ids) ? list.ids : [],
+      orders: list.orders || {},
+      createdAt: PREFS.customLists?.[lsid]?.createdAt || Date.now(),
+      updatedAt: Date.now()
+    };
+    await fs.writeFile(offlineFileName(lsid), JSON.stringify(payload, null, 2), "utf8");
+    if (GH_ENABLED) {
+      const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
+      const relPath = offlineRelPath(lsid);
+      await ghPutWithRetry(relPath, async () => {
+        const sha = await ghGetSha(relPath);
+        const body = { message: `Update manual list ${lsid}`, content, branch: GITHUB_BRANCH };
+        if (sha) body.sha = sha;
+        return body;
+      });
+    }
+  } catch (e) {
+    console.warn("[OFFLINE] save failed:", e.message || e);
+  }
+}
+
+async function deleteOfflineListFile(lsid) {
+  try {
+    await fs.unlink(offlineFileName(lsid));
+  } catch {/* ignore */}
+  await ghDeleteFile(offlineRelPath(lsid));
+}
+
+async function loadOfflineLists() {
+  try {
+    if (GH_ENABLED) {
+      const entries = await ghListDir("data/manual");
+      for (const entry of entries) {
+        if (!entry || entry.type !== "file" || !entry.name.endsWith(".json")) continue;
+        try {
+          const data = await gh("GET", `/contents/${encodeURIComponent(entry.path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+          const buf = Buffer.from(data.content, "base64").toString("utf8");
+          const payload = JSON.parse(buf);
+          const id = String(payload?.id || "").trim();
+          if (!isCustomListId(id)) continue;
+          const ids = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
+          const name = sanitizeName(payload.name || id);
+          LISTS[id] = {
+            id,
+            name,
+            url: null,
+            ids: ids.slice(),
+            orders: payload.orders || { imdb: ids.slice() }
+          };
+          PREFS.customLists = PREFS.customLists || {};
+          if (!PREFS.customLists[id]) {
+            PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
+          } else {
+            PREFS.customLists[id].kind = "offline";
+          }
+          PREFS.displayNames = PREFS.displayNames || {};
+          if (name) PREFS.displayNames[id] = name;
+        } catch (e) {
+          console.warn("[OFFLINE] load failed:", entry.path, e.message || e);
+        }
+      }
+    }
+    await fs.mkdir(OFFLINE_DIR, { recursive: true });
+    const entries = await fs.readdir(OFFLINE_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      try {
+        const txt = await fs.readFile(`${OFFLINE_DIR}/${entry.name}`, "utf8");
+        const data = JSON.parse(txt);
+        const id = String(data?.id || "").trim();
+        if (!isCustomListId(id)) continue;
+        const ids = Array.isArray(data.ids) ? data.ids.filter(isImdb) : [];
+        const name = sanitizeName(data.name || id);
+        LISTS[id] = {
+          id,
+          name,
+          url: null,
+          ids: ids.slice(),
+          orders: data.orders || { imdb: ids.slice() }
+        };
+        PREFS.customLists = PREFS.customLists || {};
+        if (!PREFS.customLists[id]) {
+          PREFS.customLists[id] = { kind: "offline", sources: ["offline"], createdAt: data.createdAt || Date.now() };
+        } else {
+          PREFS.customLists[id].kind = "offline";
+        }
+        PREFS.displayNames = PREFS.displayNames || {};
+        if (name) PREFS.displayNames[id] = name;
+      } catch (e) {
+        console.warn("[OFFLINE] load failed:", entry.name, e.message || e);
+      }
+    }
+  } catch (e) {
+    console.warn("[OFFLINE] load directory failed:", e.message || e);
+  }
+}
+
 async function persistSnapshot() {
   await saveSnapshot({
     lastSyncAt: LAST_SYNC_AT,
@@ -529,7 +687,7 @@ async function persistLinkBackupConfigs() {
     entry.sortKey = PREFS.perListSort?.[lsid] || entry.sortKey || "name_asc";
     entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
     entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : (entry.customOrder || []);
-    entry.main = PREFS.mainList === lsid;
+    entry.main = Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid);
     entry.savedAt = Date.now();
     await saveLinkBackupConfig(lsid, entry);
   }
@@ -591,8 +749,9 @@ function restoreLinkBackupConfigEntry(lsid, data) {
       PREFS.customOrder[lsid] = data.customOrder.slice();
     }
   }
-  if (data?.main && !PREFS.mainList) {
-    PREFS.mainList = lsid;
+  if (data?.main) {
+    PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
+    if (!PREFS.mainLists.includes(lsid)) PREFS.mainLists.push(lsid);
   }
 }
 async function loadFrozenBackups() {
@@ -1593,7 +1752,8 @@ function manifestKey() {
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
 
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${PREFS.mainList || ""}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
+  const mainLists = JSON.stringify(PREFS.mainLists || []);
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
 }
 
 async function harvestSources() {
@@ -2122,6 +2282,7 @@ function parseExtra(extraStr, qObj){
 function listIdsWithEdits(lsid) {
   const list = LISTS[lsid];
   if (!list) return [];
+  if (isOfflineList(lsid)) return (list.ids || []).slice();
   let ids = (list.ids || []).slice();
   const ed = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
   const removed = new Set((ed.removed || []).filter(isImdb));
@@ -2243,33 +2404,28 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     const imdbId = resolveStreamImdbId(req.params.id);
     if (!imdbId) return res.json({ streams: [] });
 
-    const mainList = PREFS.mainList;
-    if (!isListId(mainList)) {
+    const mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists.filter(isListId) : [];
+    if (!mainLists.length) {
       return res.json({
         streams: [{
-          title: "You have not selected a main list.",
+          title: "You have not selected any Stremlist.",
           externalUrl: `stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId}`
         }]
       });
     }
 
-    const listName = listDisplayName(mainList);
     const keyParam = SHARED_SECRET ? `?key=${encodeURIComponent(SHARED_SECRET)}` : "";
-    const inList = listIdsWithEdits(mainList).includes(imdbId);
-    if (inList) {
-      return res.json({
-        streams: [{
-          title: `➖ Remove this title from ${listName}`,
-          url: `${absoluteBase(req)}/stream-remove/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
-        }]
-      });
+    const streams = [];
+    for (const lsid of mainLists) {
+      const listName = listDisplayName(lsid);
+      const inList = listIdsWithEdits(lsid).includes(imdbId);
+      const action = inList ? "Remove" : "Save";
+      const symbol = inList ? "➖" : "➕";
+      const path = inList ? "stream-remove" : "stream-add";
+      const url = `${absoluteBase(req)}/${path}/${encodeURIComponent(req.params.type)}/${imdbId}?list=${encodeURIComponent(lsid)}${SHARED_SECRET ? `&key=${encodeURIComponent(SHARED_SECRET)}` : ""}`;
+      streams.push({ title: `${symbol} ${action} this title ${inList ? "from" : "to"} ${listName}`, url });
     }
-    return res.json({
-      streams: [{
-        title: `➕ Save this title to ${listName}`,
-        url: `${absoluteBase(req)}/stream-add/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
-      }]
-    });
+    return res.json({ streams });
   } catch (e) {
     console.error("stream:", e);
     res.status(500).send("Internal Server Error");
@@ -2280,9 +2436,8 @@ app.get("/stream-add/:type/:id", async (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     const imdbId = resolveStreamImdbId(req.params.id);
-    if (imdbId) {
-      await addImdbToMainList(imdbId);
-    }
+    const lsid = String(req.query.list || "");
+    if (imdbId) await addImdbToList(lsid, imdbId);
     res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
   } catch (e) {
     console.error("stream-add:", e);
@@ -2294,9 +2449,8 @@ app.get("/stream-remove/:type/:id", async (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     const imdbId = resolveStreamImdbId(req.params.id);
-    if (imdbId) {
-      await removeImdbFromMainList(imdbId);
-    }
+    const lsid = String(req.query.list || "");
+    if (imdbId) await removeImdbFromList(lsid, imdbId);
     res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
   } catch (e) {
     console.error("stream-remove:", e);
@@ -2320,7 +2474,9 @@ app.post("/api/prefs", async (req,res) => {
     PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
-    PREFS.mainList        = isListId(body.mainList) ? body.mainList : "";
+    PREFS.mainLists       = Array.isArray(body.mainLists)
+      ? body.mainLists.filter(isListId)
+      : (PREFS.mainLists || []);
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : (PREFS.perListSort || {});
     PREFS.sortReverse     = body.sortReverse && typeof body.sortReverse === "object"
       ? Object.fromEntries(Object.entries(body.sortReverse).map(([k,v]) => [k, !!v]))
@@ -2347,6 +2503,9 @@ app.post("/api/prefs", async (req,res) => {
     };
 
     PREFS.blocked = Array.isArray(body.blocked) ? body.blocked.filter(isListId) : (PREFS.blocked || []);
+    if (!Array.isArray(body.mainLists) && isListId(body.mainList)) {
+      PREFS.mainLists = [body.mainList];
+    }
 
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
@@ -2411,6 +2570,10 @@ app.post("/api/list-rename", async (req, res) => {
     PREFS.displayNames = PREFS.displayNames || {};
     if (name) PREFS.displayNames[lsid] = name;
     else delete PREFS.displayNames[lsid];
+    if (isOfflineList(lsid) && LISTS[lsid]) {
+      LISTS[lsid].name = name || LISTS[lsid].name;
+      await saveOfflineList(lsid);
+    }
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
     await persistSnapshot();
     res.json({ ok: true, name });
@@ -2423,6 +2586,7 @@ app.post("/api/list-freeze", async (req, res) => {
     const lsid = String(req.body.lsid || "");
     const frozen = !!req.body.frozen;
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+    if (isOfflineList(lsid)) return res.status(400).send("Offline lists cannot be frozen");
     PREFS.frozenLists = PREFS.frozenLists || {};
     if (frozen) {
       const list = LISTS[lsid];
@@ -2447,8 +2611,9 @@ app.post("/api/list-duplicate", async (req, res) => {
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
     const source = LISTS[lsid];
     if (!source) return res.status(404).send("List not found");
-    const newId = makeCustomListId("duplicate");
     const ids = listIdsWithEdits(lsid);
+    const isOffline = isOfflineList(lsid);
+    const newId = makeCustomListId(isOffline ? "offline" : "duplicate");
     LISTS[newId] = {
       id: newId,
       name: name || `Copy of ${listDisplayName(lsid)}`,
@@ -2457,15 +2622,74 @@ app.post("/api/list-duplicate", async (req, res) => {
       orders: { imdb: ids.slice() }
     };
     PREFS.customLists = PREFS.customLists || {};
-    PREFS.customLists[newId] = { kind: "duplicate", sources: [lsid], createdAt: Date.now() };
+    PREFS.customLists[newId] = { kind: isOffline ? "offline" : "duplicate", sources: [lsid], createdAt: Date.now() };
     PREFS.displayNames = PREFS.displayNames || {};
     if (name) PREFS.displayNames[newId] = name;
     PREFS.order = Array.isArray(PREFS.order) ? PREFS.order.concat(newId) : [newId];
     PREFS.enabled = Array.isArray(PREFS.enabled) ? Array.from(new Set([ ...PREFS.enabled, newId ])) : [newId];
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
+    if (isOffline) await saveOfflineList(newId);
     await persistSnapshot();
     res.json({ ok: true, id: newId });
   } catch (e) { res.status(500).send("Duplicate failed"); }
+});
+
+app.post("/api/create-offline-list", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const name = sanitizeName(req.body.name || "");
+    const idsFromBody = Array.isArray(req.body.ids) ? req.body.ids.filter(isImdb) : [];
+    const csvText = String(req.body.csvText || "");
+    const csvIds = csvText ? parseImdbCsv(csvText) : [];
+    const ids = appendUniqueIds([], idsFromBody.concat(csvIds));
+    if (!name) return res.status(400).send("Name required");
+    const newId = makeCustomListId("offline");
+    LISTS[newId] = {
+      id: newId,
+      name,
+      url: null,
+      ids: ids.slice(),
+      orders: { imdb: ids.slice() }
+    };
+    PREFS.customLists = PREFS.customLists || {};
+    PREFS.customLists[newId] = { kind: "offline", sources: ["manual"], createdAt: Date.now() };
+    PREFS.displayNames = PREFS.displayNames || {};
+    PREFS.displayNames[newId] = name;
+    PREFS.order = Array.isArray(PREFS.order) ? PREFS.order.concat(newId) : [newId];
+    PREFS.enabled = Array.isArray(PREFS.enabled) ? Array.from(new Set([ ...PREFS.enabled, newId ])) : [newId];
+    for (const tt of ids) {
+      await getBestMeta(tt).catch(() => null);
+      CARD.set(tt, cardFor(tt));
+    }
+    await saveOfflineList(newId);
+    LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
+    await persistSnapshot();
+    res.json({ ok: true, id: newId });
+  } catch (e) { res.status(500).send("Create offline list failed"); }
+});
+
+app.post("/api/list-import-csv", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const lsid = String(req.body.lsid || "");
+    const csvText = String(req.body.csvText || "");
+    if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
+    if (!isOfflineList(lsid)) return res.status(400).send("CSV upload only for offline lists");
+    const list = LISTS[lsid];
+    if (!list) return res.status(404).send("List not found");
+    const newIds = parseImdbCsv(csvText);
+    list.ids = appendUniqueIds(list.ids || [], newIds);
+    list.orders = list.orders || {};
+    list.orders.imdb = list.ids.slice();
+    for (const tt of newIds) {
+      await getBestMeta(tt).catch(() => null);
+      CARD.set(tt, cardFor(tt));
+    }
+    await saveOfflineList(lsid);
+    LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
+    await persistSnapshot();
+    res.json({ ok: true, added: newIds.length, total: list.ids.length });
+  } catch (e) { res.status(500).send("CSV import failed"); }
 });
 
 app.post("/api/list-merge", async (req, res) => {
@@ -2519,10 +2743,14 @@ app.post("/api/delete-custom-list", async (req, res) => {
     if (PREFS.perListSort) delete PREFS.perListSort[lsid];
     if (PREFS.sortOptions) delete PREFS.sortOptions[lsid];
     if (PREFS.sortReverse) delete PREFS.sortReverse[lsid];
-    if (PREFS.mainList === lsid) PREFS.mainList = "";
+    if (Array.isArray(PREFS.mainLists)) {
+      PREFS.mainLists = PREFS.mainLists.filter(id => id !== lsid);
+    }
+    if (PREFS.blocked) PREFS.blocked = PREFS.blocked.filter(id => id !== lsid);
     PREFS.enabled = (PREFS.enabled || []).filter(id => id !== lsid);
     PREFS.order = (PREFS.order || []).filter(id => id !== lsid);
     await deleteFrozenBackup(lsid);
+    await deleteOfflineListFile(lsid);
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
     await persistSnapshot();
     res.json({ ok: true });
@@ -2631,11 +2859,20 @@ app.post("/api/list-add", async (req, res) => {
     if (!isListId(lsid) || !m) return res.status(400).send("Bad input");
     tt = m[0];
 
-    PREFS.listEdits = PREFS.listEdits || {};
-    const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
-    if (!ed.added.includes(tt)) ed.added.push(tt);
-    ed.removed = (ed.removed || []).filter(x => x !== tt);
-    syncFrozenEdits(lsid);
+    if (isOfflineList(lsid)) {
+      const list = LISTS[lsid];
+      if (!list) return res.status(404).send("List not found");
+      list.ids = appendUniqueIds(list.ids || [], [tt]);
+      list.orders = list.orders || {};
+      list.orders.imdb = list.ids.slice();
+      await saveOfflineList(lsid);
+    } else {
+      PREFS.listEdits = PREFS.listEdits || {};
+      const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+      if (!ed.added.includes(tt)) ed.added.push(tt);
+      ed.removed = (ed.removed || []).filter(x => x !== tt);
+      syncFrozenEdits(lsid);
+    }
 
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
@@ -2656,12 +2893,21 @@ app.post("/api/list-remove", async (req, res) => {
     if (!isListId(lsid) || !m) return res.status(400).send("Bad input");
     tt = m[0];
 
-    PREFS.listEdits = PREFS.listEdits || {};
-    const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+    if (isOfflineList(lsid)) {
+      const list = LISTS[lsid];
+      if (!list) return res.status(404).send("List not found");
+      list.ids = (list.ids || []).filter(id => id !== tt);
+      list.orders = list.orders || {};
+      list.orders.imdb = list.ids.slice();
+      await saveOfflineList(lsid);
+    } else {
+      PREFS.listEdits = PREFS.listEdits || {};
+      const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
 
-    if (!ed.removed.includes(tt)) ed.removed.push(tt);
-    ed.added = (ed.added || []).filter(x => x !== tt);
-    syncFrozenEdits(lsid);
+      if (!ed.removed.includes(tt)) ed.removed.push(tt);
+      ed.added = (ed.added || []).filter(x => x !== tt);
+      syncFrozenEdits(lsid);
+    }
 
     await persistSnapshot();
 
@@ -2677,7 +2923,9 @@ app.post("/api/list-reset", async (req, res) => {
     if (!isListId(lsid)) return res.status(400).send("Bad input");
     if (PREFS.customOrder) delete PREFS.customOrder[lsid];
     if (PREFS.listEdits) delete PREFS.listEdits[lsid];
-    syncFrozenEdits(lsid);
+    if (!isOfflineList(lsid)) {
+      syncFrozenEdits(lsid);
+    }
 
     await persistSnapshot();
 
@@ -2751,7 +2999,7 @@ app.post("/api/link-backup", async (req,res) => {
       const sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
       const customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
       const name = listDisplayName(lsid);
-      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: PREFS.mainList === lsid, savedAt: Date.now() };
+      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid), savedAt: Date.now() };
       PREFS.backupConfigs[lsid] = config;
       await saveLinkBackupConfig(lsid, config);
     } else {
@@ -2785,7 +3033,9 @@ app.post("/api/block-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
-    if (PREFS.mainList === lsid) PREFS.mainList = "";
+    if (Array.isArray(PREFS.mainLists)) {
+      PREFS.mainLists = PREFS.mainLists.filter(id => id !== lsid);
+    }
     if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
     await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
@@ -2816,7 +3066,9 @@ app.post("/api/remove-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
-    if (PREFS.mainList === lsid) PREFS.mainList = "";
+    if (Array.isArray(PREFS.mainLists)) {
+      PREFS.mainLists = PREFS.mainLists.filter(id => id !== lsid);
+    }
     if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
     await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
@@ -3011,6 +3263,83 @@ app.get("/admin", async (req,res)=>{
     margin-bottom:8px;
     margin-top:4px;
   }
+  .rowtools-spacer{flex:1}
+  .create-panel{
+    display:none;
+    margin-top:12px;
+    padding:12px;
+    border:1px solid var(--border);
+    border-radius:12px;
+    background:#15122c;
+  }
+  .create-panel.active{display:block;}
+  .create-layout{
+    display:grid;
+    gap:14px;
+    grid-template-columns:1.2fr .8fr;
+    grid-template-areas:
+      "name actions"
+      "csv imdb"
+      "meta meta";
+    align-items:start;
+  }
+  .create-name{grid-area:name;}
+  .create-actions{grid-area:actions;justify-self:end;text-align:right;}
+  .create-actions .actions-stack{
+    align-items:flex-end;
+  }
+  .create-csv{grid-area:csv;}
+  .create-imdb{grid-area:imdb;}
+  .create-meta{grid-area:meta;}
+  .actions-stack{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    align-items:flex-start;
+  }
+  .create-actions button{
+    min-width:110px;
+    justify-content:center;
+  }
+  .name-input{
+    max-width:260px;
+  }
+  .csv-drop{
+    position:relative;
+    border:1px dashed rgba(170, 144, 255, 0.65);
+    background:rgba(127, 120, 255, 0.15);
+    padding:22px;
+    border-radius:18px;
+    text-align:center;
+    color:#dcd8ff;
+    cursor:pointer;
+    transition:background .2s ease, border-color .2s ease;
+    min-height:150px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:6px;
+  }
+  .csv-drop.dragover{
+    border-color:#c5b6ff;
+    background:rgba(127, 120, 255, 0.25);
+  }
+  .csv-drop .csv-card{
+    background:rgba(12,10,26,.55);
+    border:1px solid rgba(90,80,180,.6);
+    border-radius:12px;
+    padding:8px 12px;
+    box-shadow:0 8px 18px rgba(0,0,0,.25);
+  }
+  .csv-drop input{
+    position:absolute;
+    inset:0;
+    opacity:0;
+    width:100%;
+    height:100%;
+    cursor:pointer;
+  }
   .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
   .pill{
     display:inline-flex;
@@ -3040,6 +3369,16 @@ app.get("/admin", async (req,res)=>{
     gap:10px;
     grid-template-columns:1fr 110px;
     margin-bottom:8px;
+  }
+  .imdb-box{
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:12px;
+    background:rgba(12,10,26,.45);
+  }
+  .imdb-box input{
+    width:100%;
+    box-sizing:border-box;
   }
   .sort-wrap{display:flex;align-items:center;gap:6px;}
   .sort-reverse-btn{
@@ -3362,6 +3701,43 @@ app.get("/admin", async (req,res)=>{
       <div class="rowtools">
         <label class="pill"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
         <span class="mini muted">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
+        <span class="rowtools-spacer"></span>
+        <button id="createOfflineBtn" type="button">＋ Create list</button>
+      </div>
+      <div id="createOfflinePanel" class="create-panel">
+        <div class="create-layout">
+          <div class="create-name">
+            <label class="mini">List name</label>
+            <input id="offlineListName" class="name-input" type="text" placeholder="Name your list" />
+          </div>
+          <div class="create-actions">
+            <div class="actions-stack">
+              <button id="offlineSaveBtn" type="button">Save list</button>
+              <button id="offlineCancelBtn" type="button">Cancel</button>
+              <span id="offlineSaveStatus" class="mini muted"></span>
+            </div>
+          </div>
+          <div class="create-csv">
+            <label class="mini">Add CSV from IMDb</label>
+            <label class="csv-drop" id="offlineCsvDrop">
+              <input id="offlineCsvInput" type="file" accept=".csv,text/csv" />
+              <div class="csv-card">
+                <div><b>Drop your IMDb CSV</b> or click to upload</div>
+                <div class="mini muted">We read IMDb tt... IDs in order.</div>
+              </div>
+              <div id="offlineCsvStatus" class="mini muted"></div>
+            </label>
+          </div>
+          <div class="create-imdb">
+            <div class="imdb-box">
+              <label class="mini">Add by IMDb ID (tt...)</label>
+              <input id="offlineAddIdInput" type="text" placeholder="tt1234567 or IMDb URL" />
+            </div>
+          </div>
+          <div class="create-meta">
+            <div class="mini muted">Items queued: <span id="offlineItemCount">0</span></div>
+          </div>
+        </div>
       </div>
       <div id="mergeBuilder" class="merge-box" style="display:none;"></div>
       <div id="prefs"></div>
@@ -3498,6 +3874,120 @@ function wireAddButtons(){
 
 }
 
+function wireOfflineCreatePanel(refresh) {
+  const btn = document.getElementById('createOfflineBtn');
+  const panel = document.getElementById('createOfflinePanel');
+  const nameInput = document.getElementById('offlineListName');
+  const addInput = document.getElementById('offlineAddIdInput');
+  const csvInput = document.getElementById('offlineCsvInput');
+  const csvDrop = document.getElementById('offlineCsvDrop');
+  const csvStatus = document.getElementById('offlineCsvStatus');
+  const saveBtn = document.getElementById('offlineSaveBtn');
+  const cancelBtn = document.getElementById('offlineCancelBtn');
+  const saveStatus = document.getElementById('offlineSaveStatus');
+  const countEl = document.getElementById('offlineItemCount');
+  if (!btn || !panel) return;
+
+  let draftIds = [];
+
+  const updateCount = () => {
+    if (countEl) countEl.textContent = String(draftIds.length);
+  };
+  const reset = () => {
+    draftIds = [];
+    if (nameInput) nameInput.value = '';
+    if (addInput) addInput.value = '';
+    if (csvInput) csvInput.value = '';
+    if (csvStatus) csvStatus.textContent = '';
+    if (saveStatus) saveStatus.textContent = '';
+    panel.classList.remove('active');
+    updateCount();
+  };
+
+  btn.onclick = () => {
+    panel.classList.toggle('active');
+    if (panel.classList.contains('active') && nameInput) nameInput.focus();
+  };
+
+  if (addInput) {
+    addInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const m = (addInput.value || '').match(/tt\\d{7,}/i);
+      if (!m) { alert('Enter a valid IMDb id'); return; }
+      const id = m[0];
+      if (!draftIds.includes(id)) draftIds.push(id);
+      addInput.value = '';
+      updateCount();
+    });
+  }
+
+  const handleCsvFile = async (file) => {
+    if (!file) return;
+    if (csvStatus) csvStatus.textContent = 'Reading CSV…';
+    try {
+      const text = await file.text();
+      const ids = parseCsvImdbIds(text);
+      ids.forEach(id => { if (!draftIds.includes(id)) draftIds.push(id); });
+      if (csvStatus) csvStatus.textContent = 'Added ' + ids.length + ' IMDb IDs from CSV.';
+      updateCount();
+    } catch (e) {
+      if (csvStatus) csvStatus.textContent = 'Failed to read CSV.';
+    } finally {
+      if (csvInput) csvInput.value = '';
+    }
+  };
+  if (csvInput) {
+    csvInput.onchange = async () => {
+      const file = csvInput.files && csvInput.files[0];
+      await handleCsvFile(file);
+    };
+  }
+  if (csvDrop) {
+    csvDrop.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      csvDrop.classList.add('dragover');
+    });
+    csvDrop.addEventListener('dragleave', () => {
+      csvDrop.classList.remove('dragover');
+    });
+    csvDrop.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      csvDrop.classList.remove('dragover');
+      const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      await handleCsvFile(file);
+    });
+  }
+
+  if (saveBtn) {
+    saveBtn.onclick = async () => {
+      const name = (nameInput?.value || '').trim();
+      if (!name) { alert('List name is required.'); return; }
+      saveBtn.disabled = true;
+      if (saveStatus) saveStatus.textContent = 'Saving…';
+      try {
+        const r = await fetch('/api/create-offline-list?admin=' + ADMIN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, ids: draftIds })
+        });
+        if (!r.ok) throw new Error(await r.text());
+        if (saveStatus) saveStatus.textContent = 'Saved.';
+        reset();
+        if (typeof refresh === 'function') await refresh();
+      } catch (e) {
+        if (saveStatus) saveStatus.textContent = e.message || 'Save failed.';
+      } finally {
+        saveBtn.disabled = false;
+      }
+    };
+  }
+
+  if (cancelBtn) {
+    cancelBtn.onclick = () => reset();
+  }
+}
+
 function el(tag, attrs={}, kids=[]) {
   const e = document.createElement(tag);
   for (const k in attrs) {
@@ -3511,6 +4001,20 @@ function el(tag, attrs={}, kids=[]) {
 function isCtrl(node){
   const t = (node && node.tagName || "").toLowerCase();
   return t === "input" || t === "select" || t === "button" || t === "a" || t === "label" || t === "textarea";
+}
+function parseCsvImdbIds(text){
+  const lines = String(text || '').split(/\\r?\\n/);
+  const ids = [];
+  const seen = new Set();
+  for (const line of lines) {
+    const m = line.match(/tt\\d{7,}/i);
+    if (!m) continue;
+    const tt = m[0];
+    if (seen.has(tt)) continue;
+    seen.add(tt);
+    ids.push(tt);
+  }
+  return ids;
 }
 
 // Row drag (table tbody)
@@ -3931,7 +4435,7 @@ async function render() {
   const thead = el('thead', {}, [el('tr',{},[
     el('th',{text:''}),
     el('th',{text:'Enabled'}),
-    el('th',{text:'Main'}),
+    el('th',{text:'Stremlist'}),
     el('th',{text:'Move'}),
     el('th',{text:'List (id)'}),
     el('th',{text:'Items'}),
@@ -4155,6 +4659,7 @@ async function render() {
     const customMeta = customMap[lsid];
     const isFrozen = !!frozenMap[lsid];
     const isCustom = !!customMeta;
+    const isOfflineList = customMeta?.kind === 'offline';
     const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
 
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
@@ -4163,13 +4668,18 @@ async function render() {
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
-    const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 2.8 10.7a1 1 0 0 0 1.3 1.5l1.9-1.5V20a1 1 0 0 0 1 1h4.5a1 1 0 0 0 1-1v-4h2v4a1 1 0 0 0 1 1H20a1 1 0 0 0 1-1v-9.3l1.9 1.5a1 1 0 1 0 1.3-1.5L12 3.2z"/></svg>';
-    const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" transform="rotate(45 12 12)"></rect><path d="M10.2 8.7a1 1 0 0 0-1.5.9v4.8a1 1 0 0 0 1.5.9l4.6-2.4a1 1 0 0 0 0-1.8l-4.6-2.4z" fill="currentColor"></path></svg>';
+    const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Toggle Stremlist save link' });
     mainBtn.innerHTML = mainBtnSvg;
 
     function handleMainToggle(e) {
       if (e) e.preventDefault();
-      prefs.mainList = prefs.mainList === lsid ? "" : lsid;
+      prefs.mainLists = Array.isArray(prefs.mainLists) ? prefs.mainLists : [];
+      if (prefs.mainLists.includes(lsid)) {
+        prefs.mainLists = prefs.mainLists.filter(id => id !== lsid);
+      } else {
+        prefs.mainLists.push(lsid);
+      }
       saveAll('Saved').then(refresh);
     }
 
@@ -4239,9 +4749,9 @@ async function render() {
     const cloudBtn = el('button', { type: 'button', class: 'icon-btn cloud', title: 'Backup list link' });
     cloudBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 18a4.5 4.5 0 0 1-.5-8.98A6 6 0 0 1 18 8a4 4 0 0 1 .5 7.98H7.5zm8-6.5a1 1 0 0 0-1.7-.7l-1.3 1.3V9.5a1 1 0 1 0-2 0v2.6l-1.3-1.3a1 1 0 1 0-1.4 1.4l3 3a1 1 0 0 0 1.4 0l3-3a1 1 0 0 0 .3-.7z"/></svg>';
     if (backupActive) cloudBtn.classList.add('active');
-    if (isCustom) {
+    if (isOfflineList) {
       cloudBtn.disabled = true;
-      cloudBtn.title = 'Custom lists have no backup link';
+      cloudBtn.title = 'Offline lists have no backup link';
     } else {
       cloudBtn.onclick = async () => {
         cloudBtn.disabled = true;
@@ -4295,46 +4805,50 @@ async function render() {
     renameRow.appendChild(renameStatus);
 
     const actionRow = el('div', { class: 'advanced-row' });
-    const freezeBtn = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Star / Freeze' });
-    const syncBtn = el('button', { type: 'button', text: 'Sync/Update now' });
     const dupBtn = el('button', { type: 'button', text: 'Duplicate' });
     const status = el('span', { class: 'mini muted' });
-    freezeBtn.onclick = async () => {
-      freezeBtn.disabled = true;
-      status.textContent = isFrozen ? 'Unfreezing…' : 'Freezing…';
-      try {
-        const r = await fetch('/api/list-freeze?admin=' + ADMIN, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ lsid, frozen: !isFrozen })
-        });
-        if (!r.ok) throw new Error(await r.text());
-        status.textContent = !isFrozen ? 'Frozen.' : 'Unfrozen.';
-        await refresh();
-      } catch (e) {
-        status.textContent = e.message || 'Freeze failed.';
-      } finally {
-        freezeBtn.disabled = false;
-      }
-    };
-    syncBtn.onclick = async () => {
-      syncBtn.disabled = true;
-      status.textContent = 'Syncing…';
-      try {
-        const r = await fetch('/api/list-manual-sync?admin=' + ADMIN, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ lsid })
-        });
-        if (!r.ok) throw new Error(await r.text());
-        status.textContent = 'Synced.';
-        await refresh();
-      } catch (e) {
-        status.textContent = e.message || 'Manual sync failed.';
-      } finally {
-        syncBtn.disabled = false;
-      }
-    };
+    if (!isOfflineList) {
+      const freezeBtn = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Star / Freeze' });
+      const syncBtn = el('button', { type: 'button', text: 'Sync/Update now' });
+      freezeBtn.onclick = async () => {
+        freezeBtn.disabled = true;
+        status.textContent = isFrozen ? 'Unfreezing…' : 'Freezing…';
+        try {
+          const r = await fetch('/api/list-freeze?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, frozen: !isFrozen })
+          });
+          if (!r.ok) throw new Error(await r.text());
+          status.textContent = !isFrozen ? 'Frozen.' : 'Unfrozen.';
+          await refresh();
+        } catch (e) {
+          status.textContent = e.message || 'Freeze failed.';
+        } finally {
+          freezeBtn.disabled = false;
+        }
+      };
+      syncBtn.onclick = async () => {
+        syncBtn.disabled = true;
+        status.textContent = 'Syncing…';
+        try {
+          const r = await fetch('/api/list-manual-sync?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid })
+          });
+          if (!r.ok) throw new Error(await r.text());
+          status.textContent = 'Synced.';
+          await refresh();
+        } catch (e) {
+          status.textContent = e.message || 'Manual sync failed.';
+        } finally {
+          syncBtn.disabled = false;
+        }
+      };
+      actionRow.appendChild(freezeBtn);
+      if (isFrozen && (!customMeta || customMeta.kind === 'merged')) actionRow.appendChild(syncBtn);
+    }
     dupBtn.onclick = async () => {
       dupBtn.disabled = true;
       status.textContent = 'Duplicating…';
@@ -4353,23 +4867,49 @@ async function render() {
         dupBtn.disabled = false;
       }
     };
-    actionRow.appendChild(freezeBtn);
-    if (isFrozen && (!customMeta || customMeta.kind === 'merged')) actionRow.appendChild(syncBtn);
     actionRow.appendChild(dupBtn);
+    if (isOfflineList) {
+      const csvWrap = el('label', { class: 'pill', title: 'Add CSV from IMDb' });
+      const csvInput = el('input', { type: 'file', accept: '.csv,text/csv' });
+      const csvText = el('span', { text: 'Add CSV from IMDb' });
+      csvInput.onchange = async () => {
+        const file = csvInput.files && csvInput.files[0];
+        if (!file) return;
+        status.textContent = 'Uploading CSV…';
+        try {
+          const text = await file.text();
+          const r = await fetch('/api/list-import-csv?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, csvText: text })
+          });
+          if (!r.ok) throw new Error(await r.text());
+          status.textContent = 'CSV imported.';
+          await refresh();
+        } catch (e) {
+          status.textContent = e.message || 'CSV import failed.';
+        } finally {
+          csvInput.value = '';
+        }
+      };
+      csvWrap.appendChild(csvInput);
+      csvWrap.appendChild(csvText);
+      actionRow.appendChild(csvWrap);
+    }
     actionRow.appendChild(status);
 
     const mainRow = el('div', { class: 'advanced-row' });
-    const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Toggle Stremlist save link' });
     mainBtnAdvanced.innerHTML = mainBtnSvg;
-    const mainLabel = el('span', { class: 'mini muted', text: 'Main list for Stremio save link' });
+    const mainLabel = el('span', { class: 'mini muted', text: 'Stremlist save link' });
     function updateMainBtn() {
-      const isMain = prefs.mainList === lsid;
+      const isMain = Array.isArray(prefs.mainLists) && prefs.mainLists.includes(lsid);
       tr.classList.toggle('main', isMain);
       mainBtn.classList.toggle('active', isMain);
-      mainBtn.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtn.classList.toggle('inactive', !isMain && Array.isArray(prefs.mainLists) && prefs.mainLists.length);
       mainBtn.setAttribute('aria-pressed', isMain ? 'true' : 'false');
       mainBtnAdvanced.classList.toggle('active', isMain);
-      mainBtnAdvanced.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtnAdvanced.classList.toggle('inactive', !isMain && Array.isArray(prefs.mainLists) && prefs.mainLists.length);
       mainBtnAdvanced.setAttribute('aria-pressed', isMain ? 'true' : 'false');
     }
     updateMainBtn();
@@ -4380,9 +4920,9 @@ async function render() {
 
     advancedPanel.appendChild(renameRow);
     advancedPanel.appendChild(actionRow);
-    advancedPanel.appendChild(mainRow);
+    if (!isOfflineList) advancedPanel.appendChild(mainRow);
     if (isCustom) {
-      const customNote = el('div', { class: 'mini muted', text: 'Custom list: delete removes it permanently.' });
+      const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Manual list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
       advancedPanel.appendChild(customNote);
     }
 
@@ -4433,7 +4973,7 @@ async function render() {
       enabled,
       order: newOrder,
       defaultList: prefs.defaultList || (enabled[0] || ""),
-      mainList: prefs.mainList || "",
+      mainLists: prefs.mainLists || [],
       perListSort: prefs.perListSort || {},
       sortReverse: prefs.sortReverse || {},
       sortOptions: prefs.sortOptions || {},
@@ -4457,6 +4997,7 @@ async function render() {
 }
 
 wireAddButtons();
+wireOfflineCreatePanel(render);
 render();
 </script>
 </body></html>`);
@@ -4469,6 +5010,10 @@ render();
     if (snap) {
       LISTS = snap.lists || LISTS;
       PREFS = { ...PREFS, ...(snap.prefs || {}) };
+      if (!Array.isArray(PREFS.mainLists)) {
+        PREFS.mainLists = PREFS.mainList && isListId(PREFS.mainList) ? [PREFS.mainList] : [];
+      }
+      if (PREFS.mainList) delete PREFS.mainList;
       FALLBK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
       CARD.clear();   if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
       EP2SER.clear(); if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
@@ -4482,6 +5027,7 @@ render();
 
       console.log("[BOOT] snapshot loaded");
     }
+    await loadOfflineLists();
     const frozenBackups = await loadFrozenBackups();
     let restored = false;
     if (frozenBackups.size) {
