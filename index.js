@@ -96,7 +96,7 @@ let PREFS = {
   sortOptions: {},        // { listId: ['custom', 'date_desc', ...] }
   customOrder: {},        // { listId: [ 'tt...', 'tt...' ] }
   upgradeEpisodes: UPGRADE_EPISODES,
-  mainList: "",
+  mainLists: [],
   tmdbKey: TMDB_API_KEY || "",
   tmdbKeyValid: null,
   displayNames: {},       // { listId: "Custom Name" }
@@ -174,48 +174,46 @@ function resolveStreamImdbId(rawId) {
   return base;
 }
 
-async function addImdbToMainList(imdbId) {
-  const mainList = PREFS.mainList;
-  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
-  const list = LISTS[mainList];
+async function addImdbToList(lsid, imdbId) {
+  if (!isListId(lsid)) return { ok: false, reason: "no_list" };
+  const list = LISTS[lsid];
   if (!list) return { ok: false, reason: "missing" };
   PREFS.listEdits = PREFS.listEdits || {};
-  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  const edits = PREFS.listEdits[lsid] || { added: [], removed: [] };
   edits.added = Array.isArray(edits.added) ? edits.added : [];
   edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
 
-  const current = new Set(listIdsWithEdits(mainList));
+  const current = new Set(listIdsWithEdits(lsid));
   if (!current.has(imdbId)) {
     edits.added = edits.added.filter(id => id !== imdbId);
     edits.added.push(imdbId);
   }
   edits.removed = edits.removed.filter(id => id !== imdbId);
-  PREFS.listEdits[mainList] = edits;
-  syncFrozenEdits(mainList);
+  PREFS.listEdits[lsid] = edits;
+  syncFrozenEdits(lsid);
 
   await getBestMeta(imdbId).catch(() => null);
   CARD.set(imdbId, cardFor(imdbId));
   await persistSnapshot();
-  return { ok: true, mainList };
+  return { ok: true, lsid };
 }
 
-async function removeImdbFromMainList(imdbId) {
-  const mainList = PREFS.mainList;
-  if (!isListId(mainList)) return { ok: false, reason: "no_main" };
-  const list = LISTS[mainList];
+async function removeImdbFromList(lsid, imdbId) {
+  if (!isListId(lsid)) return { ok: false, reason: "no_list" };
+  const list = LISTS[lsid];
   if (!list) return { ok: false, reason: "missing" };
   PREFS.listEdits = PREFS.listEdits || {};
-  const edits = PREFS.listEdits[mainList] || { added: [], removed: [] };
+  const edits = PREFS.listEdits[lsid] || { added: [], removed: [] };
   edits.added = Array.isArray(edits.added) ? edits.added : [];
   edits.removed = Array.isArray(edits.removed) ? edits.removed : [];
 
   edits.added = edits.added.filter(id => id !== imdbId);
   if (!edits.removed.includes(imdbId)) edits.removed.push(imdbId);
-  PREFS.listEdits[mainList] = edits;
-  syncFrozenEdits(mainList);
+  PREFS.listEdits[lsid] = edits;
+  syncFrozenEdits(lsid);
 
   await persistSnapshot();
-  return { ok: true, mainList };
+  return { ok: true, lsid };
 }
 
 const TMDB_PLACEHOLDER_IMDB = "tt0111161";
@@ -671,7 +669,7 @@ async function persistLinkBackupConfigs() {
     entry.sortKey = PREFS.perListSort?.[lsid] || entry.sortKey || "name_asc";
     entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
     entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : (entry.customOrder || []);
-    entry.main = PREFS.mainList === lsid;
+    entry.main = Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid);
     entry.savedAt = Date.now();
     await saveLinkBackupConfig(lsid, entry);
   }
@@ -733,8 +731,9 @@ function restoreLinkBackupConfigEntry(lsid, data) {
       PREFS.customOrder[lsid] = data.customOrder.slice();
     }
   }
-  if (data?.main && !PREFS.mainList) {
-    PREFS.mainList = lsid;
+  if (data?.main) {
+    PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
+    if (!PREFS.mainLists.includes(lsid)) PREFS.mainLists.push(lsid);
   }
 }
 async function loadFrozenBackups() {
@@ -1735,7 +1734,8 @@ function manifestKey() {
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
 
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${PREFS.mainList || ""}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
+  const mainLists = JSON.stringify(PREFS.mainLists || []);
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
 }
 
 async function harvestSources() {
@@ -2386,33 +2386,28 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     const imdbId = resolveStreamImdbId(req.params.id);
     if (!imdbId) return res.json({ streams: [] });
 
-    const mainList = PREFS.mainList;
-    if (!isListId(mainList)) {
+    const mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists.filter(isListId) : [];
+    if (!mainLists.length) {
       return res.json({
         streams: [{
-          title: "You have not selected a main list.",
+          title: "You have not selected any Stremlist.",
           externalUrl: `stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId}`
         }]
       });
     }
 
-    const listName = listDisplayName(mainList);
     const keyParam = SHARED_SECRET ? `?key=${encodeURIComponent(SHARED_SECRET)}` : "";
-    const inList = listIdsWithEdits(mainList).includes(imdbId);
-    if (inList) {
-      return res.json({
-        streams: [{
-          title: `➖ Remove this title from ${listName}`,
-          url: `${absoluteBase(req)}/stream-remove/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
-        }]
-      });
+    const streams = [];
+    for (const lsid of mainLists) {
+      const listName = listDisplayName(lsid);
+      const inList = listIdsWithEdits(lsid).includes(imdbId);
+      const action = inList ? "Remove" : "Save";
+      const symbol = inList ? "➖" : "➕";
+      const path = inList ? "stream-remove" : "stream-add";
+      const url = `${absoluteBase(req)}/${path}/${encodeURIComponent(req.params.type)}/${imdbId}?list=${encodeURIComponent(lsid)}${SHARED_SECRET ? `&key=${encodeURIComponent(SHARED_SECRET)}` : ""}`;
+      streams.push({ title: `${symbol} ${action} this title ${inList ? "from" : "to"} ${listName}`, url });
     }
-    return res.json({
-      streams: [{
-        title: `➕ Save this title to ${listName}`,
-        url: `${absoluteBase(req)}/stream-add/${encodeURIComponent(req.params.type)}/${imdbId}${keyParam}`
-      }]
-    });
+    return res.json({ streams });
   } catch (e) {
     console.error("stream:", e);
     res.status(500).send("Internal Server Error");
@@ -2423,9 +2418,8 @@ app.get("/stream-add/:type/:id", async (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     const imdbId = resolveStreamImdbId(req.params.id);
-    if (imdbId) {
-      await addImdbToMainList(imdbId);
-    }
+    const lsid = String(req.query.list || "");
+    if (imdbId) await addImdbToList(lsid, imdbId);
     res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
   } catch (e) {
     console.error("stream-add:", e);
@@ -2437,9 +2431,8 @@ app.get("/stream-remove/:type/:id", async (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
     const imdbId = resolveStreamImdbId(req.params.id);
-    if (imdbId) {
-      await removeImdbFromMainList(imdbId);
-    }
+    const lsid = String(req.query.list || "");
+    if (imdbId) await removeImdbFromList(lsid, imdbId);
     res.redirect(`stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId || ""}`);
   } catch (e) {
     console.error("stream-remove:", e);
@@ -2463,7 +2456,9 @@ app.post("/api/prefs", async (req,res) => {
     PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
-    PREFS.mainList        = isListId(body.mainList) ? body.mainList : "";
+    PREFS.mainLists       = Array.isArray(body.mainLists)
+      ? body.mainLists.filter(isListId)
+      : (PREFS.mainLists || []);
     PREFS.perListSort     = body.perListSort && typeof body.perListSort === "object" ? body.perListSort : (PREFS.perListSort || {});
     PREFS.sortReverse     = body.sortReverse && typeof body.sortReverse === "object"
       ? Object.fromEntries(Object.entries(body.sortReverse).map(([k,v]) => [k, !!v]))
@@ -2490,6 +2485,9 @@ app.post("/api/prefs", async (req,res) => {
     };
 
     PREFS.blocked = Array.isArray(body.blocked) ? body.blocked.filter(isListId) : (PREFS.blocked || []);
+    if (!Array.isArray(body.mainLists) && isListId(body.mainList)) {
+      PREFS.mainLists = [body.mainList];
+    }
 
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
@@ -2727,7 +2725,9 @@ app.post("/api/delete-custom-list", async (req, res) => {
     if (PREFS.perListSort) delete PREFS.perListSort[lsid];
     if (PREFS.sortOptions) delete PREFS.sortOptions[lsid];
     if (PREFS.sortReverse) delete PREFS.sortReverse[lsid];
-    if (PREFS.mainList === lsid) PREFS.mainList = "";
+    if (Array.isArray(PREFS.mainLists)) {
+      PREFS.mainLists = PREFS.mainLists.filter(id => id !== lsid);
+    }
     if (PREFS.blocked) PREFS.blocked = PREFS.blocked.filter(id => id !== lsid);
     PREFS.enabled = (PREFS.enabled || []).filter(id => id !== lsid);
     PREFS.order = (PREFS.order || []).filter(id => id !== lsid);
@@ -2981,7 +2981,7 @@ app.post("/api/link-backup", async (req,res) => {
       const sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
       const customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
       const name = listDisplayName(lsid);
-      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: PREFS.mainList === lsid, savedAt: Date.now() };
+      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid), savedAt: Date.now() };
       PREFS.backupConfigs[lsid] = config;
       await saveLinkBackupConfig(lsid, config);
     } else {
@@ -3015,7 +3015,9 @@ app.post("/api/block-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
-    if (PREFS.mainList === lsid) PREFS.mainList = "";
+    if (Array.isArray(PREFS.mainLists)) {
+      PREFS.mainLists = PREFS.mainLists.filter(id => id !== lsid);
+    }
     if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
     await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
@@ -3046,7 +3048,9 @@ app.post("/api/remove-list", async (req,res)=>{
     if (PREFS.sources?.lists) {
       PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
     }
-    if (PREFS.mainList === lsid) PREFS.mainList = "";
+    if (Array.isArray(PREFS.mainLists)) {
+      PREFS.mainLists = PREFS.mainLists.filter(id => id !== lsid);
+    }
     if (PREFS.backupConfigs) delete PREFS.backupConfigs[lsid];
     await deleteLinkBackupConfig(lsid);
     if (PREFS.linkBackups) {
@@ -3353,6 +3357,10 @@ app.get("/admin", async (req,res)=>{
     border-radius:12px;
     padding:12px;
     background:rgba(12,10,26,.45);
+  }
+  .imdb-box input{
+    width:100%;
+    box-sizing:border-box;
   }
   .sort-wrap{display:flex;align-items:center;gap:6px;}
   .sort-reverse-btn{
@@ -4409,7 +4417,7 @@ async function render() {
   const thead = el('thead', {}, [el('tr',{},[
     el('th',{text:''}),
     el('th',{text:'Enabled'}),
-    el('th',{text:'Main'}),
+    el('th',{text:'Stremlist'}),
     el('th',{text:'Move'}),
     el('th',{text:'List (id)'}),
     el('th',{text:'Items'}),
@@ -4642,13 +4650,18 @@ async function render() {
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
-    const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 2.8 10.7a1 1 0 0 0 1.3 1.5l1.9-1.5V20a1 1 0 0 0 1 1h4.5a1 1 0 0 0 1-1v-4h2v4a1 1 0 0 0 1 1H20a1 1 0 0 0 1-1v-9.3l1.9 1.5a1 1 0 1 0 1.3-1.5L12 3.2z"/></svg>';
-    const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" transform="rotate(45 12 12)"></rect><path d="M10.2 8.7a1 1 0 0 0-1.5.9v4.8a1 1 0 0 0 1.5.9l4.6-2.4a1 1 0 0 0 0-1.8l-4.6-2.4z" fill="currentColor"></path></svg>';
+    const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Toggle Stremlist save link' });
     mainBtn.innerHTML = mainBtnSvg;
 
     function handleMainToggle(e) {
       if (e) e.preventDefault();
-      prefs.mainList = prefs.mainList === lsid ? "" : lsid;
+      prefs.mainLists = Array.isArray(prefs.mainLists) ? prefs.mainLists : [];
+      if (prefs.mainLists.includes(lsid)) {
+        prefs.mainLists = prefs.mainLists.filter(id => id !== lsid);
+      } else {
+        prefs.mainLists.push(lsid);
+      }
       saveAll('Saved').then(refresh);
     }
 
@@ -4868,17 +4881,17 @@ async function render() {
     actionRow.appendChild(status);
 
     const mainRow = el('div', { class: 'advanced-row' });
-    const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Set as main list for Stremio save link' });
+    const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Toggle Stremlist save link' });
     mainBtnAdvanced.innerHTML = mainBtnSvg;
-    const mainLabel = el('span', { class: 'mini muted', text: 'Main list for Stremio save link' });
+    const mainLabel = el('span', { class: 'mini muted', text: 'Stremlist save link' });
     function updateMainBtn() {
-      const isMain = prefs.mainList === lsid;
+      const isMain = Array.isArray(prefs.mainLists) && prefs.mainLists.includes(lsid);
       tr.classList.toggle('main', isMain);
       mainBtn.classList.toggle('active', isMain);
-      mainBtn.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtn.classList.toggle('inactive', !isMain && Array.isArray(prefs.mainLists) && prefs.mainLists.length);
       mainBtn.setAttribute('aria-pressed', isMain ? 'true' : 'false');
       mainBtnAdvanced.classList.toggle('active', isMain);
-      mainBtnAdvanced.classList.toggle('inactive', !isMain && !!prefs.mainList && prefs.mainList !== lsid);
+      mainBtnAdvanced.classList.toggle('inactive', !isMain && Array.isArray(prefs.mainLists) && prefs.mainLists.length);
       mainBtnAdvanced.setAttribute('aria-pressed', isMain ? 'true' : 'false');
     }
     updateMainBtn();
@@ -4942,7 +4955,7 @@ async function render() {
       enabled,
       order: newOrder,
       defaultList: prefs.defaultList || (enabled[0] || ""),
-      mainList: prefs.mainList || "",
+      mainLists: prefs.mainLists || [],
       perListSort: prefs.perListSort || {},
       sortReverse: prefs.sortReverse || {},
       sortOptions: prefs.sortOptions || {},
@@ -4979,6 +4992,10 @@ render();
     if (snap) {
       LISTS = snap.lists || LISTS;
       PREFS = { ...PREFS, ...(snap.prefs || {}) };
+      if (!Array.isArray(PREFS.mainLists)) {
+        PREFS.mainLists = PREFS.mainList && isListId(PREFS.mainList) ? [PREFS.mainList] : [];
+      }
+      if (PREFS.mainList) delete PREFS.mainList;
       FALLBK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
       CARD.clear();   if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
       EP2SER.clear(); if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
