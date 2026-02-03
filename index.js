@@ -495,6 +495,7 @@ async function saveOfflineList(lsid) {
     const payload = {
       id: lsid,
       name: sanitizeName(listDisplayName(lsid)),
+      stremlist: Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid),
       ids: Array.isArray(list.ids) ? list.ids : [],
       orders: list.orders || {},
       createdAt: PREFS.customLists?.[lsid]?.createdAt || Date.now(),
@@ -537,6 +538,7 @@ async function loadOfflineLists() {
           if (!isCustomListId(id)) continue;
           const ids = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
           const name = sanitizeName(payload.name || id);
+          const stremlist = !!payload.stremlist;
           LISTS[id] = {
             id,
             name,
@@ -552,6 +554,10 @@ async function loadOfflineLists() {
           }
           PREFS.displayNames = PREFS.displayNames || {};
           if (name) PREFS.displayNames[id] = name;
+          if (stremlist) {
+            PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
+            if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
+          }
         } catch (e) {
           console.warn("[OFFLINE] load failed:", entry.path, e.message || e);
         }
@@ -568,6 +574,7 @@ async function loadOfflineLists() {
         if (!isCustomListId(id)) continue;
         const ids = Array.isArray(data.ids) ? data.ids.filter(isImdb) : [];
         const name = sanitizeName(data.name || id);
+        const stremlist = !!data.stremlist;
         LISTS[id] = {
           id,
           name,
@@ -583,6 +590,10 @@ async function loadOfflineLists() {
         }
         PREFS.displayNames = PREFS.displayNames || {};
         if (name) PREFS.displayNames[id] = name;
+        if (stremlist) {
+          PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
+          if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
+        }
       } catch (e) {
         console.warn("[OFFLINE] load failed:", entry.name, e.message || e);
       }
@@ -784,16 +795,19 @@ async function loadFrozenBackups() {
 }
 function restoreFrozenBackupEntry(lsid, data) {
   PREFS.frozenLists = PREFS.frozenLists || {};
+  const frozenName = sanitizeName(data?.name || data?.displayName || lsid);
   PREFS.frozenLists[lsid] = {
     ids: Array.isArray(data?.ids) ? data.ids.slice() : [],
     orders: data?.orders || {},
-    name: sanitizeName(data?.name || data?.displayName || lsid),
+    name: frozenName,
     url: data?.url,
     frozenAt: data?.frozenAt || Date.now(),
     sortKey: data?.sortKey || "",
     sortReverse: !!data?.sortReverse,
     customOrder: Array.isArray(data?.customOrder) ? data.customOrder.slice() : []
   };
+  PREFS.displayNames = PREFS.displayNames || {};
+  if (frozenName) PREFS.displayNames[lsid] = frozenName;
   if (data?.sortKey) {
     PREFS.perListSort = PREFS.perListSort || {};
     if (!PREFS.perListSort[lsid]) PREFS.perListSort[lsid] = data.sortKey;
@@ -4672,13 +4686,16 @@ async function render() {
     const mainBtn = el('button', { type: 'button', class: 'icon-btn home', title: 'Toggle Stremlist save link' });
     mainBtn.innerHTML = mainBtnSvg;
 
-    function handleMainToggle(e) {
+    async function handleMainToggle(e) {
       if (e) e.preventDefault();
       prefs.mainLists = Array.isArray(prefs.mainLists) ? prefs.mainLists : [];
       if (prefs.mainLists.includes(lsid)) {
         prefs.mainLists = prefs.mainLists.filter(id => id !== lsid);
       } else {
         prefs.mainLists.push(lsid);
+      }
+      if (isOfflineList) {
+        await saveOfflineList(lsid);
       }
       saveAll('Saved').then(refresh);
     }
