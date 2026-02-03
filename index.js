@@ -34,7 +34,7 @@ const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
 const SNAP_LOCAL    = "data/snapshot.json";
 const FROZEN_DIR    = "data/frozen";
 const BACKUP_DIR    = "data/backup";
-const OFFLINE_DIR   = "data/offline_lists";
+const OFFLINE_DIR   = "data/manual";
 
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
@@ -465,6 +465,10 @@ function offlineFileName(lsid) {
   const safe = String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
   return `${OFFLINE_DIR}/${safe}.json`;
 }
+function offlineRelPath(lsid) {
+  const safe = String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
+  return `data/manual/${safe}.json`;
+}
 
 async function saveOfflineList(lsid) {
   if (!isOfflineList(lsid)) return;
@@ -481,6 +485,16 @@ async function saveOfflineList(lsid) {
       updatedAt: Date.now()
     };
     await fs.writeFile(offlineFileName(lsid), JSON.stringify(payload, null, 2), "utf8");
+    if (GH_ENABLED) {
+      const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
+      const relPath = offlineRelPath(lsid);
+      await ghPutWithRetry(relPath, async () => {
+        const sha = await ghGetSha(relPath);
+        const body = { message: `Update manual list ${lsid}`, content, branch: GITHUB_BRANCH };
+        if (sha) body.sha = sha;
+        return body;
+      });
+    }
   } catch (e) {
     console.warn("[OFFLINE] save failed:", e.message || e);
   }
@@ -490,10 +504,43 @@ async function deleteOfflineListFile(lsid) {
   try {
     await fs.unlink(offlineFileName(lsid));
   } catch {/* ignore */}
+  await ghDeleteFile(offlineRelPath(lsid));
 }
 
 async function loadOfflineLists() {
   try {
+    if (GH_ENABLED) {
+      const entries = await ghListDir("data/manual");
+      for (const entry of entries) {
+        if (!entry || entry.type !== "file" || !entry.name.endsWith(".json")) continue;
+        try {
+          const data = await gh("GET", `/contents/${encodeURIComponent(entry.path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+          const buf = Buffer.from(data.content, "base64").toString("utf8");
+          const payload = JSON.parse(buf);
+          const id = String(payload?.id || "").trim();
+          if (!isCustomListId(id)) continue;
+          const ids = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
+          const name = sanitizeName(payload.name || id);
+          LISTS[id] = {
+            id,
+            name,
+            url: null,
+            ids: ids.slice(),
+            orders: payload.orders || { imdb: ids.slice() }
+          };
+          PREFS.customLists = PREFS.customLists || {};
+          if (!PREFS.customLists[id]) {
+            PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
+          } else {
+            PREFS.customLists[id].kind = "offline";
+          }
+          PREFS.displayNames = PREFS.displayNames || {};
+          if (name) PREFS.displayNames[id] = name;
+        } catch (e) {
+          console.warn("[OFFLINE] load failed:", entry.path, e.message || e);
+        }
+      }
+    }
     await fs.mkdir(OFFLINE_DIR, { recursive: true });
     const entries = await fs.readdir(OFFLINE_DIR, { withFileTypes: true });
     for (const entry of entries) {
@@ -3204,9 +3251,72 @@ app.get("/admin", async (req,res)=>{
     background:#15122c;
   }
   .create-panel.active{display:block;}
-  .create-panel input[type="file"]{
+  .create-layout{
+    display:grid;
+    gap:14px;
+    grid-template-columns:1.2fr .8fr;
+    grid-template-areas:
+      "name actions"
+      "csv imdb"
+      "meta meta";
+    align-items:start;
+  }
+  .create-name{grid-area:name;}
+  .create-actions{grid-area:actions;justify-self:end;text-align:right;}
+  .create-actions .actions-stack{
+    align-items:flex-end;
+  }
+  .create-csv{grid-area:csv;}
+  .create-imdb{grid-area:imdb;}
+  .create-meta{grid-area:meta;}
+  .actions-stack{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    align-items:flex-start;
+  }
+  .create-actions button{
+    min-width:110px;
+    justify-content:center;
+  }
+  .name-input{
+    max-width:260px;
+  }
+  .csv-drop{
+    position:relative;
+    border:1px dashed rgba(170, 144, 255, 0.65);
+    background:rgba(127, 120, 255, 0.15);
+    padding:22px;
+    border-radius:18px;
+    text-align:center;
+    color:#dcd8ff;
+    cursor:pointer;
+    transition:background .2s ease, border-color .2s ease;
+    min-height:150px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:6px;
+  }
+  .csv-drop.dragover{
+    border-color:#c5b6ff;
+    background:rgba(127, 120, 255, 0.25);
+  }
+  .csv-drop .csv-card{
+    background:rgba(12,10,26,.55);
+    border:1px solid rgba(90,80,180,.6);
+    border-radius:12px;
+    padding:8px 12px;
+    box-shadow:0 8px 18px rgba(0,0,0,.25);
+  }
+  .csv-drop input{
+    position:absolute;
+    inset:0;
+    opacity:0;
     width:100%;
-    color:var(--text);
+    height:100%;
+    cursor:pointer;
   }
   .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
   .pill{
@@ -3237,6 +3347,12 @@ app.get("/admin", async (req,res)=>{
     gap:10px;
     grid-template-columns:1fr 110px;
     margin-bottom:8px;
+  }
+  .imdb-box{
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:12px;
+    background:rgba(12,10,26,.45);
   }
   .sort-wrap{display:flex;align-items:center;gap:6px;}
   .sort-reverse-btn{
@@ -3563,32 +3679,39 @@ app.get("/admin", async (req,res)=>{
         <button id="createOfflineBtn" type="button">＋ Create list</button>
       </div>
       <div id="createOfflinePanel" class="create-panel">
-        <div class="row">
-          <div>
+        <div class="create-layout">
+          <div class="create-name">
             <label class="mini">List name</label>
-            <input id="offlineListName" type="text" placeholder="Name your list" />
+            <input id="offlineListName" class="name-input" type="text" placeholder="Name your list" />
           </div>
-          <div>
-            <label class="mini">Actions</label>
-            <div class="rowtools" style="margin-top:0">
+          <div class="create-actions">
+            <div class="actions-stack">
               <button id="offlineSaveBtn" type="button">Save list</button>
               <button id="offlineCancelBtn" type="button">Cancel</button>
               <span id="offlineSaveStatus" class="mini muted"></span>
             </div>
           </div>
-        </div>
-        <div class="row">
-          <div>
-            <label class="mini">Add by IMDb ID (tt...)</label>
-            <input id="offlineAddIdInput" type="text" placeholder="tt1234567 or IMDb URL" />
-          </div>
-          <div>
+          <div class="create-csv">
             <label class="mini">Add CSV from IMDb</label>
-            <input id="offlineCsvInput" type="file" accept=".csv,text/csv" />
-            <div id="offlineCsvStatus" class="mini muted"></div>
+            <label class="csv-drop" id="offlineCsvDrop">
+              <input id="offlineCsvInput" type="file" accept=".csv,text/csv" />
+              <div class="csv-card">
+                <div><b>Drop your IMDb CSV</b> or click to upload</div>
+                <div class="mini muted">We read IMDb tt... IDs in order.</div>
+              </div>
+              <div id="offlineCsvStatus" class="mini muted"></div>
+            </label>
+          </div>
+          <div class="create-imdb">
+            <div class="imdb-box">
+              <label class="mini">Add by IMDb ID (tt...)</label>
+              <input id="offlineAddIdInput" type="text" placeholder="tt1234567 or IMDb URL" />
+            </div>
+          </div>
+          <div class="create-meta">
+            <div class="mini muted">Items queued: <span id="offlineItemCount">0</span></div>
           </div>
         </div>
-        <div class="mini muted">Items queued: <span id="offlineItemCount">0</span></div>
       </div>
       <div id="mergeBuilder" class="merge-box" style="display:none;"></div>
       <div id="prefs"></div>
@@ -3731,6 +3854,7 @@ function wireOfflineCreatePanel(refresh) {
   const nameInput = document.getElementById('offlineListName');
   const addInput = document.getElementById('offlineAddIdInput');
   const csvInput = document.getElementById('offlineCsvInput');
+  const csvDrop = document.getElementById('offlineCsvDrop');
   const csvStatus = document.getElementById('offlineCsvStatus');
   const saveBtn = document.getElementById('offlineSaveBtn');
   const cancelBtn = document.getElementById('offlineCancelBtn');
@@ -3772,23 +3896,41 @@ function wireOfflineCreatePanel(refresh) {
     });
   }
 
+  const handleCsvFile = async (file) => {
+    if (!file) return;
+    if (csvStatus) csvStatus.textContent = 'Reading CSV…';
+    try {
+      const text = await file.text();
+      const ids = parseCsvImdbIds(text);
+      ids.forEach(id => { if (!draftIds.includes(id)) draftIds.push(id); });
+      if (csvStatus) csvStatus.textContent = 'Added ' + ids.length + ' IMDb IDs from CSV.';
+      updateCount();
+    } catch (e) {
+      if (csvStatus) csvStatus.textContent = 'Failed to read CSV.';
+    } finally {
+      if (csvInput) csvInput.value = '';
+    }
+  };
   if (csvInput) {
     csvInput.onchange = async () => {
       const file = csvInput.files && csvInput.files[0];
-      if (!file) return;
-      if (csvStatus) csvStatus.textContent = 'Reading CSV…';
-      try {
-        const text = await file.text();
-        const ids = parseCsvImdbIds(text);
-        ids.forEach(id => { if (!draftIds.includes(id)) draftIds.push(id); });
-        if (csvStatus) csvStatus.textContent = 'Added ' + ids.length + ' IMDb IDs from CSV.';
-        updateCount();
-      } catch (e) {
-        if (csvStatus) csvStatus.textContent = 'Failed to read CSV.';
-      } finally {
-        csvInput.value = '';
-      }
+      await handleCsvFile(file);
     };
+  }
+  if (csvDrop) {
+    csvDrop.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      csvDrop.classList.add('dragover');
+    });
+    csvDrop.addEventListener('dragleave', () => {
+      csvDrop.classList.remove('dragover');
+    });
+    csvDrop.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      csvDrop.classList.remove('dragover');
+      const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      await handleCsvFile(file);
+    });
   }
 
   if (saveBtn) {
@@ -4749,7 +4891,7 @@ async function render() {
     advancedPanel.appendChild(actionRow);
     if (!isOfflineList) advancedPanel.appendChild(mainRow);
     if (isCustom) {
-      const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Offline list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
+      const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Manual list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
       advancedPanel.appendChild(customNote);
     }
 
