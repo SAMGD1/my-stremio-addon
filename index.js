@@ -178,6 +178,16 @@ async function addImdbToList(lsid, imdbId) {
   if (!isListId(lsid)) return { ok: false, reason: "no_list" };
   const list = LISTS[lsid];
   if (!list) return { ok: false, reason: "missing" };
+  if (isOfflineList(lsid)) {
+    list.ids = appendUniqueIds(list.ids || [], [imdbId]);
+    list.orders = list.orders || {};
+    list.orders.imdb = list.ids.slice();
+    await saveOfflineList(lsid);
+    await getBestMeta(imdbId).catch(() => null);
+    CARD.set(imdbId, cardFor(imdbId));
+    await persistSnapshot();
+    return { ok: true, lsid };
+  }
   PREFS.listEdits = PREFS.listEdits || {};
   const edits = PREFS.listEdits[lsid] || { added: [], removed: [] };
   edits.added = Array.isArray(edits.added) ? edits.added : [];
@@ -202,6 +212,14 @@ async function removeImdbFromList(lsid, imdbId) {
   if (!isListId(lsid)) return { ok: false, reason: "no_list" };
   const list = LISTS[lsid];
   if (!list) return { ok: false, reason: "missing" };
+  if (isOfflineList(lsid)) {
+    list.ids = (list.ids || []).filter(id => id !== imdbId);
+    list.orders = list.orders || {};
+    list.orders.imdb = list.ids.slice();
+    await saveOfflineList(lsid);
+    await persistSnapshot();
+    return { ok: true, lsid };
+  }
   PREFS.listEdits = PREFS.listEdits || {};
   const edits = PREFS.listEdits[lsid] || { added: [], removed: [] };
   edits.added = Array.isArray(edits.added) ? edits.added : [];
