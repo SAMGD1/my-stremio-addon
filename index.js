@@ -4150,8 +4150,26 @@ function stableSortClient(items, sortKey){
 }
 
 async function render() {
-  const prefs = await getPrefs();
-  const lists = await getLists();
+  const snapshotListEl = document.getElementById('snapshotList');
+  if (snapshotListEl && !snapshotListEl.childElementCount && !snapshotListEl.textContent.trim()) {
+    snapshotListEl.textContent = 'Loading lists…';
+  }
+  const container = document.getElementById('prefs');
+  if (container && !container.childElementCount) {
+    container.innerHTML = '<div class="mini muted">Loading custom lists…</div>';
+  }
+
+  let prefs;
+  let lists;
+  try {
+    [prefs, lists] = await Promise.all([getPrefs(), getLists()]);
+  } catch (e) {
+    if (snapshotListEl) snapshotListEl.textContent = 'Failed to load lists.';
+    if (container) container.innerHTML = '<div class="mini muted">Failed to load custom lists.</div>';
+    console.warn('[UI] render load failed:', e?.message || e);
+    return;
+  }
+
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
   const refresh = async () => { await render(); };
   const listCount = (lsid) => (lists[lsid]?.ids || []).length;
@@ -4428,7 +4446,7 @@ async function render() {
   renderSnapshotList();
   renderDiscovered();
 
-  const container = document.getElementById('prefs'); container.innerHTML = "";
+  container.innerHTML = "";
 
   const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
   const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
