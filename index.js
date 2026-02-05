@@ -443,6 +443,15 @@ async function removeSupabaseIndexEntry(path, id) {
   }
 }
 
+async function removeSupabaseFile(path, label) {
+  try {
+    const { deleteJSON } = await getSupabaseApi();
+    await deleteJSON(path);
+  } catch (e) {
+    console.warn(`[SUPABASE] ${label} delete failed:`, e?.message || e);
+  }
+}
+
 async function saveSnapshot(obj) {
   // local (best effort)
   try {
@@ -501,6 +510,7 @@ async function deleteOfflineListFile(lsid) {
   try {
     await fs.unlink(offlineFileName(lsid));
   } catch {/* ignore */}
+  await removeSupabaseFile(offlineSupabasePath(lsid), "manual list");
   await removeSupabaseIndexEntry(MANUAL_INDEX_PATH, lsid);
 }
 
@@ -543,38 +553,75 @@ async function loadOfflineLists() {
         console.warn("[OFFLINE] load failed:", entry.name, e.message || e);
       }
     }
-    const ids = await loadSupabaseIndex(MANUAL_INDEX_PATH);
-    for (const id of ids) {
-      if (!id || loaded.has(id) || !isCustomListId(id)) continue;
-      try {
-        const { getJSON } = await getSupabaseApi();
-        const payload = await getJSON(offlineSupabasePath(id));
-        if (!payload) continue;
-        loaded.add(id);
-        const listIds = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
-        const name = sanitizeName(payload.name || id);
-        const stremlist = !!payload.stremlist;
-        LISTS[id] = {
-          id,
-          name,
-          url: null,
-          ids: listIds.slice(),
-          orders: payload.orders || { imdb: listIds.slice() }
-        };
-        PREFS.customLists = PREFS.customLists || {};
-        if (!PREFS.customLists[id]) {
-          PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
-        } else {
-          PREFS.customLists[id].kind = "offline";
+    let ids = await loadSupabaseIndex(MANUAL_INDEX_PATH);
+    if (ids.length) {
+      for (const id of ids) {
+        if (!id || loaded.has(id) || !isCustomListId(id)) continue;
+        try {
+          const { getJSON } = await getSupabaseApi();
+          const payload = await getJSON(offlineSupabasePath(id));
+          if (!payload) continue;
+          loaded.add(id);
+          const listIds = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
+          const name = sanitizeName(payload.name || id);
+          const stremlist = !!payload.stremlist;
+          LISTS[id] = {
+            id,
+            name,
+            url: null,
+            ids: listIds.slice(),
+            orders: payload.orders || { imdb: listIds.slice() }
+          };
+          PREFS.customLists = PREFS.customLists || {};
+          if (!PREFS.customLists[id]) {
+            PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
+          } else {
+            PREFS.customLists[id].kind = "offline";
+          }
+          PREFS.displayNames = PREFS.displayNames || {};
+          if (name) PREFS.displayNames[id] = name;
+          if (stremlist) {
+            PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
+            if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
+          }
+        } catch (e) {
+          console.warn("[SUPABASE] manual list load failed:", id, e?.message || e);
         }
-        PREFS.displayNames = PREFS.displayNames || {};
-        if (name) PREFS.displayNames[id] = name;
-        if (stremlist) {
-          PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
-          if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
+      }
+    } else {
+      try {
+        const { listJSON, getJSON } = await getSupabaseApi();
+        const paths = await listJSON("manual");
+        for (const path of paths) {
+          const payload = await getJSON(path);
+          const id = String(payload?.id || "").trim();
+          if (!id || loaded.has(id) || !isCustomListId(id)) continue;
+          loaded.add(id);
+          const listIds = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
+          const name = sanitizeName(payload.name || id);
+          const stremlist = !!payload.stremlist;
+          LISTS[id] = {
+            id,
+            name,
+            url: null,
+            ids: listIds.slice(),
+            orders: payload.orders || { imdb: listIds.slice() }
+          };
+          PREFS.customLists = PREFS.customLists || {};
+          if (!PREFS.customLists[id]) {
+            PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
+          } else {
+            PREFS.customLists[id].kind = "offline";
+          }
+          PREFS.displayNames = PREFS.displayNames || {};
+          if (name) PREFS.displayNames[id] = name;
+          if (stremlist) {
+            PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
+            if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
+          }
         }
       } catch (e) {
-        console.warn("[SUPABASE] manual list load failed:", id, e?.message || e);
+        console.warn("[SUPABASE] manual list listing failed:", e?.message || e);
       }
     }
   } catch (e) {
@@ -625,6 +672,7 @@ async function saveFrozenBackup(lsid, frozen) {
 async function deleteFrozenBackup(lsid) {
   const path = frozenBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
+  await removeSupabaseFile(frozenSupabasePath(lsid), "frozen backup");
   await removeSupabaseIndexEntry(FROZEN_INDEX_PATH, lsid);
 }
 async function persistFrozenBackups() {
@@ -665,6 +713,7 @@ async function saveLinkBackupConfig(lsid, config) {
 async function deleteLinkBackupConfig(lsid) {
   const path = linkBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
+  await removeSupabaseFile(linkBackupSupabasePath(lsid), "link backup");
   await removeSupabaseIndexEntry(BACKUP_INDEX_PATH, lsid);
 }
 async function persistLinkBackupConfigs() {
@@ -692,12 +741,23 @@ async function loadLinkBackupConfigs() {
     }
   } catch {/* ignore */}
   const ids = await loadSupabaseIndex(BACKUP_INDEX_PATH);
-  for (const id of ids) {
-    if (!id || backups.has(id)) continue;
+  if (ids.length) {
+    for (const id of ids) {
+      if (!id || backups.has(id)) continue;
+      try {
+        const { getJSON } = await getSupabaseApi();
+        const parsed = await getJSON(linkBackupSupabasePath(id));
+        if (parsed?.id) backups.set(String(parsed.id), parsed);
+      } catch {/* ignore */}
+    }
+  } else {
     try {
-      const { getJSON } = await getSupabaseApi();
-      const parsed = await getJSON(linkBackupSupabasePath(id));
-      if (parsed?.id) backups.set(String(parsed.id), parsed);
+      const { listJSON, getJSON } = await getSupabaseApi();
+      const paths = await listJSON("backup");
+      for (const path of paths) {
+        const parsed = await getJSON(path);
+        if (parsed?.id) backups.set(String(parsed.id), parsed);
+      }
     } catch {/* ignore */}
   }
   return backups;
@@ -750,12 +810,23 @@ async function loadFrozenBackups() {
     }
   } catch {/* ignore */}
   const ids = await loadSupabaseIndex(FROZEN_INDEX_PATH);
-  for (const id of ids) {
-    if (!id || backups.has(id)) continue;
+  if (ids.length) {
+    for (const id of ids) {
+      if (!id || backups.has(id)) continue;
+      try {
+        const { getJSON } = await getSupabaseApi();
+        const parsed = await getJSON(frozenSupabasePath(id));
+        if (parsed?.id) backups.set(String(parsed.id), parsed);
+      } catch {/* ignore */}
+    }
+  } else {
     try {
-      const { getJSON } = await getSupabaseApi();
-      const parsed = await getJSON(frozenSupabasePath(id));
-      if (parsed?.id) backups.set(String(parsed.id), parsed);
+      const { listJSON, getJSON } = await getSupabaseApi();
+      const paths = await listJSON("frozen");
+      for (const path of paths) {
+        const parsed = await getJSON(path);
+        if (parsed?.id) backups.set(String(parsed.id), parsed);
+      }
     } catch {/* ignore */}
   }
   return backups;

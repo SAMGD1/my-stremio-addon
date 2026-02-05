@@ -31,3 +31,37 @@ export async function getJSON(path) {
   const text = await data.text();
   return JSON.parse(text);
 }
+
+export async function deleteJSON(path) {
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .remove([path]);
+
+  if (error) throw error;
+}
+
+export async function listJSON(prefix) {
+  const out = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase.storage
+      .from(BUCKET)
+      .list(prefix, { limit: 100, offset, sortBy: { column: "name", order: "asc" } });
+
+    if (error) throw error;
+    if (!Array.isArray(data) || data.length === 0) break;
+
+    for (const entry of data) {
+      const name = String(entry?.name || "");
+      if (!name.endsWith(".json")) continue;
+      if (name === "index.json") continue;
+      out.push(`${prefix}/${name}`);
+    }
+
+    if (data.length < 100) break;
+    offset += data.length;
+  }
+
+  return out;
+}
