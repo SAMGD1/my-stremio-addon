@@ -2864,13 +2864,15 @@ app.post("/api/bulk-add-sources", async (req, res) => {
     PREFS.sources.lists = Array.from(new Set([ ...(PREFS.sources.lists || []), ...lists ]));
     PREFS.sources.traktUsers = Array.from(new Set([ ...(PREFS.sources.traktUsers || []), ...traktUsers ]));
 
-    await fullSync({ rediscover: true });
-    scheduleNextSync();
+    fullSync({ rediscover: true, force: true })
+      .then(() => scheduleNextSync())
+      .catch((err) => console.warn("[BULK] background sync failed:", err?.message || err));
 
     res.json({
       ok: true,
       added: { users: users.length, lists: lists.length, traktUsers: traktUsers.length },
-      errors
+      errors,
+      syncQueued: true
     });
   } catch (e) { res.status(500).send(String(e)); }
 });
@@ -3740,7 +3742,10 @@ app.get("/admin", async (req,res)=>{
         <span>Show</span>
       </button>
       <div id="discoveredBody" class="collapse-body">
-        <div id="discoveredStatus" class="mini muted"></div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button id="discoverRefreshBtn" type="button">Discover now</button>
+          <div id="discoveredStatus" class="mini muted"></div>
+        </div>
         <ul id="discoveredList"></ul>
       </div>
     </div>
@@ -4259,7 +4264,7 @@ async function render() {
     });
   }
 
-  async function renderDiscovered() {
+  async function renderDiscovered(forceRefresh = false) {
     const wrap = document.getElementById('discoveredList');
     const status = document.getElementById('discoveredStatus');
     if (!wrap) return;
@@ -4294,9 +4299,15 @@ async function render() {
     if (Array.isArray(discoveredCache)) {
       renderItems(discoveredCache);
     } else {
-      wrap.textContent = 'Loading…';
+      wrap.textContent = 'Press Discover now to fetch lists.';
     }
-    if (status) status.textContent = 'Loading…';
+
+    if (!forceRefresh) {
+      if (status && !Array.isArray(discoveredCache)) status.textContent = 'Idle (manual discover only).';
+      return;
+    }
+
+    if (status) status.textContent = 'Discovering…';
     if (discoveredLoading) return;
     discoveredLoading = true;
     try {
@@ -4304,12 +4315,25 @@ async function render() {
       const items = data?.lists || [];
       discoveredCache = items;
       renderItems(items);
-      if (status) status.textContent = '';
+      if (status) status.textContent = 'Done. ' + items.length + ' list(s) found.';
     } catch (e) {
-      if (status) status.textContent = 'Failed to refresh discovered lists; showing last results.';
+      if (status) status.textContent = 'Discover failed; showing last results.';
     } finally {
       discoveredLoading = false;
     }
+  }
+
+  function wireDiscoveredControls() {
+    const btn = document.getElementById('discoverRefreshBtn');
+    if (!btn) return;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await renderDiscovered(true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
   }
 
   function wireTmdbControls() {
@@ -4385,7 +4409,8 @@ async function render() {
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(data.message || 'Bulk add failed');
         const errText = (data.errors || []).join(' | ');
-        status.textContent = 'Added: ' + data.added.users + ' users, ' + data.added.traktUsers + ' Trakt users, ' + data.added.lists + ' lists.' + (errText ? ' Errors: ' + errText : '');
+        const syncText = data.syncQueued ? ' Sync started in background.' : '';
+        status.textContent = 'Added: ' + data.added.users + ' users, ' + data.added.traktUsers + ' Trakt users, ' + data.added.lists + ' lists.' + syncText + (errText ? ' Errors: ' + errText : '');
         usersInput.value = '';
         listsInput.value = '';
         await renderDiscovered();
@@ -4399,6 +4424,7 @@ async function render() {
 
   wireTmdbControls();
   wireBulkAdd();
+  wireDiscoveredControls();
   renderSnapshotList();
   renderDiscovered();
 
