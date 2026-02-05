@@ -323,6 +323,11 @@ function base64Url(str) {
     .replace(/\+/g, "-")
     .replace(/\//g, "_");
 }
+function base64UrlDecode(str) {
+  const norm = String(str || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = norm + "=".repeat((4 - (norm.length % 4)) % 4);
+  return Buffer.from(padded, "base64").toString("utf8");
+}
 function frozenBackupPath(lsid) {
   return `${FROZEN_DIR}/${base64Url(lsid)}.json`;
 }
@@ -629,6 +634,50 @@ async function loadOfflineLists() {
   }
 }
 
+async function reconcileFrozenBackups() {
+  const desired = new Set(Object.keys(PREFS.frozenLists || {}));
+
+  try {
+    const files = await fs.readdir(FROZEN_DIR);
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const txt = await fs.readFile(`${FROZEN_DIR}/${file}`, "utf8");
+        const data = JSON.parse(txt);
+        const id = String(data?.id || "").trim();
+        if (id && desired.has(id)) continue;
+      } catch {/* ignore */}
+      try { await fs.unlink(`${FROZEN_DIR}/${file}`); } catch {/* ignore */}
+    }
+  } catch {/* ignore */}
+
+  try {
+    const { listJSON, getJSON, deleteJSON } = await getSupabaseApi();
+    const paths = await listJSON("frozen");
+    for (const path of paths) {
+      let id = "";
+      try {
+        const parsed = await getJSON(path);
+        id = String(parsed?.id || "").trim();
+      } catch {/* ignore */}
+      if (!id) {
+        const file = path.split("/").pop() || "";
+        if (file.endsWith(".json")) {
+          try { id = base64UrlDecode(file.slice(0, -5)); } catch {/* ignore */}
+        }
+      }
+      if (!id || desired.has(id)) continue;
+      try { await deleteJSON(path); } catch (e) {
+        console.warn("[SUPABASE] frozen cleanup delete failed:", e?.message || e);
+      }
+    }
+  } catch (e) {
+    console.warn("[SUPABASE] frozen cleanup list failed:", e?.message || e);
+  }
+
+  await saveSupabaseIndex(FROZEN_INDEX_PATH, Array.from(desired));
+}
+
 async function persistSnapshot() {
   await saveSnapshot({
     lastSyncAt: LAST_SYNC_AT,
@@ -640,6 +689,7 @@ async function persistSnapshot() {
     ep2ser: Object.fromEntries(EP2SER)
   });
   await persistFrozenBackups();
+  await reconcileFrozenBackups();
   await persistLinkBackupConfigs();
 }
 
@@ -664,7 +714,6 @@ async function saveFrozenBackup(lsid, frozen) {
   try {
     const { putJSON } = await getSupabaseApi();
     await putJSON(frozenSupabasePath(lsid), payload);
-    await addSupabaseIndexEntry(FROZEN_INDEX_PATH, lsid);
   } catch (e) {
     console.warn("[SUPABASE] frozen backup save failed:", e?.message || e);
   }
@@ -673,7 +722,6 @@ async function deleteFrozenBackup(lsid) {
   const path = frozenBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
   await removeSupabaseFile(frozenSupabasePath(lsid), "frozen backup");
-  await removeSupabaseIndexEntry(FROZEN_INDEX_PATH, lsid);
 }
 async function persistFrozenBackups() {
   const frozen = PREFS.frozenLists || {};
@@ -5078,7 +5126,8 @@ async function render() {
       sortOptions: prefs.sortOptions || {},
       upgradeEpisodes: prefs.upgradeEpisodes || false,
       sources: prefs.sources || {},
-      blocked: prefs.blocked || []
+      blocked: prefs.blocked || [],
+      reconcileFrozenState: true
     };
     msg.textContent = "Saving…";
     const r = await fetch('/api/prefs?admin='+ADMIN, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
