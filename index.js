@@ -335,7 +335,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
 let supabaseApiPromise = null;
 const getSupabaseApi = async () => {
-  if (!supabaseApiPromise) supabaseApiPromise = import("./storage/supabase.js");
+  if (!supabaseApiPromise) supabaseApiPromise = import("./storage/supabase.mjs");
   return supabaseApiPromise;
 };
 let saveTimer = null;
