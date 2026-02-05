@@ -25,12 +25,7 @@ const IMDB_FETCH_RELEASE_ORDERS = String(process.env.IMDB_FETCH_RELEASE_ORDERS |
 const IMDB_LIST_IDS = (process.env.IMDB_LIST_IDS || "")
   .split(/[,\s]+/).map(s => s.trim()).filter(s => /^ls\d{6,}$/i.test(s));
 
-// Optional GitHub snapshot persistence
-const GITHUB_TOKEN  = process.env.GITHUB_TOKEN  || "";
-const GITHUB_OWNER  = process.env.GITHUB_OWNER  || "";
-const GITHUB_REPO   = process.env.GITHUB_REPO   || "";
-const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
-const GH_ENABLED    = !!(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+// Snapshot persistence
 const SNAP_LOCAL    = "data/snapshot.json";
 const FROZEN_DIR    = "data/frozen";
 const BACKUP_DIR    = "data/backup";
@@ -338,12 +333,13 @@ function linkBackupPath(lsid) {
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
-let ghWriteQueue = Promise.resolve();
-const enqueueGhWrite = async (fn) => {
-  const next = ghWriteQueue.then(fn, fn);
-  ghWriteQueue = next.catch(() => null);
-  return next;
+let supabaseApiPromise = null;
+const getSupabaseApi = async () => {
+  if (!supabaseApiPromise) supabaseApiPromise = import("./storage/supabase.mjs");
+  return supabaseApiPromise;
 };
+let saveTimer = null;
+let pendingSnapshot = null;
 
 async function fetchText(url) {
   const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
@@ -379,97 +375,98 @@ async function imdbGraphqlGet(operationName, variables, sha256Hash) {
   return r.json();
 }
 
-// ---- GitHub snapshot (optional) ----
-async function gh(method, path, bodyObj) {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${path}`;
-  const r = await fetch(url, {
-    method,
-    headers: {
-      "Authorization": `Bearer ${GITHUB_TOKEN}`,
-      "Accept": "application/vnd.github+json",
-      "Content-Type": "application/json",
-      "User-Agent": UA
-    },
-    body: bodyObj ? JSON.stringify(bodyObj) : undefined
-  });
-  if (!r.ok) {
-    const t = await r.text().catch(()=> "");
-    throw new Error(`GitHub ${method} ${path} -> ${r.status}: ${t}`);
-  }
-  return r.json();
+// ---- Supabase snapshot ----
+const SNAPSHOT_PATH = "snapshot.json";
+const MANUAL_INDEX_PATH = "manual/index.json";
+const FROZEN_INDEX_PATH = "frozen/index.json";
+const BACKUP_INDEX_PATH = "backup/index.json";
+
+function offlineSafeName(lsid) {
+  return String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
 }
-async function ghGetSha(path) {
+function offlineSupabasePath(lsid) {
+  return `manual/${offlineSafeName(lsid)}.json`;
+}
+function frozenSupabasePath(lsid) {
+  return `frozen/${base64Url(lsid)}.json`;
+}
+function linkBackupSupabasePath(lsid) {
+  return `backup/${base64Url(lsid)}.json`;
+}
+
+function scheduleSave(snapshot) {
+  pendingSnapshot = snapshot;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const data = pendingSnapshot;
+    pendingSnapshot = null;
+    getSupabaseApi()
+      .then(({ putJSON }) => putJSON(SNAPSHOT_PATH, data))
+      .catch((err) => {
+        console.warn("[SNAPSHOT] supabase save failed:", err?.message || err);
+      });
+  }, 10000);
+}
+
+async function loadSupabaseIndex(path) {
   try {
-    const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
-    return data && data.sha || null;
-  } catch { return null; }
-}
-async function ghPutWithRetry(path, bodyBuilder, attempts = 3) {
-  if (!GH_ENABLED) return;
-  let lastErr = null;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const body = await bodyBuilder();
-      await enqueueGhWrite(() => gh("PUT", `/contents/${encodeURIComponent(path)}`, body));
-      return;
-    } catch (e) {
-      lastErr = e;
-      const msg = String(e && e.message || "");
-      if ((msg.includes(" 409:") || msg.includes(" 429:")) && i < attempts - 1) {
-        const wait = msg.includes(" 429:") ? 5000 * (i + 1) : 300;
-        await sleep(wait);
-        continue;
-      }
-      break;
-    }
+    const { getJSON } = await getSupabaseApi();
+    const data = await getJSON(path);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
   }
-  if (lastErr) console.warn("[GH] update failed:", lastErr.message || lastErr);
 }
+
+async function saveSupabaseIndex(path, ids) {
+  try {
+    const { putJSON } = await getSupabaseApi();
+    await putJSON(path, ids);
+  } catch (e) {
+    console.warn("[SUPABASE] index save failed:", e?.message || e);
+  }
+}
+
+async function addSupabaseIndexEntry(path, id) {
+  const ids = await loadSupabaseIndex(path);
+  if (!ids.includes(id)) {
+    ids.push(id);
+    await saveSupabaseIndex(path, ids);
+  }
+}
+
+async function removeSupabaseIndexEntry(path, id) {
+  const ids = await loadSupabaseIndex(path);
+  const next = ids.filter(entry => entry !== id);
+  if (next.length !== ids.length) {
+    await saveSupabaseIndex(path, next);
+  }
+}
+
+async function removeSupabaseFile(path, label) {
+  try {
+    const { deleteJSON } = await getSupabaseApi();
+    await deleteJSON(path);
+  } catch (e) {
+    console.warn(`[SUPABASE] ${label} delete failed:`, e?.message || e);
+  }
+}
+
 async function saveSnapshot(obj) {
   // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
     await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
-  // GitHub (if enabled)
-  if (!GH_ENABLED) return;
-  const content = Buffer.from(JSON.stringify(obj, null, 2)).toString("base64");
-  const path = "data/snapshot.json";
-  await ghPutWithRetry(path, async () => {
-    const sha = await ghGetSha(path);
-    const body = { message: "Update snapshot.json", content, branch: GITHUB_BRANCH };
-    if (sha) body.sha = sha;
-    return body;
-  });
-}
-async function ghDeleteFile(path) {
-  if (!GH_ENABLED) return;
-  const sha = await ghGetSha(path);
-  if (!sha) return;
-  await enqueueGhWrite(() => gh("DELETE", `/contents/${encodeURIComponent(path)}`, {
-    message: `Delete ${path}`,
-    sha,
-    branch: GITHUB_BRANCH
-  }));
-}
-async function ghListDir(path) {
-  if (!GH_ENABLED) return [];
-  try {
-    const data = await gh("GET", `/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
+  scheduleSave(obj);
 }
 async function loadSnapshot() {
-  // try GitHub first
-  if (GH_ENABLED) {
-    try {
-      const data = await gh("GET", `/contents/${encodeURIComponent("data/snapshot.json")}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
-      const buf = Buffer.from(data.content, "base64").toString("utf8");
-      return JSON.parse(buf);
-    } catch {/* ignore */}
-  }
+  // try Supabase first
+  try {
+    const { getJSON } = await getSupabaseApi();
+    const data = await getJSON(SNAPSHOT_PATH);
+    if (data) return data;
+  } catch {/* ignore */}
   // local
   try {
     const txt = await fs.readFile(SNAP_LOCAL, "utf8");
@@ -478,12 +475,7 @@ async function loadSnapshot() {
 }
 
 function offlineFileName(lsid) {
-  const safe = String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
-  return `${OFFLINE_DIR}/${safe}.json`;
-}
-function offlineRelPath(lsid) {
-  const safe = String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
-  return `data/manual/${safe}.json`;
+  return `${OFFLINE_DIR}/${offlineSafeName(lsid)}.json`;
 }
 
 async function saveOfflineList(lsid) {
@@ -502,15 +494,12 @@ async function saveOfflineList(lsid) {
       updatedAt: Date.now()
     };
     await fs.writeFile(offlineFileName(lsid), JSON.stringify(payload, null, 2), "utf8");
-    if (GH_ENABLED) {
-      const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
-      const relPath = offlineRelPath(lsid);
-      await ghPutWithRetry(relPath, async () => {
-        const sha = await ghGetSha(relPath);
-        const body = { message: `Update manual list ${lsid}`, content, branch: GITHUB_BRANCH };
-        if (sha) body.sha = sha;
-        return body;
-      });
+    try {
+      const { putJSON } = await getSupabaseApi();
+      await putJSON(offlineSupabasePath(lsid), payload);
+      await addSupabaseIndexEntry(MANUAL_INDEX_PATH, lsid);
+    } catch (e) {
+      console.warn("[SUPABASE] manual list save failed:", e?.message || e);
     }
   } catch (e) {
     console.warn("[OFFLINE] save failed:", e.message || e);
@@ -521,48 +510,13 @@ async function deleteOfflineListFile(lsid) {
   try {
     await fs.unlink(offlineFileName(lsid));
   } catch {/* ignore */}
-  await ghDeleteFile(offlineRelPath(lsid));
+  await removeSupabaseFile(offlineSupabasePath(lsid), "manual list");
+  await removeSupabaseIndexEntry(MANUAL_INDEX_PATH, lsid);
 }
 
 async function loadOfflineLists() {
   try {
-    if (GH_ENABLED) {
-      const entries = await ghListDir("data/manual");
-      for (const entry of entries) {
-        if (!entry || entry.type !== "file" || !entry.name.endsWith(".json")) continue;
-        try {
-          const data = await gh("GET", `/contents/${encodeURIComponent(entry.path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
-          const buf = Buffer.from(data.content, "base64").toString("utf8");
-          const payload = JSON.parse(buf);
-          const id = String(payload?.id || "").trim();
-          if (!isCustomListId(id)) continue;
-          const ids = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
-          const name = sanitizeName(payload.name || id);
-          const stremlist = !!payload.stremlist;
-          LISTS[id] = {
-            id,
-            name,
-            url: null,
-            ids: ids.slice(),
-            orders: payload.orders || { imdb: ids.slice() }
-          };
-          PREFS.customLists = PREFS.customLists || {};
-          if (!PREFS.customLists[id]) {
-            PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
-          } else {
-            PREFS.customLists[id].kind = "offline";
-          }
-          PREFS.displayNames = PREFS.displayNames || {};
-          if (name) PREFS.displayNames[id] = name;
-          if (stremlist) {
-            PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
-            if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
-          }
-        } catch (e) {
-          console.warn("[OFFLINE] load failed:", entry.path, e.message || e);
-        }
-      }
-    }
+    const loaded = new Set();
     await fs.mkdir(OFFLINE_DIR, { recursive: true });
     const entries = await fs.readdir(OFFLINE_DIR, { withFileTypes: true });
     for (const entry of entries) {
@@ -572,6 +526,7 @@ async function loadOfflineLists() {
         const data = JSON.parse(txt);
         const id = String(data?.id || "").trim();
         if (!isCustomListId(id)) continue;
+        loaded.add(id);
         const ids = Array.isArray(data.ids) ? data.ids.filter(isImdb) : [];
         const name = sanitizeName(data.name || id);
         const stremlist = !!data.stremlist;
@@ -596,6 +551,77 @@ async function loadOfflineLists() {
         }
       } catch (e) {
         console.warn("[OFFLINE] load failed:", entry.name, e.message || e);
+      }
+    }
+    let ids = await loadSupabaseIndex(MANUAL_INDEX_PATH);
+    if (ids.length) {
+      for (const id of ids) {
+        if (!id || loaded.has(id) || !isCustomListId(id)) continue;
+        try {
+          const { getJSON } = await getSupabaseApi();
+          const payload = await getJSON(offlineSupabasePath(id));
+          if (!payload) continue;
+          loaded.add(id);
+          const listIds = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
+          const name = sanitizeName(payload.name || id);
+          const stremlist = !!payload.stremlist;
+          LISTS[id] = {
+            id,
+            name,
+            url: null,
+            ids: listIds.slice(),
+            orders: payload.orders || { imdb: listIds.slice() }
+          };
+          PREFS.customLists = PREFS.customLists || {};
+          if (!PREFS.customLists[id]) {
+            PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
+          } else {
+            PREFS.customLists[id].kind = "offline";
+          }
+          PREFS.displayNames = PREFS.displayNames || {};
+          if (name) PREFS.displayNames[id] = name;
+          if (stremlist) {
+            PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
+            if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
+          }
+        } catch (e) {
+          console.warn("[SUPABASE] manual list load failed:", id, e?.message || e);
+        }
+      }
+    } else {
+      try {
+        const { listJSON, getJSON } = await getSupabaseApi();
+        const paths = await listJSON("manual");
+        for (const path of paths) {
+          const payload = await getJSON(path);
+          const id = String(payload?.id || "").trim();
+          if (!id || loaded.has(id) || !isCustomListId(id)) continue;
+          loaded.add(id);
+          const listIds = Array.isArray(payload.ids) ? payload.ids.filter(isImdb) : [];
+          const name = sanitizeName(payload.name || id);
+          const stremlist = !!payload.stremlist;
+          LISTS[id] = {
+            id,
+            name,
+            url: null,
+            ids: listIds.slice(),
+            orders: payload.orders || { imdb: listIds.slice() }
+          };
+          PREFS.customLists = PREFS.customLists || {};
+          if (!PREFS.customLists[id]) {
+            PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
+          } else {
+            PREFS.customLists[id].kind = "offline";
+          }
+          PREFS.displayNames = PREFS.displayNames || {};
+          if (name) PREFS.displayNames[id] = name;
+          if (stremlist) {
+            PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
+            if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
+          }
+        }
+      } catch (e) {
+        console.warn("[SUPABASE] manual list listing failed:", e?.message || e);
       }
     }
   } catch (e) {
@@ -635,20 +661,19 @@ async function saveFrozenBackup(lsid, frozen) {
     await fs.mkdir(FROZEN_DIR, { recursive: true });
     await fs.writeFile(path, JSON.stringify(payload, null, 2), "utf8");
   } catch {/* ignore */}
-  if (!GH_ENABLED) return;
-  const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
-  const relPath = `data/frozen/${base64Url(lsid)}.json`;
-  await ghPutWithRetry(relPath, async () => {
-    const sha = await ghGetSha(relPath);
-    const body = { message: `Update frozen ${lsid}`, content, branch: GITHUB_BRANCH };
-    if (sha) body.sha = sha;
-    return body;
-  });
+  try {
+    const { putJSON } = await getSupabaseApi();
+    await putJSON(frozenSupabasePath(lsid), payload);
+    await addSupabaseIndexEntry(FROZEN_INDEX_PATH, lsid);
+  } catch (e) {
+    console.warn("[SUPABASE] frozen backup save failed:", e?.message || e);
+  }
 }
 async function deleteFrozenBackup(lsid) {
   const path = frozenBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
-  await ghDeleteFile(`data/frozen/${base64Url(lsid)}.json`);
+  await removeSupabaseFile(frozenSupabasePath(lsid), "frozen backup");
+  await removeSupabaseIndexEntry(FROZEN_INDEX_PATH, lsid);
 }
 async function persistFrozenBackups() {
   const frozen = PREFS.frozenLists || {};
@@ -677,20 +702,19 @@ async function saveLinkBackupConfig(lsid, config) {
     await fs.mkdir(BACKUP_DIR, { recursive: true });
     await fs.writeFile(path, JSON.stringify(payload, null, 2), "utf8");
   } catch {/* ignore */}
-  if (!GH_ENABLED) return;
-  const content = Buffer.from(JSON.stringify(payload, null, 2)).toString("base64");
-  const relPath = `data/backup/${base64Url(lsid)}.json`;
-  await ghPutWithRetry(relPath, async () => {
-    const sha = await ghGetSha(relPath);
-    const body = { message: `Update backup ${lsid}`, content, branch: GITHUB_BRANCH };
-    if (sha) body.sha = sha;
-    return body;
-  });
+  try {
+    const { putJSON } = await getSupabaseApi();
+    await putJSON(linkBackupSupabasePath(lsid), payload);
+    await addSupabaseIndexEntry(BACKUP_INDEX_PATH, lsid);
+  } catch (e) {
+    console.warn("[SUPABASE] link backup save failed:", e?.message || e);
+  }
 }
 async function deleteLinkBackupConfig(lsid) {
   const path = linkBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
-  await ghDeleteFile(`data/backup/${base64Url(lsid)}.json`);
+  await removeSupabaseFile(linkBackupSupabasePath(lsid), "link backup");
+  await removeSupabaseIndexEntry(BACKUP_INDEX_PATH, lsid);
 }
 async function persistLinkBackupConfigs() {
   const configs = PREFS.backupConfigs || {};
@@ -716,18 +740,25 @@ async function loadLinkBackupConfigs() {
       } catch {/* ignore */}
     }
   } catch {/* ignore */}
-  if (GH_ENABLED) {
-    const entries = await ghListDir("data/backup");
-    for (const entry of entries) {
-      if (!entry?.path || entry.type !== "file" || !entry.path.endsWith(".json")) continue;
-      if (backups.size && Array.from(backups.keys()).some(id => entry.path.endsWith(`${base64Url(id)}.json`))) continue;
+  const ids = await loadSupabaseIndex(BACKUP_INDEX_PATH);
+  if (ids.length) {
+    for (const id of ids) {
+      if (!id || backups.has(id)) continue;
       try {
-        const data = await gh("GET", `/contents/${encodeURIComponent(entry.path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
-        const buf = Buffer.from(data.content, "base64").toString("utf8");
-        const parsed = JSON.parse(buf);
+        const { getJSON } = await getSupabaseApi();
+        const parsed = await getJSON(linkBackupSupabasePath(id));
         if (parsed?.id) backups.set(String(parsed.id), parsed);
       } catch {/* ignore */}
     }
+  } else {
+    try {
+      const { listJSON, getJSON } = await getSupabaseApi();
+      const paths = await listJSON("backup");
+      for (const path of paths) {
+        const parsed = await getJSON(path);
+        if (parsed?.id) backups.set(String(parsed.id), parsed);
+      }
+    } catch {/* ignore */}
   }
   return backups;
 }
@@ -778,18 +809,25 @@ async function loadFrozenBackups() {
       } catch {/* ignore */}
     }
   } catch {/* ignore */}
-  if (GH_ENABLED) {
-    const entries = await ghListDir("data/frozen");
-    for (const entry of entries) {
-      if (!entry?.path || entry.type !== "file" || !entry.path.endsWith(".json")) continue;
-      if (backups.size && Array.from(backups.keys()).some(id => entry.path.endsWith(`${base64Url(id)}.json`))) continue;
+  const ids = await loadSupabaseIndex(FROZEN_INDEX_PATH);
+  if (ids.length) {
+    for (const id of ids) {
+      if (!id || backups.has(id)) continue;
       try {
-        const data = await gh("GET", `/contents/${encodeURIComponent(entry.path)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
-        const buf = Buffer.from(data.content, "base64").toString("utf8");
-        const parsed = JSON.parse(buf);
+        const { getJSON } = await getSupabaseApi();
+        const parsed = await getJSON(frozenSupabasePath(id));
         if (parsed?.id) backups.set(String(parsed.id), parsed);
       } catch {/* ignore */}
     }
+  } else {
+    try {
+      const { listJSON, getJSON } = await getSupabaseApi();
+      const paths = await listJSON("frozen");
+      for (const path of paths) {
+        const parsed = await getJSON(path);
+        if (parsed?.id) backups.set(String(parsed.id), parsed);
+      }
+    } catch {/* ignore */}
   }
   return backups;
 }
@@ -2826,13 +2864,15 @@ app.post("/api/bulk-add-sources", async (req, res) => {
     PREFS.sources.lists = Array.from(new Set([ ...(PREFS.sources.lists || []), ...lists ]));
     PREFS.sources.traktUsers = Array.from(new Set([ ...(PREFS.sources.traktUsers || []), ...traktUsers ]));
 
-    await fullSync({ rediscover: true });
-    scheduleNextSync();
+    fullSync({ rediscover: true, force: true })
+      .then(() => scheduleNextSync())
+      .catch((err) => console.warn("[BULK] background sync failed:", err?.message || err));
 
     res.json({
       ok: true,
       added: { users: users.length, lists: lists.length, traktUsers: traktUsers.length },
-      errors
+      errors,
+      syncQueued: true
     });
   } catch (e) { res.status(500).send(String(e)); }
 });
@@ -3702,7 +3742,10 @@ app.get("/admin", async (req,res)=>{
         <span>Show</span>
       </button>
       <div id="discoveredBody" class="collapse-body">
-        <div id="discoveredStatus" class="mini muted"></div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button id="discoverRefreshBtn" type="button">Discover now</button>
+          <div id="discoveredStatus" class="mini muted"></div>
+        </div>
         <ul id="discoveredList"></ul>
       </div>
     </div>
@@ -4107,8 +4150,26 @@ function stableSortClient(items, sortKey){
 }
 
 async function render() {
-  const prefs = await getPrefs();
-  const lists = await getLists();
+  const snapshotListEl = document.getElementById('snapshotList');
+  if (snapshotListEl && !snapshotListEl.childElementCount && !snapshotListEl.textContent.trim()) {
+    snapshotListEl.textContent = 'Loading lists…';
+  }
+  const container = document.getElementById('prefs');
+  if (container && !container.childElementCount) {
+    container.innerHTML = '<div class="mini muted">Loading custom lists…</div>';
+  }
+
+  let prefs;
+  let lists;
+  try {
+    [prefs, lists] = await Promise.all([getPrefs(), getLists()]);
+  } catch (e) {
+    if (snapshotListEl) snapshotListEl.textContent = 'Failed to load lists.';
+    if (container) container.innerHTML = '<div class="mini muted">Failed to load custom lists.</div>';
+    console.warn('[UI] render load failed:', e?.message || e);
+    return;
+  }
+
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
   const refresh = async () => { await render(); };
   const listCount = (lsid) => (lists[lsid]?.ids || []).length;
@@ -4221,7 +4282,7 @@ async function render() {
     });
   }
 
-  async function renderDiscovered() {
+  async function renderDiscovered(forceRefresh = false) {
     const wrap = document.getElementById('discoveredList');
     const status = document.getElementById('discoveredStatus');
     if (!wrap) return;
@@ -4256,9 +4317,15 @@ async function render() {
     if (Array.isArray(discoveredCache)) {
       renderItems(discoveredCache);
     } else {
-      wrap.textContent = 'Loading…';
+      wrap.textContent = 'Press Discover now to fetch lists.';
     }
-    if (status) status.textContent = 'Loading…';
+
+    if (!forceRefresh) {
+      if (status && !Array.isArray(discoveredCache)) status.textContent = 'Idle (manual discover only).';
+      return;
+    }
+
+    if (status) status.textContent = 'Discovering…';
     if (discoveredLoading) return;
     discoveredLoading = true;
     try {
@@ -4266,12 +4333,25 @@ async function render() {
       const items = data?.lists || [];
       discoveredCache = items;
       renderItems(items);
-      if (status) status.textContent = '';
+      if (status) status.textContent = 'Done. ' + items.length + ' list(s) found.';
     } catch (e) {
-      if (status) status.textContent = 'Failed to refresh discovered lists; showing last results.';
+      if (status) status.textContent = 'Discover failed; showing last results.';
     } finally {
       discoveredLoading = false;
     }
+  }
+
+  function wireDiscoveredControls() {
+    const btn = document.getElementById('discoverRefreshBtn');
+    if (!btn) return;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await renderDiscovered(true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
   }
 
   function wireTmdbControls() {
@@ -4347,7 +4427,8 @@ async function render() {
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(data.message || 'Bulk add failed');
         const errText = (data.errors || []).join(' | ');
-        status.textContent = 'Added: ' + data.added.users + ' users, ' + data.added.traktUsers + ' Trakt users, ' + data.added.lists + ' lists.' + (errText ? ' Errors: ' + errText : '');
+        const syncText = data.syncQueued ? ' Sync started in background.' : '';
+        status.textContent = 'Added: ' + data.added.users + ' users, ' + data.added.traktUsers + ' Trakt users, ' + data.added.lists + ' lists.' + syncText + (errText ? ' Errors: ' + errText : '');
         usersInput.value = '';
         listsInput.value = '';
         await renderDiscovered();
@@ -4361,10 +4442,11 @@ async function render() {
 
   wireTmdbControls();
   wireBulkAdd();
+  wireDiscoveredControls();
   renderSnapshotList();
   renderDiscovered();
 
-  const container = document.getElementById('prefs'); container.innerHTML = "";
+  container.innerHTML = "";
 
   const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
   const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
