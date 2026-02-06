@@ -3228,36 +3228,109 @@ app.get("/admin", async (req,res)=>{
 <title>My Lists – Admin</title>
 <style>
   :root{
-    color-scheme:light;
-    --bg:#050415;
-    --bg2:#0f0d1a;
-    --card:#141129;
-    --muted:#9aa0b4;
-    --text:#f7f7fb;
-    --accent:#6c5ce7;
-    --accent2:#8b7cf7;
-    --accent-soft:rgba(108,92,231,.18);
-    --border:#262145;
-    --danger:#ff7675;
+    color-scheme:dark;
+    --bg:#05060f;
+    --bg2:#0b1020;
+    --card:#0f172a;
+    --card-soft:rgba(15,23,42,.7);
+    --glass:rgba(15,23,42,.65);
+    --muted:#94a3b8;
+    --text:#f8fafc;
+    --accent:#7c5cff;
+    --accent2:#4cc9f0;
+    --accent-soft:rgba(124,92,255,.18);
+    --border:rgba(148,163,184,.2);
+    --danger:#ff6b6b;
+    --success:#22c55e;
+    --shadow:0 18px 40px rgba(2,6,23,.45);
   }
   body{
-    font-family:system-ui,Segoe UI,Roboto,Arial;
+    font-family:"Inter",system-ui,-apple-system,Segoe UI,Roboto,Arial;
     margin:0;
-    background:radial-gradient(circle at top,#2f2165 0,#050415 48%,#02010a 100%);
+    background:
+      radial-gradient(circle at 15% -10%, rgba(124,92,255,.45), transparent 40%),
+      radial-gradient(circle at 85% -20%, rgba(76,201,240,.35), transparent 40%),
+      linear-gradient(180deg, var(--bg2), var(--bg));
     color:var(--text);
+    min-height:100vh;
   }
-  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
-  .hero{padding:20px 0 12px}
+  .app-shell{max-width:1200px;margin:24px auto 60px;padding:0 20px;}
+  .topbar{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:16px;
+    padding:22px 24px;
+    border-radius:22px;
+    background:linear-gradient(135deg, rgba(124,92,255,.25), rgba(15,23,42,.85));
+    border:1px solid rgba(124,92,255,.35);
+    box-shadow:var(--shadow);
+    backdrop-filter:blur(14px);
+  }
+  .brand{
+    display:flex;
+    align-items:center;
+    gap:14px;
+  }
+  .brand-icon{
+    width:54px;
+    height:54px;
+    border-radius:16px;
+    display:grid;
+    place-items:center;
+    background:linear-gradient(135deg, rgba(124,92,255,.7), rgba(76,201,240,.7));
+    box-shadow:0 12px 24px rgba(76,201,240,.35);
+  }
+  .brand-icon svg{width:28px;height:28px;fill:white;}
   h1{margin:0 0 4px;font-weight:700;font-size:26px;letter-spacing:.01em}
   .subtitle{color:var(--muted);font-size:14px}
+  .topbar-actions{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    justify-content:flex-end;
+  }
+  .badge{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    padding:6px 12px;
+    border-radius:999px;
+    background:rgba(15,23,42,.65);
+    border:1px solid rgba(148,163,184,.25);
+    color:var(--text);
+    font-size:12px;
+  }
+  .stats-grid{
+    display:grid;
+    gap:14px;
+    grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    margin-top:18px;
+  }
+  .stat-card{
+    padding:16px;
+    border-radius:16px;
+    background:var(--glass);
+    border:1px solid var(--border);
+    box-shadow:var(--shadow);
+  }
+  .stat-card h4{margin:0 0 6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .stat-card p{margin:0;font-size:16px;font-weight:600;}
   .grid{display:grid;gap:16px;grid-template-columns:1fr}
   @media(min-width:980px){ .grid{grid-template-columns:1.1fr .9fr} }
   .card{
     border:1px solid var(--border);
     border-radius:18px;
     padding:16px 18px;
-    background:linear-gradient(145deg,rgba(17,14,39,.96),rgba(8,6,25,.98));
-    box-shadow:0 18px 40px rgba(0,0,0,.55);
+    background:linear-gradient(160deg, rgba(15,23,42,.92), rgba(2,6,23,.92));
+    box-shadow:var(--shadow);
+    backdrop-filter:blur(12px);
+    transition:transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+  }
+  .card:hover{
+    transform:translateY(-2px);
+    box-shadow:0 24px 48px rgba(2,6,23,.55);
+    border-color:rgba(124,92,255,.35);
   }
   h3{margin:0 0 8px;font-size:17px}
   h4{margin:10px 0 4px;font-size:14px}
@@ -3265,34 +3338,36 @@ app.get("/admin", async (req,res)=>{
     padding:9px 14px;
     border:0;
     border-radius:999px;
-    background:var(--accent);
+    background:linear-gradient(135deg, var(--accent), var(--accent2));
     color:#fff;
     cursor:pointer;
     font-size:13px;
     display:inline-flex;
     align-items:center;
     gap:6px;
-    box-shadow:0 6px 16px rgba(108,92,231,.55);
+    box-shadow:0 10px 20px rgba(76,201,240,.25);
+    transition:transform .15s ease, box-shadow .15s ease, filter .15s ease;
   }
+  button:hover{transform:translateY(-1px);filter:brightness(1.05);}
   button.btn2{background:var(--accent2);}
   button:disabled{opacity:.5;cursor:default;box-shadow:none}
   small{color:var(--muted)}
   .code{
     font-family:ui-monospace,Menlo,Consolas,monospace;
-    background:#1c1837;
-    color:#d6d3ff;
+    background:rgba(15,23,42,.85);
+    color:#e2e8f0;
     padding:4px 6px;
     border-radius:6px;
     font-size:12px;
     word-break:break-all;
   }
   table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
-  th,td{padding:8px 6px;border-bottom:1px solid rgba(38,33,69,.8);text-align:left;vertical-align:top}
-  th{font-weight:600;color:#d7d1ff;font-size:12px}
-  tr:hover td{background:rgba(17,14,40,.7);}
+  th,td{padding:10px 8px;border-bottom:1px solid rgba(148,163,184,.2);text-align:left;vertical-align:top}
+  th{font-weight:600;color:#d7e3ff;font-size:12px}
+  tr:hover td{background:rgba(30,41,59,.45);}
   .muted{color:var(--muted)}
   .chev{cursor:pointer;font-size:16px;line-height:1;user-select:none}
-  .drawer{background:#120f25}
+  .drawer{background:rgba(15,23,42,.6)}
   .thumbs{
     display:grid;
     grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
@@ -3307,14 +3382,14 @@ app.get("/admin", async (req,res)=>{
     gap:10px;
     align-items:center;
     border:1px solid var(--border);
-    background:#1a1636;
+    background:rgba(15,23,42,.9);
     border-radius:12px;
     padding:6px 8px;
   }
   .thumb-img{
     object-fit:cover;
     border-radius:6px;
-    background:#2a244e;
+    background:#1e293b;
     flex-shrink:0;
     width:52px;
     height:78px;
@@ -3332,7 +3407,7 @@ app.get("/admin", async (req,res)=>{
     line-height:20px;
     text-align:center;
     border-radius:999px;
-    background:#3a2c2c;
+    background:rgba(71,45,45,.85);
     color:#ffb4b4;
     font-weight:700;
     display:none;
@@ -3351,7 +3426,7 @@ app.get("/admin", async (req,res)=>{
     margin-top:6px;
     width:100%;
     box-sizing:border-box;
-    background:#1c1837;
+    background:#0f172a;
     color:var(--text);
     border:1px solid var(--border);
     border-radius:8px;
@@ -3372,7 +3447,7 @@ app.get("/admin", async (req,res)=>{
     padding:12px;
     border:1px solid var(--border);
     border-radius:12px;
-    background:#15122c;
+    background:rgba(15,23,42,.7);
   }
   .create-panel.active{display:block;}
   .create-layout{
@@ -3428,7 +3503,7 @@ app.get("/admin", async (req,res)=>{
     background:rgba(127, 120, 255, 0.25);
   }
   .csv-drop .csv-card{
-    background:rgba(12,10,26,.55);
+    background:rgba(15,23,42,.65);
     border:1px solid rgba(90,80,180,.6);
     border-radius:12px;
     padding:8px 12px;
@@ -3447,7 +3522,7 @@ app.get("/admin", async (req,res)=>{
     display:inline-flex;
     align-items:center;
     gap:8px;
-    background:#1c1837;
+    background:rgba(15,23,42,.75);
     border:1px solid var(--border);
     border-radius:999px;
     padding:4px 9px;
@@ -3458,7 +3533,7 @@ app.get("/admin", async (req,res)=>{
   .pill input{margin-right:4px}
   .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
   input[type="text"]{
-    background:#1c1837;
+    background:rgba(15,23,42,.85);
     color:var(--text);
     border:1px solid var(--border);
     border-radius:8px;
@@ -3476,7 +3551,7 @@ app.get("/admin", async (req,res)=>{
     border:1px solid var(--border);
     border-radius:12px;
     padding:12px;
-    background:rgba(12,10,26,.45);
+    background:rgba(15,23,42,.5);
   }
   .imdb-box input{
     width:100%;
@@ -3487,7 +3562,7 @@ app.get("/admin", async (req,res)=>{
     padding:6px 9px;
     font-size:12px;
     min-width:40px;
-    background:var(--card);
+    background:rgba(15,23,42,.85);
     border:1px solid var(--border);
     box-shadow:none;
   }
@@ -3598,28 +3673,37 @@ app.get("/admin", async (req,res)=>{
     justify-content:center;
   }
   .nav-btn{
-    background:var(--card);
-    border:1px solid var(--border);
+    background:rgba(15,23,42,.75);
+    border:1px solid rgba(124,92,255,.35);
     color:var(--text);
     padding:10px 16px;
     border-radius:999px;
     cursor:pointer;
-    box-shadow:0 6px 16px rgba(0,0,0,.35);
+    box-shadow:0 8px 18px rgba(2,6,23,.35);
+    display:flex;
+    align-items:center;
+    gap:8px;
   }
+  .nav-btn svg{width:16px;height:16px;fill:currentColor;}
+  .nav-btn span{display:inline-flex;}
+  .nav-btn:hover{border-color:rgba(76,201,240,.6);}
   .nav-btn.active{
-    background:var(--accent);
-    box-shadow:0 10px 26px rgba(108,92,231,.55);
+    background:linear-gradient(135deg, rgba(124,92,255,.9), rgba(76,201,240,.85));
+    box-shadow:0 12px 28px rgba(124,92,255,.45);
   }
   .section{width:100%;display:none;}
-  .section.active{display:block;}
+  .section.active{display:block;animation:fadeIn .35s ease;}
   .center-card{max-width:980px;margin:0 auto;}
-  .wrap{display:flex;flex-direction:column;align-items:center;}
+  @keyframes fadeIn{
+    from{opacity:.6;transform:translateY(6px);}
+    to{opacity:1;transform:translateY(0);}
+  }
   .collapse-toggle{
     display:inline-flex;
     align-items:center;
     gap:6px;
     margin-top:6px;
-    background:var(--card);
+    background:rgba(15,23,42,.75);
     border:1px solid var(--border);
     color:var(--text);
     padding:6px 10px;
@@ -3641,7 +3725,7 @@ app.get("/admin", async (req,res)=>{
     padding:6px 10px;
     border-radius:10px;
     border:1px solid var(--border);
-    background:var(--card);
+    background:rgba(15,23,42,.85);
     color:var(--text);
     cursor:pointer;
   }
@@ -3651,6 +3735,34 @@ app.get("/admin", async (req,res)=>{
   .icon-btn.home{color:#ffe68a;border-color:#6a5a1a;background:rgba(106,90,26,.25);}
   .icon-btn.home.active{color:#ffd24a;border-color:#f3c341;background:rgba(243,195,65,.25);box-shadow:0 8px 18px rgba(243,195,65,.25);}
   .icon-btn.home.inactive{opacity:.5;}
+  .section-header{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    justify-content:space-between;
+    margin-bottom:10px;
+  }
+  .section-header h3{margin:0;}
+  .section-header .chip{
+    padding:4px 10px;
+    border-radius:999px;
+    font-size:12px;
+    background:rgba(34,197,94,.15);
+    border:1px solid rgba(34,197,94,.35);
+    color:#bbf7d0;
+  }
+  .hint{
+    display:flex;
+    gap:10px;
+    align-items:flex-start;
+    padding:12px;
+    border-radius:14px;
+    border:1px solid rgba(124,92,255,.25);
+    background:rgba(124,92,255,.08);
+    color:#e2e8f0;
+    margin:12px 0 0;
+  }
+  .hint svg{width:18px;height:18px;fill:#c4b5fd;margin-top:2px;}
   .discovered-item{
     display:flex;
     align-items:flex-start;
@@ -3659,20 +3771,63 @@ app.get("/admin", async (req,res)=>{
   }
 </style>
 </head><body>
-<div class="wrap">
-  <div class="hero">
-    <h1>My Lists – Admin</h1>
-    <div class="subtitle">Last sync: ${lastSyncText}</div>
-  </div>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6a2 2 0 0 1 2-2h6.5a2 2 0 0 1 1.4.6l4.5 4.6A2 2 0 0 1 19 10v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm7 0v4a2 2 0 0 0 2 2h4"></path></svg>
+      </div>
+      <div>
+        <h1>My Lists Control Room</h1>
+        <div class="subtitle">Last sync: ${lastSyncText}</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span class="badge">v12.4.0</span>
+      <span class="badge">Auto-sync every ${IMDB_SYNC_MINUTES} min</span>
+      <span class="badge">Secure key: ${SHARED_SECRET ? "enabled" : "open"}</span>
+    </div>
+  </header>
+
+  <section class="stats-grid">
+    <div class="stat-card">
+      <h4>Manifest</h4>
+      <p>Ready to install</p>
+      <small class="muted">Keep this URL handy.</small>
+    </div>
+    <div class="stat-card">
+      <h4>Sync status</h4>
+      <p>${LAST_SYNC_AT ? "Healthy" : "Waiting for first sync"}</p>
+      <small class="muted">Manual sync triggers keep data fresh.</small>
+    </div>
+    <div class="stat-card">
+      <h4>Catalogs</h4>
+      <p>Customized layout</p>
+      <small class="muted">Reorder, freeze, and sort lists.</small>
+    </div>
+  </section>
 
   <div class="nav">
-    <button class="nav-btn active" data-target="snapshot">Snapshot</button>
-    <button class="nav-btn" data-target="add">Add Lists</button>
-    <button class="nav-btn" data-target="customize">Customize Layout</button>
+    <button class="nav-btn active" data-target="snapshot">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a3 3 0 0 1 3-3h7l6 6v7a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7zm9-2v5a2 2 0 0 0 2 2h5"></path></svg>
+      <span>Snapshot</span>
+    </button>
+    <button class="nav-btn" data-target="add">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5a1 1 0 0 1 1 1v5h5a1 1 0 1 1 0 2h-5v5a1 1 0 1 1-2 0v-5H6a1 1 0 1 1 0-2h5V6a1 1 0 0 1 1-1z"></path></svg>
+      <span>Add Sources</span>
+    </button>
+    <button class="nav-btn" data-target="customize">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a2 2 0 0 1 2-2h4v4H4V7zm0 10v-4h6v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zm10-10a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2h-6V7zm0 12v-4h6v2a2 2 0 0 1-2 2h-4z"></path></svg>
+      <span>Customize</span>
+    </button>
   </div>
 
   <section id="section-snapshot" class="section active">
     <div class="card center-card">
+      <div class="section-header">
+        <h3>Snapshot Overview</h3>
+        <span class="chip">Live</span>
+      </div>
       <div class="snapshot-top">
         <div>
           <h3>Manifest URL</h3>
@@ -3706,6 +3861,13 @@ app.get("/admin", async (req,res)=>{
           </div>
         </div>
       </div>
+      <div class="hint">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 .001 20.001A10 10 0 0 0 12 2zm0 4a1.5 1.5 0 1 1-1.5 1.5A1.5 1.5 0 0 1 12 6zm2 12h-4a1 1 0 0 1 0-2h1v-4h-1a1 1 0 0 1 0-2h3a1 1 0 0 1 1 1v5h1a1 1 0 0 1 0 2z"></path></svg>
+        <div>
+          <div><b>Tip:</b> Use the Customize tab to freeze lists or define custom ordering.</div>
+          <div class="mini muted">Changes here will update the manifest version automatically.</div>
+        </div>
+      </div>
       <h3 style="margin-top:18px;">Current Snapshot</h3>
       <button class="collapse-toggle" type="button" data-target="snapshotBody" aria-expanded="false">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.6 7.4a1 1 0 0 1 1.4 0L10 10.4l3-3a1 1 0 1 1 1.4 1.4l-3.7 3.7a1 1 0 0 1-1.4 0L5.6 8.8a1 1 0 0 1 0-1.4z"/></svg>
@@ -3719,7 +3881,10 @@ app.get("/admin", async (req,res)=>{
 
   <section id="section-add" class="section">
     <div class="card center-card">
-      <h3>Add & Sources</h3>
+      <div class="section-header">
+        <h3>Add & Sources</h3>
+        <span class="chip">Discover</span>
+      </div>
       <p class="mini muted" style="margin-top:6px;">We merge your main user (+ extras) and explicit list URLs/IDs. Removing a list also blocks it so it won’t re-appear on the next sync.</p>
 
       <div class="row">
@@ -3801,7 +3966,10 @@ app.get("/admin", async (req,res)=>{
 
   <section id="section-customize" class="section">
     <div class="card center-card">
-      <h3>Customize Layout</h3>
+      <div class="section-header">
+        <h3>Customize Layout</h3>
+        <span class="chip">Arrange</span>
+      </div>
       <p class="muted">Drag rows to reorder lists or use the arrows. Click ▾ to open the drawer and tune sort options or custom order.</p>
       <div class="rowtools">
         <label class="pill"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
