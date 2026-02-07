@@ -3286,12 +3286,26 @@ app.get("/admin", async (req,res)=>{
     font-size:12px;
     word-break:break-all;
   }
-  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
-  th,td{padding:8px 6px;border-bottom:1px solid rgba(38,33,69,.8);text-align:left;vertical-align:top}
-  th{font-weight:600;color:#d7d1ff;font-size:12px}
-  tr:hover td{background:rgba(17,14,40,.7);}
+  table{width:100%;border-collapse:separate;border-spacing:0 10px;font-size:13px;margin-top:12px}
+  th,td{padding:12px 10px;text-align:left;vertical-align:top}
+  th{font-weight:600;color:#d7d1ff;font-size:12px;padding-bottom:6px}
+  tbody tr:hover td{background:rgba(17,14,40,.7);}
   .muted{color:var(--muted)}
-  .chev{cursor:pointer;font-size:16px;line-height:1;user-select:none}
+  .chev-cell{width:44px}
+  .chev{
+    cursor:pointer;
+    font-size:20px;
+    line-height:1;
+    user-select:none;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width:30px;
+    height:30px;
+    border-radius:8px;
+    background:rgba(28,24,55,.6);
+  }
+  input[type="checkbox"]{width:18px;height:18px}
   .drawer{background:#120f25}
   .thumbs{
     display:grid;
@@ -3493,7 +3507,7 @@ app.get("/admin", async (req,res)=>{
   }
   .sort-reverse-btn.active{background:var(--accent2);color:#fff;box-shadow:0 6px 16px rgba(139,124,247,.45);}
   .move-btns{display:flex;flex-direction:column;gap:6px;align-items:center;}
-  .move-btns button{padding:6px 10px;font-size:12px;}
+  .move-btns button{padding:8px 12px;font-size:13px;}
   .mini{font-size:12px}
   a.link{color:#b1b9ff;text-decoration:none}
   a.link:hover{text-decoration:underline}
@@ -3574,10 +3588,26 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     align-items:center;
   }
-  tr.list-row.main{
-    background:linear-gradient(90deg, rgba(243,195,65,.18), rgba(108,92,231,.12));
-    box-shadow:inset 0 0 0 1px rgba(243,195,65,.25);
+  tr.list-row td{
+    background:rgba(17,14,40,.7);
+    border-top:1px solid rgba(38,33,69,.85);
+    border-bottom:1px solid rgba(38,33,69,.85);
   }
+  tr.list-row td:first-child{
+    border-left:1px solid rgba(38,33,69,.85);
+    border-radius:14px 0 0 14px;
+  }
+  tr.list-row td:last-child{
+    border-right:1px solid rgba(38,33,69,.85);
+    border-radius:0 14px 14px 0;
+  }
+  tr.list-row.main td{
+    background:rgba(243,195,65,.14);
+    border-top-color:rgba(243,195,65,.35);
+    border-bottom-color:rgba(243,195,65,.35);
+  }
+  tr.list-row.main td:first-child{border-left-color:rgba(243,195,65,.35);}
+  tr.list-row.main td:last-child{border-right-color:rgba(243,195,65,.35);}
   .status-pill{
     display:inline-flex;
     align-items:center;
@@ -3638,14 +3668,20 @@ app.get("/admin", async (req,res)=>{
     align-items:center;
     justify-content:center;
     gap:6px;
-    padding:6px 10px;
+    padding:8px 12px;
     border-radius:10px;
     border:1px solid var(--border);
     background:var(--card);
     color:var(--text);
     cursor:pointer;
   }
-  .icon-btn svg{width:16px;height:16px;fill:currentColor;}
+  .icon-btn svg{width:20px;height:20px;fill:currentColor;}
+  .drawer td{
+    padding:14px 16px;
+    border-radius:16px;
+    border:1px solid rgba(38,33,69,.85);
+    background:#120f25;
+  }
   .icon-btn.cloud.active{background:rgba(108,92,231,.2);border-color:#7f78ff;color:#b3b0ff;}
   .icon-btn.danger{color:#ff9b9b;border-color:#6b2f2f;background:rgba(107,47,47,.2);}
   .icon-btn.home{color:#ffe68a;border-color:#6a5a1a;background:rgba(106,90,26,.25);}
@@ -4807,7 +4843,7 @@ async function render() {
     const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
 
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
-    const chevTd = el('td',{},[chev]);
+    const chevTd = el('td',{class:'chev-cell'},[chev]);
 
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
