@@ -3222,6 +3222,9 @@ app.get("/admin", async (req,res)=>{
   const lastSyncText = LAST_SYNC_AT
     ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
     : "never";
+  const tmdbBadge = PREFS.tmdbKey
+    ? (PREFS.tmdbKeyValid === false ? "TMDB: error" : "TMDB: active")
+    : "TMDB: off";
 
   res.type("html").send(`<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -3370,8 +3373,8 @@ app.get("/admin", async (req,res)=>{
   .drawer{background:rgba(15,23,42,.6)}
   .thumbs{
     display:grid;
-    grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
-    gap:10px;
+    grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
+    gap:14px;
     margin:12px 0;
     padding:0;
     list-style:none;
@@ -3586,7 +3589,7 @@ app.get("/admin", async (req,res)=>{
   }
   @media(min-width:900px){ .snapshot-top{grid-template-columns:1.1fr .9fr;} }
   .snapshot-actions{
-    background:rgba(12,10,26,.65);
+    background:rgba(15,23,42,.65);
     border:1px solid var(--border);
     border-radius:14px;
     padding:12px 14px;
@@ -3615,7 +3618,7 @@ app.get("/admin", async (req,res)=>{
   textarea{
     width:100%;
     box-sizing:border-box;
-    background:#1c1837;
+    background:rgba(15,23,42,.85);
     color:var(--text);
     border:1px solid var(--border);
     border-radius:8px;
@@ -3639,7 +3642,7 @@ app.get("/admin", async (req,res)=>{
     padding:10px;
     border-radius:12px;
     border:1px solid var(--border);
-    background:#151130;
+    background:rgba(15,23,42,.75);
     display:none;
   }
   .advanced-panel.active{display:block;}
@@ -3649,7 +3652,7 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     align-items:center;
   }
-  tr.list-row.main{
+  .list-card.main{
     background:linear-gradient(90deg, rgba(243,195,65,.18), rgba(108,92,231,.12));
     box-shadow:inset 0 0 0 1px rgba(243,195,65,.25);
   }
@@ -3769,6 +3772,80 @@ app.get("/admin", async (req,res)=>{
     justify-content:space-between;
     gap:10px;
   }
+  .list-grid{
+    display:grid;
+    gap:14px;
+    --list-columns: 36px 70px 80px 90px minmax(220px,2fr) 80px minmax(160px,1fr) 80px 80px;
+  }
+  .list-header,
+  .list-card{
+    display:grid;
+    grid-template-columns:var(--list-columns);
+    gap:12px;
+    align-items:center;
+  }
+  .list-header{
+    padding:10px 14px;
+    border-radius:14px;
+    border:1px solid rgba(148,163,184,.2);
+    background:rgba(15,23,42,.45);
+    color:var(--muted);
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.08em;
+  }
+  .list-card{
+    padding:14px;
+    border-radius:16px;
+    border:1px solid rgba(148,163,184,.25);
+    background:rgba(15,23,42,.85);
+    box-shadow:var(--shadow);
+  }
+  .list-card.dragging{opacity:.6;}
+  .list-card:hover{
+    border-color:rgba(124,92,255,.4);
+  }
+  .list-name{
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+  }
+  .list-meta{
+    display:flex;
+    flex-wrap:wrap;
+    gap:6px;
+  }
+  .meta-chip{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    padding:4px 8px;
+    border-radius:999px;
+    border:1px solid rgba(124,92,255,.35);
+    background:rgba(124,92,255,.12);
+    font-size:11px;
+    color:#d8ccff;
+  }
+  .meta-desc{
+    font-size:12px;
+    color:var(--muted);
+    margin-top:6px;
+  }
+  .drawer-card{
+    border-radius:16px;
+    border:1px solid rgba(148,163,184,.2);
+    background:rgba(15,23,42,.6);
+    padding:12px;
+  }
+  @media(max-width:1100px){
+    .list-header{display:none;}
+    .list-card{
+      grid-template-columns:1fr;
+      gap:10px;
+    }
+    .list-grid{--list-columns:1fr;}
+    .list-meta{gap:8px;}
+  }
 </style>
 </head><body>
 <div class="app-shell">
@@ -3784,6 +3861,7 @@ app.get("/admin", async (req,res)=>{
     </div>
     <div class="topbar-actions">
       <span class="badge">v12.4.0</span>
+      <span class="badge">${tmdbBadge}</span>
       <span class="badge">Auto-sync every ${IMDB_SYNC_MINUTES} min</span>
       <span class="badge">Secure key: ${SHARED_SECRET ? "enabled" : "open"}</span>
     </div>
@@ -3856,7 +3934,7 @@ app.get("/admin", async (req,res)=>{
               <button id="tmdbSaveBtn" type="button">Save</button>
               <button id="tmdbVerifyBtn" type="button" class="btn2">Verify</button>
             </div>
-            <div class="mini muted">Use a TMDB v3 API key or a v4 Read Access Token.</div>
+            <div class="mini muted">Enables TMDB posters, ratings, and descriptions. Use a TMDB v3 key or v4 Read Access Token.</div>
             <div id="tmdbStatus" class="mini muted"></div>
           </div>
         </div>
@@ -4290,25 +4368,25 @@ function parseCsvImdbIds(text){
   return ids;
 }
 
-// Row drag (table tbody)
-function attachRowDnD(tbody) {
+// Row drag (list grid)
+function attachRowDnD(container) {
   let dragSrc = null;
-  tbody.addEventListener('dragstart', (e) => {
-    const tr = e.target.closest('tr[data-lsid]');
-    if (!tr || isCtrl(e.target)) return;
-    dragSrc = tr;
-    tr.classList.add('dragging');
+  container.addEventListener('dragstart', (e) => {
+    const card = e.target.closest('.list-card[data-lsid]');
+    if (!card || isCtrl(e.target)) return;
+    dragSrc = card;
+    card.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
+    e.dataTransfer.setData('text/plain', card.dataset.lsid || '');
   });
-  tbody.addEventListener('dragend', () => {
+  container.addEventListener('dragend', () => {
     if (dragSrc) dragSrc.classList.remove('dragging');
     dragSrc = null;
   });
-  tbody.addEventListener('dragover', (e) => {
+  container.addEventListener('dragover', (e) => {
     e.preventDefault();
     if (!dragSrc) return;
-    const over = e.target.closest('tr[data-lsid]');
+    const over = e.target.closest('.list-card[data-lsid]');
     if (!over || over === dragSrc) return;
     const rect = over.getBoundingClientRect();
     const before = (e.clientY - rect.top) < rect.height / 2;
@@ -4316,15 +4394,15 @@ function attachRowDnD(tbody) {
   });
 }
 
-function moveRowByButtons(tr, dir){
-  const tbody = tr.parentNode;
-  const rows = Array.from(tbody.querySelectorAll('tr[data-lsid]'));
-  const idx = rows.indexOf(tr);
+function moveRowByButtons(card, dir){
+  const container = card.parentNode;
+  const rows = Array.from(container.querySelectorAll('.list-card[data-lsid]'));
+  const idx = rows.indexOf(card);
   const nextIdx = Math.min(Math.max(idx + dir, 0), rows.length - 1);
   if (nextIdx === idx) return;
   const ref = rows[nextIdx];
-  if (dir < 0) tbody.insertBefore(tr, ref);
-  else tbody.insertBefore(tr, ref.nextSibling);
+  if (dir < 0) container.insertBefore(card, ref);
+  else container.insertBefore(card, ref.nextSibling);
 }
 
 // Thumb drag (ul.thumbs)
@@ -4743,29 +4821,26 @@ async function render() {
     mergeBuilder.appendChild(row);
   }
 
-  const table = el('table');
-  const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:''}),
-    el('th',{text:'Enabled'}),
-    el('th',{text:'Stremlist'}),
-    el('th',{text:'Move'}),
-    el('th',{text:'List (id)'}),
-    el('th',{text:'Items'}),
-    el('th',{text:'Default sort'}),
-    el('th',{text:'Backup'}),
-    el('th',{text:'Remove'})
-  ])]);
-  table.appendChild(thead);
-  const tbody = el('tbody');
+  const header = el('div', { class: 'list-header' }, [
+    el('div', { text: '' }),
+    el('div', { text: 'Enabled' }),
+    el('div', { text: 'Stremlist' }),
+    el('div', { text: 'Move' }),
+    el('div', { text: 'List (id)' }),
+    el('div', { text: 'Items' }),
+    el('div', { text: 'Default sort' }),
+    el('div', { text: 'Backup' }),
+    el('div', { text: 'Remove' })
+  ]);
+  const grid = el('div', { class: 'list-grid' });
 
   function makeDrawer(lsid) {
-    const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
-    const td = el('td',{colspan:'9'});
-    td.appendChild(el('div',{text:'Loading…'}));
-    tr.appendChild(td);
+    const drawer = el('div',{class:'drawer-card', 'data-drawer-for':lsid});
+    const body = el('div', { text: 'Loading…' });
+    drawer.appendChild(body);
 
     getListItems(lsid).then(({items})=>{
-      td.innerHTML = '';
+      body.innerHTML = '';
 
       const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
       const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
@@ -4793,11 +4868,11 @@ async function render() {
         optsWrap.appendChild(lab);
       });
 
-      td.appendChild(tools);
-      td.appendChild(optsWrap);
+      body.appendChild(tools);
+      body.appendChild(optsWrap);
 
       const ul = el('ul',{class:'thumbs'});
-      td.appendChild(ul);
+      body.appendChild(ul);
 
       function liFor(it){
         const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
@@ -4815,6 +4890,22 @@ async function render() {
           el('div',{class:'title',text: it.name || it.id}),
           el('div',{class:'id',text: it.id})
         ]);
+        const meta = el('div', { class: 'list-meta' });
+        if (Number.isFinite(it.imdbRating)) {
+          meta.appendChild(el('span', { class: 'meta-chip', text: '★ ' + it.imdbRating.toFixed(1) }));
+        }
+        if (it.year) {
+          meta.appendChild(el('span', { class: 'meta-chip', text: String(it.year) }));
+        }
+        if (it.runtime) {
+          meta.appendChild(el('span', { class: 'meta-chip', text: it.runtime + ' min' }));
+        }
+        if (meta.childNodes.length) wrap.appendChild(meta);
+        if (it.description) {
+          const descText = String(it.description);
+          const desc = descText.slice(0, 160);
+          wrap.appendChild(el('div', { class: 'meta-desc', text: desc + (descText.length > 160 ? '…' : '') }));
+        }
         const moveBox = el('div',{class:'tile-move'});
         const upBtn = el('button',{type:'button',text:'↑'});
         const downBtn = el('button',{type:'button',text:'↓'});
@@ -4912,7 +5003,7 @@ async function render() {
         saveBtn.disabled = true; resetBtn.disabled = true; resetAllBtn.disabled = true;
         try {
           await saveCustomOrder(lsid, ids);
-          const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+          const rowSel = document.querySelector('.list-card[data-lsid="'+lsid+'"] select');
           if (rowSel) rowSel.value = 'custom';
           prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = 'custom';
           saveBtn.textContent = "Saved ✓";
@@ -4925,7 +5016,7 @@ async function render() {
       };
 
       resetBtn.onclick = ()=>{
-        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        const rowSel = document.querySelector('.list-card[data-lsid="'+lsid+'"] select');
         const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
         renderList(orderFor(chosen));
       };
@@ -4944,13 +5035,13 @@ async function render() {
       async function refresh(){
         const r = await getListItems(lsid);
         items = r.items || [];
-        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        const rowSel = document.querySelector('.list-card[data-lsid="'+lsid+'"] select');
         const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
         renderList(orderFor(chosen));
       }
     }).catch(()=>{ td.textContent = "Failed to load items."; });
 
-    return tr;
+    return drawer;
   }
 
   function removeList(lsid){
@@ -4972,10 +5063,9 @@ async function render() {
     const isFrozen = !!frozenMap[lsid];
     const isCustom = !!customMeta;
     const isOfflineList = customMeta?.kind === 'offline';
-    const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
+    const card = el('div', {'data-lsid': lsid, draggable:'true', class:'list-card'});
 
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
-    const chevTd = el('td',{},[chev]);
 
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
@@ -5002,18 +5092,17 @@ async function render() {
     const upBtn = el('button',{type:'button',text:'↑'});
     const downBtn = el('button',{type:'button',text:'↓'});
     moveWrap.appendChild(upBtn); moveWrap.appendChild(downBtn);
-    upBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,-1); };
-    downBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,1); };
-    const moveTd = el('td',{},[moveWrap]);
+    upBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(card,-1); };
+    downBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(card,1); };
 
-    const nameCell = el('td',{}); 
+    const nameCell = el('div',{class:'list-name'}); 
     nameCell.appendChild(el('div',{text:(isFrozen ? '⭐ ' : '') + displayName(lsid)}));
     nameCell.appendChild(el('small',{text:lsid}));
     if (customMeta?.kind === 'merged') {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
 
-    const count = el('td',{text:String(listCount(lsid))});
+    const count = el('div',{text:String(listCount(lsid))});
 
     const sortSel = el('select');
     SORT_OPTIONS.forEach(o=>{
@@ -5033,7 +5122,7 @@ async function render() {
       prefs.sortReverse = prefs.sortReverse || {};
       prefs.sortReverse[lsid] = !prefs.sortReverse[lsid];
       updateReverseBtn();
-      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+      const drawer = document.querySelector('div[data-drawer-for="'+lsid+'"]');
       if (drawer && drawer.style.display !== "none") {
         const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
@@ -5045,7 +5134,7 @@ async function render() {
     sortSel.addEventListener('change', ()=>{
       prefs.perListSort = prefs.perListSort || {}; 
       prefs.perListSort[lsid] = sortSel.value;
-      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+      const drawer = document.querySelector('div[data-drawer-for="'+lsid+'"]');
       if (drawer && drawer.style.display !== "none") {
         const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
@@ -5071,7 +5160,7 @@ async function render() {
       cloudBtn.onclick = async () => {
         cloudBtn.disabled = true;
         try {
-          const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+          const drawer = document.querySelector('div[data-drawer-for="'+lsid+'"]');
           if (drawer && drawer.style.display !== "none" && sortSel.value === 'custom') {
             const listEl = drawer.querySelector('ul.thumbs');
             if (listEl) {
@@ -5219,7 +5308,7 @@ async function render() {
     const mainLabel = el('span', { class: 'mini muted', text: 'Stremlist save link' });
     function updateMainBtn() {
       const isMain = Array.isArray(prefs.mainLists) && prefs.mainLists.includes(lsid);
-      tr.classList.toggle('main', isMain);
+      card.classList.toggle('main', isMain);
       mainBtn.classList.toggle('active', isMain);
       mainBtn.classList.toggle('inactive', !isMain && Array.isArray(prefs.mainLists) && prefs.mainLists.length);
       mainBtn.setAttribute('aria-pressed', isMain ? 'true' : 'false');
@@ -5241,15 +5330,15 @@ async function render() {
       advancedPanel.appendChild(customNote);
     }
 
-    tr.appendChild(chevTd);
-    tr.appendChild(el('td',{},[cb]));
-    tr.appendChild(el('td',{},[mainBtn]));
-    tr.appendChild(moveTd);
-    tr.appendChild(nameCell);
-    tr.appendChild(count);
-    tr.appendChild(el('td',{},[sortWrap]));
-    tr.appendChild(el('td',{},[cloudBtn]));
-    tr.appendChild(el('td',{},[rmBtn]));
+    card.appendChild(el('div',{},[chev]));
+    card.appendChild(el('div',{},[cb]));
+    card.appendChild(el('div',{},[mainBtn]));
+    card.appendChild(el('div',{},[moveWrap]));
+    card.appendChild(nameCell);
+    card.appendChild(count);
+    card.appendChild(el('div',{},[sortWrap]));
+    card.appendChild(el('div',{},[cloudBtn]));
+    card.appendChild(el('div',{},[rmBtn]));
     nameCell.appendChild(advancedPanel);
 
     let drawer = null; let open = false;
@@ -5259,7 +5348,7 @@ async function render() {
         chev.textContent = "▴";
         if (!drawer) {
           drawer = makeDrawer(lsid);
-          tr.parentNode.insertBefore(drawer, tr.nextSibling);
+          card.parentNode.insertBefore(drawer, card.nextSibling);
         } else {
           drawer.style.display = "";
         }
@@ -5269,20 +5358,20 @@ async function render() {
       }
     };
 
-    return tr;
+    return card;
   }
 
-  order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
-  table.appendChild(tbody);
-  attachRowDnD(tbody);
+  order.forEach(lsid => grid.appendChild(makeRow(lsid)));
+  attachRowDnD(grid);
 
-  container.appendChild(table);
+  container.appendChild(header);
+  container.appendChild(grid);
   updateAdvancedPanels();
   renderMergeBuilder();
 
   const msg = el('span',{class:'inline-note'});
   async function saveAll(text){
-    const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+    const newOrder = Array.from(grid.querySelectorAll('.list-card[data-lsid]')).map(card => card.getAttribute('data-lsid'));
     const enabled = Array.from(enabledSet);
     const body = {
       enabled,
