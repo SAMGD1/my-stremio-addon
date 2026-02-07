@@ -2338,7 +2338,12 @@ function catalogs(){
     extraSupported: ["search","skip","limit","sort"],
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
-      { name:"sort", options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS }
+      {
+        name:"sort",
+        options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS,
+        isRequired: false,
+        default: (PREFS.perListSort && PREFS.perListSort[lsid]) || "name_asc"
+      }
     ]
     // no posterShape – Stremio uses default poster style
   }));
