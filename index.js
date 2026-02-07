@@ -2335,7 +2335,7 @@ function catalogs(){
     type: "my lists",
     id: `list:${lsid}`,
     name: `${isFrozenList(lsid) ? "⭐" : "🗂"} ${listDisplayName(lsid)}`,
-    extraSupported: ["search","skip","limit","sort"],
+    extraSupported: ["search","skip","limit","sort","genre"],
     extra: [
       { name:"search" }, { name:"skip" }, { name:"limit" },
       {
@@ -2343,6 +2343,10 @@ function catalogs(){
         options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS,
         isRequired: false,
         default: (PREFS.perListSort && PREFS.perListSort[lsid]) || "name_asc"
+      },
+      {
+        name:"genre",
+        options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS
       }
     ]
     // no posterShape – Stremio uses default poster style
@@ -2382,7 +2386,9 @@ app.get("/configure", (req, res) => {
 // ------- Catalog -------
 function parseExtra(extraStr, qObj){
   const p = new URLSearchParams(extraStr||"");
-  return { ...Object.fromEntries(p.entries()), ...(qObj||{}) };
+  const parsed = { ...Object.fromEntries(p.entries()), ...(qObj||{}) };
+  if (parsed.genre && !parsed.sort) parsed.sort = parsed.genre;
+  return parsed;
 }
 function listIdsWithEdits(lsid) {
   const list = LISTS[lsid];
