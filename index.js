@@ -4865,9 +4865,6 @@ async function render() {
       } else {
         prefs.mainLists.push(lsid);
       }
-      if (isOfflineList) {
-        await saveOfflineList(lsid);
-      }
       saveAll('Saved').then(refresh);
     }
 
