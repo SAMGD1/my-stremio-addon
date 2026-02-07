@@ -4881,10 +4881,14 @@ async function render() {
     };
 
     const backupValue = (L?.url || lsid);
-    const backupActive = (prefs.linkBackups || []).includes(backupValue);
-    const cloudBtn = el('button', { type: 'button', class: 'icon-btn cloud', title: 'Backup list link' });
+    let backupActive = (prefs.linkBackups || []).includes(backupValue);
+    const cloudBtn = el('button', { type: 'button', class: 'icon-btn cloud' });
     cloudBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 18a4.5 4.5 0 0 1-.5-8.98A6 6 0 0 1 18 8a4 4 0 0 1 .5 7.98H7.5zm8-6.5a1 1 0 0 0-1.7-.7l-1.3 1.3V9.5a1 1 0 1 0-2 0v2.6l-1.3-1.3a1 1 0 1 0-1.4 1.4l3 3a1 1 0 0 0 1.4 0l3-3a1 1 0 0 0 .3-.7z"/></svg>';
-    if (backupActive) cloudBtn.classList.add('active');
+    const updateCloudBtn = (isActive) => {
+      cloudBtn.classList.toggle('active', isActive);
+      cloudBtn.title = isActive ? 'Un-backup this list' : 'Back up this list';
+    };
+    updateCloudBtn(backupActive);
     if (isOfflineList) {
       cloudBtn.disabled = true;
       cloudBtn.title = 'Offline lists have no backup link';
@@ -4906,6 +4910,8 @@ async function render() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ lsid, enabled: !backupActive })
           });
+          backupActive = !backupActive;
+          updateCloudBtn(backupActive);
           await refresh();
         } finally {
           cloudBtn.disabled = false;
@@ -5040,13 +5046,16 @@ async function render() {
     const mainLabel = el('span', { class: 'mini muted', text: 'Stremlist save link' });
     function updateMainBtn() {
       const isMain = Array.isArray(prefs.mainLists) && prefs.mainLists.includes(lsid);
+      const mainTitle = isMain ? 'Disable Stremlist save link' : 'Enable Stremlist save link';
       tr.classList.toggle('main', isMain);
       mainBtn.classList.toggle('active', isMain);
       mainBtn.classList.toggle('inactive', !isMain && Array.isArray(prefs.mainLists) && prefs.mainLists.length);
       mainBtn.setAttribute('aria-pressed', isMain ? 'true' : 'false');
+      mainBtn.title = mainTitle;
       mainBtnAdvanced.classList.toggle('active', isMain);
       mainBtnAdvanced.classList.toggle('inactive', !isMain && Array.isArray(prefs.mainLists) && prefs.mainLists.length);
       mainBtnAdvanced.setAttribute('aria-pressed', isMain ? 'true' : 'false');
+      mainBtnAdvanced.title = mainTitle;
     }
     updateMainBtn();
     mainBtn.onclick = handleMainToggle;
