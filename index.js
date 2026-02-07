@@ -3222,118 +3222,42 @@ app.get("/admin", async (req,res)=>{
   const lastSyncText = LAST_SYNC_AT
     ? (new Date(LAST_SYNC_AT).toLocaleString() + " (" + Math.round((Date.now()-LAST_SYNC_AT)/60000) + " min ago)")
     : "never";
-  const tmdbBadge = PREFS.tmdbKey
-    ? (PREFS.tmdbKeyValid === false ? "TMDB: error" : "TMDB: active")
-    : "TMDB: off";
 
   res.type("html").send(`<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>My Lists – Admin</title>
 <style>
   :root{
-    color-scheme:dark;
-    --bg:#05060f;
-    --bg2:#0b1020;
-    --card:#0f172a;
-    --card-soft:rgba(15,23,42,.7);
-    --glass:rgba(15,23,42,.65);
-    --muted:#94a3b8;
-    --text:#f8fafc;
-    --accent:#7c5cff;
-    --accent2:#4cc9f0;
-    --accent-soft:rgba(124,92,255,.18);
-    --border:rgba(148,163,184,.2);
-    --danger:#ff6b6b;
-    --success:#22c55e;
-    --shadow:0 18px 40px rgba(2,6,23,.45);
+    color-scheme:light;
+    --bg:#050415;
+    --bg2:#0f0d1a;
+    --card:#141129;
+    --muted:#9aa0b4;
+    --text:#f7f7fb;
+    --accent:#6c5ce7;
+    --accent2:#8b7cf7;
+    --accent-soft:rgba(108,92,231,.18);
+    --border:#262145;
+    --danger:#ff7675;
   }
   body{
-    font-family:"Inter",system-ui,-apple-system,Segoe UI,Roboto,Arial;
+    font-family:system-ui,Segoe UI,Roboto,Arial;
     margin:0;
-    background:
-      radial-gradient(circle at 15% -10%, rgba(124,92,255,.45), transparent 40%),
-      radial-gradient(circle at 85% -20%, rgba(76,201,240,.35), transparent 40%),
-      linear-gradient(180deg, var(--bg2), var(--bg));
+    background:radial-gradient(circle at top,#2f2165 0,#050415 48%,#02010a 100%);
     color:var(--text);
-    min-height:100vh;
   }
-  .app-shell{max-width:1200px;margin:24px auto 60px;padding:0 20px;}
-  .topbar{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    gap:16px;
-    padding:22px 24px;
-    border-radius:22px;
-    background:linear-gradient(135deg, rgba(124,92,255,.25), rgba(15,23,42,.85));
-    border:1px solid rgba(124,92,255,.35);
-    box-shadow:var(--shadow);
-    backdrop-filter:blur(14px);
-  }
-  .brand{
-    display:flex;
-    align-items:center;
-    gap:14px;
-  }
-  .brand-icon{
-    width:54px;
-    height:54px;
-    border-radius:16px;
-    display:grid;
-    place-items:center;
-    background:linear-gradient(135deg, rgba(124,92,255,.7), rgba(76,201,240,.7));
-    box-shadow:0 12px 24px rgba(76,201,240,.35);
-  }
-  .brand-icon svg{width:28px;height:28px;fill:white;}
+  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+  .hero{padding:20px 0 12px}
   h1{margin:0 0 4px;font-weight:700;font-size:26px;letter-spacing:.01em}
   .subtitle{color:var(--muted);font-size:14px}
-  .topbar-actions{
-    display:flex;
-    gap:10px;
-    flex-wrap:wrap;
-    justify-content:flex-end;
-  }
-  .badge{
-    display:inline-flex;
-    align-items:center;
-    gap:6px;
-    padding:6px 12px;
-    border-radius:999px;
-    background:rgba(15,23,42,.65);
-    border:1px solid rgba(148,163,184,.25);
-    color:var(--text);
-    font-size:12px;
-  }
-  .stats-grid{
-    display:grid;
-    gap:14px;
-    grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
-    margin-top:18px;
-  }
-  .stat-card{
-    padding:16px;
-    border-radius:16px;
-    background:var(--glass);
-    border:1px solid var(--border);
-    box-shadow:var(--shadow);
-  }
-  .stat-card h4{margin:0 0 6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
-  .stat-card p{margin:0;font-size:16px;font-weight:600;}
   .grid{display:grid;gap:16px;grid-template-columns:1fr}
   @media(min-width:980px){ .grid{grid-template-columns:1.1fr .9fr} }
   .card{
     border:1px solid var(--border);
     border-radius:18px;
     padding:16px 18px;
-    background:linear-gradient(160deg, rgba(15,23,42,.92), rgba(2,6,23,.92));
-    box-shadow:var(--shadow);
-    backdrop-filter:blur(12px);
-    transition:transform .2s ease, box-shadow .2s ease, border-color .2s ease;
-  }
-  .card:hover{
-    transform:translateY(-2px);
-    box-shadow:0 24px 48px rgba(2,6,23,.55);
-    border-color:rgba(124,92,255,.35);
+    background:linear-gradient(145deg,rgba(17,14,39,.96),rgba(8,6,25,.98));
+    box-shadow:0 18px 40px rgba(0,0,0,.55);
   }
   h3{margin:0 0 8px;font-size:17px}
   h4{margin:10px 0 4px;font-size:14px}
@@ -3341,40 +3265,38 @@ app.get("/admin", async (req,res)=>{
     padding:9px 14px;
     border:0;
     border-radius:999px;
-    background:linear-gradient(135deg, var(--accent), var(--accent2));
+    background:var(--accent);
     color:#fff;
     cursor:pointer;
     font-size:13px;
     display:inline-flex;
     align-items:center;
     gap:6px;
-    box-shadow:0 10px 20px rgba(76,201,240,.25);
-    transition:transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    box-shadow:0 6px 16px rgba(108,92,231,.55);
   }
-  button:hover{transform:translateY(-1px);filter:brightness(1.05);}
   button.btn2{background:var(--accent2);}
   button:disabled{opacity:.5;cursor:default;box-shadow:none}
   small{color:var(--muted)}
   .code{
     font-family:ui-monospace,Menlo,Consolas,monospace;
-    background:rgba(15,23,42,.85);
-    color:#e2e8f0;
+    background:#1c1837;
+    color:#d6d3ff;
     padding:4px 6px;
     border-radius:6px;
     font-size:12px;
     word-break:break-all;
   }
   table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
-  th,td{padding:10px 8px;border-bottom:1px solid rgba(148,163,184,.2);text-align:left;vertical-align:top}
-  th{font-weight:600;color:#d7e3ff;font-size:12px}
-  tr:hover td{background:rgba(30,41,59,.45);}
+  th,td{padding:8px 6px;border-bottom:1px solid rgba(38,33,69,.8);text-align:left;vertical-align:top}
+  th{font-weight:600;color:#d7d1ff;font-size:12px}
+  tr:hover td{background:rgba(17,14,40,.7);}
   .muted{color:var(--muted)}
   .chev{cursor:pointer;font-size:16px;line-height:1;user-select:none}
-  .drawer{background:rgba(15,23,42,.6)}
+  .drawer{background:#120f25}
   .thumbs{
     display:grid;
-    grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
-    gap:14px;
+    grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+    gap:10px;
     margin:12px 0;
     padding:0;
     list-style:none;
@@ -3385,14 +3307,14 @@ app.get("/admin", async (req,res)=>{
     gap:10px;
     align-items:center;
     border:1px solid var(--border);
-    background:rgba(15,23,42,.9);
+    background:#1a1636;
     border-radius:12px;
     padding:6px 8px;
   }
   .thumb-img{
     object-fit:cover;
     border-radius:6px;
-    background:#1e293b;
+    background:#2a244e;
     flex-shrink:0;
     width:52px;
     height:78px;
@@ -3410,7 +3332,7 @@ app.get("/admin", async (req,res)=>{
     line-height:20px;
     text-align:center;
     border-radius:999px;
-    background:rgba(71,45,45,.85);
+    background:#3a2c2c;
     color:#ffb4b4;
     font-weight:700;
     display:none;
@@ -3429,7 +3351,7 @@ app.get("/admin", async (req,res)=>{
     margin-top:6px;
     width:100%;
     box-sizing:border-box;
-    background:#0f172a;
+    background:#1c1837;
     color:var(--text);
     border:1px solid var(--border);
     border-radius:8px;
@@ -3450,7 +3372,7 @@ app.get("/admin", async (req,res)=>{
     padding:12px;
     border:1px solid var(--border);
     border-radius:12px;
-    background:rgba(15,23,42,.7);
+    background:#15122c;
   }
   .create-panel.active{display:block;}
   .create-layout{
@@ -3506,7 +3428,7 @@ app.get("/admin", async (req,res)=>{
     background:rgba(127, 120, 255, 0.25);
   }
   .csv-drop .csv-card{
-    background:rgba(15,23,42,.65);
+    background:rgba(12,10,26,.55);
     border:1px solid rgba(90,80,180,.6);
     border-radius:12px;
     padding:8px 12px;
@@ -3525,7 +3447,7 @@ app.get("/admin", async (req,res)=>{
     display:inline-flex;
     align-items:center;
     gap:8px;
-    background:rgba(15,23,42,.75);
+    background:#1c1837;
     border:1px solid var(--border);
     border-radius:999px;
     padding:4px 9px;
@@ -3536,7 +3458,7 @@ app.get("/admin", async (req,res)=>{
   .pill input{margin-right:4px}
   .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
   input[type="text"]{
-    background:rgba(15,23,42,.85);
+    background:#1c1837;
     color:var(--text);
     border:1px solid var(--border);
     border-radius:8px;
@@ -3554,7 +3476,7 @@ app.get("/admin", async (req,res)=>{
     border:1px solid var(--border);
     border-radius:12px;
     padding:12px;
-    background:rgba(15,23,42,.5);
+    background:rgba(12,10,26,.45);
   }
   .imdb-box input{
     width:100%;
@@ -3565,7 +3487,7 @@ app.get("/admin", async (req,res)=>{
     padding:6px 9px;
     font-size:12px;
     min-width:40px;
-    background:rgba(15,23,42,.85);
+    background:var(--card);
     border:1px solid var(--border);
     box-shadow:none;
   }
@@ -3589,7 +3511,7 @@ app.get("/admin", async (req,res)=>{
   }
   @media(min-width:900px){ .snapshot-top{grid-template-columns:1.1fr .9fr;} }
   .snapshot-actions{
-    background:rgba(15,23,42,.65);
+    background:rgba(12,10,26,.65);
     border:1px solid var(--border);
     border-radius:14px;
     padding:12px 14px;
@@ -3618,7 +3540,7 @@ app.get("/admin", async (req,res)=>{
   textarea{
     width:100%;
     box-sizing:border-box;
-    background:rgba(15,23,42,.85);
+    background:#1c1837;
     color:var(--text);
     border:1px solid var(--border);
     border-radius:8px;
@@ -3642,7 +3564,7 @@ app.get("/admin", async (req,res)=>{
     padding:10px;
     border-radius:12px;
     border:1px solid var(--border);
-    background:rgba(15,23,42,.75);
+    background:#151130;
     display:none;
   }
   .advanced-panel.active{display:block;}
@@ -3652,7 +3574,7 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     align-items:center;
   }
-  .list-card.main{
+  tr.list-row.main{
     background:linear-gradient(90deg, rgba(243,195,65,.18), rgba(108,92,231,.12));
     box-shadow:inset 0 0 0 1px rgba(243,195,65,.25);
   }
@@ -3676,37 +3598,28 @@ app.get("/admin", async (req,res)=>{
     justify-content:center;
   }
   .nav-btn{
-    background:rgba(15,23,42,.75);
-    border:1px solid rgba(124,92,255,.35);
+    background:var(--card);
+    border:1px solid var(--border);
     color:var(--text);
     padding:10px 16px;
     border-radius:999px;
     cursor:pointer;
-    box-shadow:0 8px 18px rgba(2,6,23,.35);
-    display:flex;
-    align-items:center;
-    gap:8px;
+    box-shadow:0 6px 16px rgba(0,0,0,.35);
   }
-  .nav-btn svg{width:16px;height:16px;fill:currentColor;}
-  .nav-btn span{display:inline-flex;}
-  .nav-btn:hover{border-color:rgba(76,201,240,.6);}
   .nav-btn.active{
-    background:linear-gradient(135deg, rgba(124,92,255,.9), rgba(76,201,240,.85));
-    box-shadow:0 12px 28px rgba(124,92,255,.45);
+    background:var(--accent);
+    box-shadow:0 10px 26px rgba(108,92,231,.55);
   }
   .section{width:100%;display:none;}
-  .section.active{display:block;animation:fadeIn .35s ease;}
+  .section.active{display:block;}
   .center-card{max-width:980px;margin:0 auto;}
-  @keyframes fadeIn{
-    from{opacity:.6;transform:translateY(6px);}
-    to{opacity:1;transform:translateY(0);}
-  }
+  .wrap{display:flex;flex-direction:column;align-items:center;}
   .collapse-toggle{
     display:inline-flex;
     align-items:center;
     gap:6px;
     margin-top:6px;
-    background:rgba(15,23,42,.75);
+    background:var(--card);
     border:1px solid var(--border);
     color:var(--text);
     padding:6px 10px;
@@ -3728,7 +3641,7 @@ app.get("/admin", async (req,res)=>{
     padding:6px 10px;
     border-radius:10px;
     border:1px solid var(--border);
-    background:rgba(15,23,42,.85);
+    background:var(--card);
     color:var(--text);
     cursor:pointer;
   }
@@ -3738,174 +3651,28 @@ app.get("/admin", async (req,res)=>{
   .icon-btn.home{color:#ffe68a;border-color:#6a5a1a;background:rgba(106,90,26,.25);}
   .icon-btn.home.active{color:#ffd24a;border-color:#f3c341;background:rgba(243,195,65,.25);box-shadow:0 8px 18px rgba(243,195,65,.25);}
   .icon-btn.home.inactive{opacity:.5;}
-  .section-header{
-    display:flex;
-    align-items:center;
-    gap:10px;
-    justify-content:space-between;
-    margin-bottom:10px;
-  }
-  .section-header h3{margin:0;}
-  .section-header .chip{
-    padding:4px 10px;
-    border-radius:999px;
-    font-size:12px;
-    background:rgba(34,197,94,.15);
-    border:1px solid rgba(34,197,94,.35);
-    color:#bbf7d0;
-  }
-  .hint{
-    display:flex;
-    gap:10px;
-    align-items:flex-start;
-    padding:12px;
-    border-radius:14px;
-    border:1px solid rgba(124,92,255,.25);
-    background:rgba(124,92,255,.08);
-    color:#e2e8f0;
-    margin:12px 0 0;
-  }
-  .hint svg{width:18px;height:18px;fill:#c4b5fd;margin-top:2px;}
   .discovered-item{
     display:flex;
     align-items:flex-start;
     justify-content:space-between;
     gap:10px;
   }
-  .list-grid{
-    display:grid;
-    gap:14px;
-    --list-columns: 36px 70px 80px 90px minmax(220px,2fr) 80px minmax(160px,1fr) 80px 80px;
-  }
-  .list-header,
-  .list-card{
-    display:grid;
-    grid-template-columns:var(--list-columns);
-    gap:12px;
-    align-items:center;
-  }
-  .list-header{
-    padding:10px 14px;
-    border-radius:14px;
-    border:1px solid rgba(148,163,184,.2);
-    background:rgba(15,23,42,.45);
-    color:var(--muted);
-    font-size:12px;
-    text-transform:uppercase;
-    letter-spacing:.08em;
-  }
-  .list-card{
-    padding:14px;
-    border-radius:16px;
-    border:1px solid rgba(148,163,184,.25);
-    background:rgba(15,23,42,.85);
-    box-shadow:var(--shadow);
-  }
-  .list-card.dragging{opacity:.6;}
-  .list-card:hover{
-    border-color:rgba(124,92,255,.4);
-  }
-  .list-name{
-    display:flex;
-    flex-direction:column;
-    gap:4px;
-  }
-  .list-meta{
-    display:flex;
-    flex-wrap:wrap;
-    gap:6px;
-  }
-  .meta-chip{
-    display:inline-flex;
-    align-items:center;
-    gap:6px;
-    padding:4px 8px;
-    border-radius:999px;
-    border:1px solid rgba(124,92,255,.35);
-    background:rgba(124,92,255,.12);
-    font-size:11px;
-    color:#d8ccff;
-  }
-  .meta-desc{
-    font-size:12px;
-    color:var(--muted);
-    margin-top:6px;
-  }
-  .drawer-card{
-    border-radius:16px;
-    border:1px solid rgba(148,163,184,.2);
-    background:rgba(15,23,42,.6);
-    padding:12px;
-  }
-  @media(max-width:1100px){
-    .list-header{display:none;}
-    .list-card{
-      grid-template-columns:1fr;
-      gap:10px;
-    }
-    .list-grid{--list-columns:1fr;}
-    .list-meta{gap:8px;}
-  }
 </style>
 </head><body>
-<div class="app-shell">
-  <header class="topbar">
-    <div class="brand">
-      <div class="brand-icon">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6a2 2 0 0 1 2-2h6.5a2 2 0 0 1 1.4.6l4.5 4.6A2 2 0 0 1 19 10v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm7 0v4a2 2 0 0 0 2 2h4"></path></svg>
-      </div>
-      <div>
-        <h1>My Lists Control Room</h1>
-        <div class="subtitle">Last sync: ${lastSyncText}</div>
-      </div>
-    </div>
-    <div class="topbar-actions">
-      <span class="badge">v12.4.0</span>
-      <span class="badge">${tmdbBadge}</span>
-      <span class="badge">Auto-sync every ${IMDB_SYNC_MINUTES} min</span>
-      <span class="badge">Secure key: ${SHARED_SECRET ? "enabled" : "open"}</span>
-    </div>
-  </header>
-
-  <section class="stats-grid">
-    <div class="stat-card">
-      <h4>Manifest</h4>
-      <p>Ready to install</p>
-      <small class="muted">Keep this URL handy.</small>
-    </div>
-    <div class="stat-card">
-      <h4>Sync status</h4>
-      <p>${LAST_SYNC_AT ? "Healthy" : "Waiting for first sync"}</p>
-      <small class="muted">Manual sync triggers keep data fresh.</small>
-    </div>
-    <div class="stat-card">
-      <h4>Catalogs</h4>
-      <p>Customized layout</p>
-      <small class="muted">Reorder, freeze, and sort lists.</small>
-    </div>
-  </section>
+<div class="wrap">
+  <div class="hero">
+    <h1>My Lists – Admin</h1>
+    <div class="subtitle">Last sync: ${lastSyncText}</div>
+  </div>
 
   <div class="nav">
-    <button class="nav-btn active" data-target="snapshot">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a3 3 0 0 1 3-3h7l6 6v7a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7zm9-2v5a2 2 0 0 0 2 2h5"></path></svg>
-      <span>Snapshot</span>
-    </button>
-    <button class="nav-btn" data-target="add">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5a1 1 0 0 1 1 1v5h5a1 1 0 1 1 0 2h-5v5a1 1 0 1 1-2 0v-5H6a1 1 0 1 1 0-2h5V6a1 1 0 0 1 1-1z"></path></svg>
-      <span>Add Sources</span>
-    </button>
-    <button class="nav-btn" data-target="customize">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a2 2 0 0 1 2-2h4v4H4V7zm0 10v-4h6v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zm10-10a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2h-6V7zm0 12v-4h6v2a2 2 0 0 1-2 2h-4z"></path></svg>
-      <span>Customize</span>
-    </button>
+    <button class="nav-btn active" data-target="snapshot">Snapshot</button>
+    <button class="nav-btn" data-target="add">Add Lists</button>
+    <button class="nav-btn" data-target="customize">Customize Layout</button>
   </div>
 
   <section id="section-snapshot" class="section active">
     <div class="card center-card">
-      <div class="section-header">
-        <h3>Snapshot Overview</h3>
-        <span class="chip">Live</span>
-      </div>
       <div class="snapshot-top">
         <div>
           <h3>Manifest URL</h3>
@@ -3934,16 +3701,9 @@ app.get("/admin", async (req,res)=>{
               <button id="tmdbSaveBtn" type="button">Save</button>
               <button id="tmdbVerifyBtn" type="button" class="btn2">Verify</button>
             </div>
-            <div class="mini muted">Enables TMDB posters, ratings, and descriptions. Use a TMDB v3 key or v4 Read Access Token.</div>
+            <div class="mini muted">Use a TMDB v3 API key or a v4 Read Access Token.</div>
             <div id="tmdbStatus" class="mini muted"></div>
           </div>
-        </div>
-      </div>
-      <div class="hint">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 .001 20.001A10 10 0 0 0 12 2zm0 4a1.5 1.5 0 1 1-1.5 1.5A1.5 1.5 0 0 1 12 6zm2 12h-4a1 1 0 0 1 0-2h1v-4h-1a1 1 0 0 1 0-2h3a1 1 0 0 1 1 1v5h1a1 1 0 0 1 0 2z"></path></svg>
-        <div>
-          <div><b>Tip:</b> Use the Customize tab to freeze lists or define custom ordering.</div>
-          <div class="mini muted">Changes here will update the manifest version automatically.</div>
         </div>
       </div>
       <h3 style="margin-top:18px;">Current Snapshot</h3>
@@ -3959,10 +3719,7 @@ app.get("/admin", async (req,res)=>{
 
   <section id="section-add" class="section">
     <div class="card center-card">
-      <div class="section-header">
-        <h3>Add & Sources</h3>
-        <span class="chip">Discover</span>
-      </div>
+      <h3>Add & Sources</h3>
       <p class="mini muted" style="margin-top:6px;">We merge your main user (+ extras) and explicit list URLs/IDs. Removing a list also blocks it so it won’t re-appear on the next sync.</p>
 
       <div class="row">
@@ -4044,10 +3801,7 @@ app.get("/admin", async (req,res)=>{
 
   <section id="section-customize" class="section">
     <div class="card center-card">
-      <div class="section-header">
-        <h3>Customize Layout</h3>
-        <span class="chip">Arrange</span>
-      </div>
+      <h3>Customize Layout</h3>
       <p class="muted">Drag rows to reorder lists or use the arrows. Click ▾ to open the drawer and tune sort options or custom order.</p>
       <div class="rowtools">
         <label class="pill"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
@@ -4368,25 +4122,25 @@ function parseCsvImdbIds(text){
   return ids;
 }
 
-// Row drag (list grid)
-function attachRowDnD(container) {
+// Row drag (table tbody)
+function attachRowDnD(tbody) {
   let dragSrc = null;
-  container.addEventListener('dragstart', (e) => {
-    const card = e.target.closest('.list-card[data-lsid]');
-    if (!card || isCtrl(e.target)) return;
-    dragSrc = card;
-    card.classList.add('dragging');
+  tbody.addEventListener('dragstart', (e) => {
+    const tr = e.target.closest('tr[data-lsid]');
+    if (!tr || isCtrl(e.target)) return;
+    dragSrc = tr;
+    tr.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', card.dataset.lsid || '');
+    e.dataTransfer.setData('text/plain', tr.dataset.lsid || '');
   });
-  container.addEventListener('dragend', () => {
+  tbody.addEventListener('dragend', () => {
     if (dragSrc) dragSrc.classList.remove('dragging');
     dragSrc = null;
   });
-  container.addEventListener('dragover', (e) => {
+  tbody.addEventListener('dragover', (e) => {
     e.preventDefault();
     if (!dragSrc) return;
-    const over = e.target.closest('.list-card[data-lsid]');
+    const over = e.target.closest('tr[data-lsid]');
     if (!over || over === dragSrc) return;
     const rect = over.getBoundingClientRect();
     const before = (e.clientY - rect.top) < rect.height / 2;
@@ -4394,15 +4148,15 @@ function attachRowDnD(container) {
   });
 }
 
-function moveRowByButtons(card, dir){
-  const container = card.parentNode;
-  const rows = Array.from(container.querySelectorAll('.list-card[data-lsid]'));
-  const idx = rows.indexOf(card);
+function moveRowByButtons(tr, dir){
+  const tbody = tr.parentNode;
+  const rows = Array.from(tbody.querySelectorAll('tr[data-lsid]'));
+  const idx = rows.indexOf(tr);
   const nextIdx = Math.min(Math.max(idx + dir, 0), rows.length - 1);
   if (nextIdx === idx) return;
   const ref = rows[nextIdx];
-  if (dir < 0) container.insertBefore(card, ref);
-  else container.insertBefore(card, ref.nextSibling);
+  if (dir < 0) tbody.insertBefore(tr, ref);
+  else tbody.insertBefore(tr, ref.nextSibling);
 }
 
 // Thumb drag (ul.thumbs)
@@ -4821,26 +4575,29 @@ async function render() {
     mergeBuilder.appendChild(row);
   }
 
-  const header = el('div', { class: 'list-header' }, [
-    el('div', { text: '' }),
-    el('div', { text: 'Enabled' }),
-    el('div', { text: 'Stremlist' }),
-    el('div', { text: 'Move' }),
-    el('div', { text: 'List (id)' }),
-    el('div', { text: 'Items' }),
-    el('div', { text: 'Default sort' }),
-    el('div', { text: 'Backup' }),
-    el('div', { text: 'Remove' })
-  ]);
-  const grid = el('div', { class: 'list-grid' });
+  const table = el('table');
+  const thead = el('thead', {}, [el('tr',{},[
+    el('th',{text:''}),
+    el('th',{text:'Enabled'}),
+    el('th',{text:'Stremlist'}),
+    el('th',{text:'Move'}),
+    el('th',{text:'List (id)'}),
+    el('th',{text:'Items'}),
+    el('th',{text:'Default sort'}),
+    el('th',{text:'Backup'}),
+    el('th',{text:'Remove'})
+  ])]);
+  table.appendChild(thead);
+  const tbody = el('tbody');
 
   function makeDrawer(lsid) {
-    const drawer = el('div',{class:'drawer-card', 'data-drawer-for':lsid});
-    const body = el('div', { text: 'Loading…' });
-    drawer.appendChild(body);
+    const tr = el('tr',{class:'drawer', 'data-drawer-for':lsid});
+    const td = el('td',{colspan:'9'});
+    td.appendChild(el('div',{text:'Loading…'}));
+    tr.appendChild(td);
 
     getListItems(lsid).then(({items})=>{
-      body.innerHTML = '';
+      td.innerHTML = '';
 
       const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
       const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
@@ -4868,11 +4625,11 @@ async function render() {
         optsWrap.appendChild(lab);
       });
 
-      body.appendChild(tools);
-      body.appendChild(optsWrap);
+      td.appendChild(tools);
+      td.appendChild(optsWrap);
 
       const ul = el('ul',{class:'thumbs'});
-      body.appendChild(ul);
+      td.appendChild(ul);
 
       function liFor(it){
         const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
@@ -4890,22 +4647,6 @@ async function render() {
           el('div',{class:'title',text: it.name || it.id}),
           el('div',{class:'id',text: it.id})
         ]);
-        const meta = el('div', { class: 'list-meta' });
-        if (Number.isFinite(it.imdbRating)) {
-          meta.appendChild(el('span', { class: 'meta-chip', text: '★ ' + it.imdbRating.toFixed(1) }));
-        }
-        if (it.year) {
-          meta.appendChild(el('span', { class: 'meta-chip', text: String(it.year) }));
-        }
-        if (it.runtime) {
-          meta.appendChild(el('span', { class: 'meta-chip', text: it.runtime + ' min' }));
-        }
-        if (meta.childNodes.length) wrap.appendChild(meta);
-        if (it.description) {
-          const descText = String(it.description);
-          const desc = descText.slice(0, 160);
-          wrap.appendChild(el('div', { class: 'meta-desc', text: desc + (descText.length > 160 ? '…' : '') }));
-        }
         const moveBox = el('div',{class:'tile-move'});
         const upBtn = el('button',{type:'button',text:'↑'});
         const downBtn = el('button',{type:'button',text:'↓'});
@@ -5003,7 +4744,7 @@ async function render() {
         saveBtn.disabled = true; resetBtn.disabled = true; resetAllBtn.disabled = true;
         try {
           await saveCustomOrder(lsid, ids);
-          const rowSel = document.querySelector('.list-card[data-lsid="'+lsid+'"] select');
+          const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
           if (rowSel) rowSel.value = 'custom';
           prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = 'custom';
           saveBtn.textContent = "Saved ✓";
@@ -5016,7 +4757,7 @@ async function render() {
       };
 
       resetBtn.onclick = ()=>{
-        const rowSel = document.querySelector('.list-card[data-lsid="'+lsid+'"] select');
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
         const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
         renderList(orderFor(chosen));
       };
@@ -5035,13 +4776,13 @@ async function render() {
       async function refresh(){
         const r = await getListItems(lsid);
         items = r.items || [];
-        const rowSel = document.querySelector('.list-card[data-lsid="'+lsid+'"] select');
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
         const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
         renderList(orderFor(chosen));
       }
     }).catch(()=>{ td.textContent = "Failed to load items."; });
 
-    return drawer;
+    return tr;
   }
 
   function removeList(lsid){
@@ -5063,9 +4804,10 @@ async function render() {
     const isFrozen = !!frozenMap[lsid];
     const isCustom = !!customMeta;
     const isOfflineList = customMeta?.kind === 'offline';
-    const card = el('div', {'data-lsid': lsid, draggable:'true', class:'list-card'});
+    const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
 
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
+    const chevTd = el('td',{},[chev]);
 
     const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
@@ -5092,17 +4834,18 @@ async function render() {
     const upBtn = el('button',{type:'button',text:'↑'});
     const downBtn = el('button',{type:'button',text:'↓'});
     moveWrap.appendChild(upBtn); moveWrap.appendChild(downBtn);
-    upBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(card,-1); };
-    downBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(card,1); };
+    upBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,-1); };
+    downBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,1); };
+    const moveTd = el('td',{},[moveWrap]);
 
-    const nameCell = el('div',{class:'list-name'}); 
+    const nameCell = el('td',{}); 
     nameCell.appendChild(el('div',{text:(isFrozen ? '⭐ ' : '') + displayName(lsid)}));
     nameCell.appendChild(el('small',{text:lsid}));
     if (customMeta?.kind === 'merged') {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
 
-    const count = el('div',{text:String(listCount(lsid))});
+    const count = el('td',{text:String(listCount(lsid))});
 
     const sortSel = el('select');
     SORT_OPTIONS.forEach(o=>{
@@ -5122,7 +4865,7 @@ async function render() {
       prefs.sortReverse = prefs.sortReverse || {};
       prefs.sortReverse[lsid] = !prefs.sortReverse[lsid];
       updateReverseBtn();
-      const drawer = document.querySelector('div[data-drawer-for="'+lsid+'"]');
+      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
       if (drawer && drawer.style.display !== "none") {
         const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
@@ -5134,7 +4877,7 @@ async function render() {
     sortSel.addEventListener('change', ()=>{
       prefs.perListSort = prefs.perListSort || {}; 
       prefs.perListSort[lsid] = sortSel.value;
-      const drawer = document.querySelector('div[data-drawer-for="'+lsid+'"]');
+      const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
       if (drawer && drawer.style.display !== "none") {
         const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
@@ -5160,7 +4903,7 @@ async function render() {
       cloudBtn.onclick = async () => {
         cloudBtn.disabled = true;
         try {
-          const drawer = document.querySelector('div[data-drawer-for="'+lsid+'"]');
+          const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
           if (drawer && drawer.style.display !== "none" && sortSel.value === 'custom') {
             const listEl = drawer.querySelector('ul.thumbs');
             if (listEl) {
@@ -5308,7 +5051,7 @@ async function render() {
     const mainLabel = el('span', { class: 'mini muted', text: 'Stremlist save link' });
     function updateMainBtn() {
       const isMain = Array.isArray(prefs.mainLists) && prefs.mainLists.includes(lsid);
-      card.classList.toggle('main', isMain);
+      tr.classList.toggle('main', isMain);
       mainBtn.classList.toggle('active', isMain);
       mainBtn.classList.toggle('inactive', !isMain && Array.isArray(prefs.mainLists) && prefs.mainLists.length);
       mainBtn.setAttribute('aria-pressed', isMain ? 'true' : 'false');
@@ -5330,15 +5073,15 @@ async function render() {
       advancedPanel.appendChild(customNote);
     }
 
-    card.appendChild(el('div',{},[chev]));
-    card.appendChild(el('div',{},[cb]));
-    card.appendChild(el('div',{},[mainBtn]));
-    card.appendChild(el('div',{},[moveWrap]));
-    card.appendChild(nameCell);
-    card.appendChild(count);
-    card.appendChild(el('div',{},[sortWrap]));
-    card.appendChild(el('div',{},[cloudBtn]));
-    card.appendChild(el('div',{},[rmBtn]));
+    tr.appendChild(chevTd);
+    tr.appendChild(el('td',{},[cb]));
+    tr.appendChild(el('td',{},[mainBtn]));
+    tr.appendChild(moveTd);
+    tr.appendChild(nameCell);
+    tr.appendChild(count);
+    tr.appendChild(el('td',{},[sortWrap]));
+    tr.appendChild(el('td',{},[cloudBtn]));
+    tr.appendChild(el('td',{},[rmBtn]));
     nameCell.appendChild(advancedPanel);
 
     let drawer = null; let open = false;
@@ -5348,7 +5091,7 @@ async function render() {
         chev.textContent = "▴";
         if (!drawer) {
           drawer = makeDrawer(lsid);
-          card.parentNode.insertBefore(drawer, card.nextSibling);
+          tr.parentNode.insertBefore(drawer, tr.nextSibling);
         } else {
           drawer.style.display = "";
         }
@@ -5358,20 +5101,20 @@ async function render() {
       }
     };
 
-    return card;
+    return tr;
   }
 
-  order.forEach(lsid => grid.appendChild(makeRow(lsid)));
-  attachRowDnD(grid);
+  order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
+  table.appendChild(tbody);
+  attachRowDnD(tbody);
 
-  container.appendChild(header);
-  container.appendChild(grid);
+  container.appendChild(table);
   updateAdvancedPanels();
   renderMergeBuilder();
 
   const msg = el('span',{class:'inline-note'});
   async function saveAll(text){
-    const newOrder = Array.from(grid.querySelectorAll('.list-card[data-lsid]')).map(card => card.getAttribute('data-lsid'));
+    const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
     const enabled = Array.from(enabledSet);
     const body = {
       enabled,
