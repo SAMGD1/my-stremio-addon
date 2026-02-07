@@ -3791,7 +3791,6 @@ app.get("/admin", async (req,res)=>{
       </button>
       <div id="discoveredBody" class="collapse-body">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <button id="discoverRefreshBtn" type="button">Discover now</button>
           <div id="discoveredStatus" class="mini muted"></div>
         </div>
         <ul id="discoveredList"></ul>
@@ -3901,6 +3900,9 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.setAttribute('aria-expanded', open ? 'true' : 'false');
       const label = btn.querySelector('span');
       if (label) label.textContent = open ? 'Hide' : 'Show';
+      if (open && btn.dataset.target === 'discoveredBody' && typeof window.renderDiscovered === 'function') {
+        window.renderDiscovered(true);
+      }
     });
   });
 });
@@ -4365,11 +4367,11 @@ async function render() {
     if (Array.isArray(discoveredCache)) {
       renderItems(discoveredCache);
     } else {
-      wrap.textContent = 'Press Discover now to fetch lists.';
+      wrap.textContent = '';
     }
 
     if (!forceRefresh) {
-      if (status && !Array.isArray(discoveredCache)) status.textContent = 'Idle (manual discover only).';
+      if (status && !Array.isArray(discoveredCache)) status.textContent = 'Open the panel to discover lists.';
       return;
     }
 
@@ -4388,19 +4390,7 @@ async function render() {
       discoveredLoading = false;
     }
   }
-
-  function wireDiscoveredControls() {
-    const btn = document.getElementById('discoverRefreshBtn');
-    if (!btn) return;
-    btn.onclick = async () => {
-      btn.disabled = true;
-      try {
-        await renderDiscovered(true);
-      } finally {
-        btn.disabled = false;
-      }
-    };
-  }
+  window.renderDiscovered = renderDiscovered;
 
   function wireTmdbControls() {
     const input = document.getElementById('tmdbKeyInput');
@@ -4490,7 +4480,6 @@ async function render() {
 
   wireTmdbControls();
   wireBulkAdd();
-  wireDiscoveredControls();
   renderSnapshotList();
   renderDiscovered();
 
