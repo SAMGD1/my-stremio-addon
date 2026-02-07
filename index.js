@@ -3602,9 +3602,12 @@ app.get("/admin", async (req,res)=>{
     border-radius:0 14px 14px 0;
   }
   tr.list-row.main td{
-    background:linear-gradient(90deg, rgba(243,195,65,.18), rgba(108,92,231,.12));
-    box-shadow:inset 0 0 0 1px rgba(243,195,65,.25);
+    background:rgba(243,195,65,.14);
+    border-top-color:rgba(243,195,65,.35);
+    border-bottom-color:rgba(243,195,65,.35);
   }
+  tr.list-row.main td:first-child{border-left-color:rgba(243,195,65,.35);}
+  tr.list-row.main td:last-child{border-right-color:rgba(243,195,65,.35);}
   .status-pill{
     display:inline-flex;
     align-items:center;
