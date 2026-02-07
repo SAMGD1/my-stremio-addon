@@ -2618,6 +2618,11 @@ app.post("/api/prefs", async (req,res) => {
       PREFS.mainLists = [body.mainList];
     }
 
+    if (PREFS.customLists) {
+      const offlineIds = Object.keys(PREFS.customLists).filter(isOfflineList);
+      await Promise.all(offlineIds.map(id => saveOfflineList(id)));
+    }
+
     const key = manifestKey();
     if (key !== LAST_MANIFEST_KEY) { LAST_MANIFEST_KEY = key; MANIFEST_REV++; }
 
