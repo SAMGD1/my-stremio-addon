@@ -2399,6 +2399,17 @@ function listIdsWithEdits(lsid) {
   for (const tt of toAdd) if (!ids.includes(tt)) ids.push(tt);
   return ids;
 }
+function listHasImdbId(lsid, imdbId) {
+  const list = LISTS[lsid];
+  if (!list || !imdbId) return false;
+  if (isOfflineList(lsid)) return (list.ids || []).includes(imdbId);
+  const edits = (PREFS.listEdits && PREFS.listEdits[lsid]) || {};
+  const removed = Array.isArray(edits.removed) ? edits.removed : [];
+  if (removed.includes(imdbId)) return false;
+  const added = Array.isArray(edits.added) ? edits.added : [];
+  if (added.includes(imdbId)) return true;
+  return (list.ids || []).includes(imdbId);
+}
 
 function syncFrozenEdits(lsid) {
   if (!PREFS.frozenLists || !PREFS.frozenLists[lsid]) return;
@@ -2525,7 +2536,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     const streams = [];
     for (const lsid of mainLists) {
       const listName = listDisplayName(lsid);
-      const inList = listIdsWithEdits(lsid).includes(imdbId);
+      const inList = listHasImdbId(lsid, imdbId);
       const action = inList ? "Remove" : "Save";
       const symbol = inList ? "➖" : "➕";
       const path = inList ? "stream-remove" : "stream-add";
