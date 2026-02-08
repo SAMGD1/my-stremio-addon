@@ -3004,7 +3004,8 @@ app.post("/api/list-bulk-add", async (req, res) => {
   try {
     const lsid = String(req.body.lsid || "");
     const rawIds = Array.isArray(req.body.ids) ? req.body.ids : [];
-    if (!isListId(lsid) || !rawIds.length) return res.status(400).send("Bad input");
+    const rawText = String(req.body.text || "");
+    if (!isListId(lsid) || (!rawIds.length && !rawText)) return res.status(400).send("Bad input");
 
     const seen = new Set();
     const ids = [];
@@ -3015,6 +3016,15 @@ app.post("/api/list-bulk-add", async (req, res) => {
       if (seen.has(tt)) continue;
       seen.add(tt);
       ids.push(tt);
+    }
+    if (!ids.length && rawText) {
+      const matches = rawText.matchAll(/tt\\d{7,}/gi);
+      for (const m of matches) {
+        const tt = m[0];
+        if (seen.has(tt)) continue;
+        seen.add(tt);
+        ids.push(tt);
+      }
     }
     if (!ids.length) return res.status(400).send("Bad input");
 
@@ -4909,7 +4919,7 @@ async function render() {
 
         async function doAddBulk(){
           const ids = parseImdbIdsFromText(bulkInput.value);
-          if (!ids.length) { alert('Enter IMDb ids or IMDb URLs.'); return; }
+          if (!bulkInput.value.trim()) { alert('Enter IMDb ids or IMDb URLs.'); return; }
           bulkBtn.disabled = true;
           bulkInput.disabled = true;
           if (bulkStatus) bulkStatus.textContent = 'Adding…';
@@ -4917,7 +4927,7 @@ async function render() {
             const r = await fetch('/api/list-bulk-add?admin='+ADMIN, {
               method: 'POST',
               headers: { 'Content-Type':'application/json' },
-              body: JSON.stringify({ lsid, ids })
+              body: JSON.stringify({ lsid, ids, text: bulkInput.value })
             });
             if (!r.ok) throw new Error(await r.text());
             const data = await r.json().catch(() => ({}));
