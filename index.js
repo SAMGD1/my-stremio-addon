@@ -3327,6 +3327,7 @@ app.get("/admin", async (req,res)=>{
     margin:12px 0;
     padding:0;
     list-style:none;
+    align-items:start;
   }
   .thumb{
     position:relative;
@@ -3337,6 +3338,7 @@ app.get("/admin", async (req,res)=>{
     background:#1a1636;
     border-radius:12px;
     padding:6px 8px;
+    align-self:start;
   }
   .thumb-img{
     object-fit:cover;
@@ -4859,6 +4861,67 @@ async function render() {
 
       function addBulkTile(){
         const li = el('li',{class:'thumb add bulk','data-add':'1'});
+        const box = el('div',{class:'addbox'},[
+          el('div',{text:'Add those IMDb tt in bulk'}),
+          el('textarea',{placeholder:'tt1234567 tt7654321 or IMDb URLs', spellcheck:'false'}),
+          el('button',{class:'bulk-btn', type:'button', text:'Add bulk'}),
+          el('span',{class:'mini muted bulk-status'})
+        ]);
+        li.appendChild(box);
+
+        const bulkInput = box.querySelector('textarea');
+        const bulkBtn = box.querySelector('.bulk-btn');
+        const bulkStatus = box.querySelector('.bulk-status');
+
+        async function doAddBulk(){
+          const ids = parseImdbIdsFromText(bulkInput.value);
+          if (!ids.length) { alert('Enter IMDb ids or IMDb URLs.'); return; }
+          bulkBtn.disabled = true;
+          bulkInput.disabled = true;
+          if (bulkStatus) bulkStatus.textContent = 'Adding…';
+          let added = 0;
+          try {
+            for (const id of ids) {
+              await fetch('/api/list-add?admin='+ADMIN, {
+                method: 'POST',
+                headers: { 'Content-Type':'application/json' },
+                body: JSON.stringify({ lsid, id })
+              });
+              added += 1;
+            }
+            bulkInput.value = '';
+            if (bulkStatus) bulkStatus.textContent = 'Added ' + added + ' item' + (added === 1 ? '' : 's') + '.';
+            await refresh();
+          } catch (e) {
+            if (bulkStatus) bulkStatus.textContent = 'Bulk add failed.';
+          } finally {
+            bulkBtn.disabled = false;
+            bulkInput.disabled = false;
+          }
+        }
+
+        if (bulkBtn) {
+          bulkBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            doAddBulk();
+          });
+        }
+        if (bulkInput) {
+          bulkInput.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+              e.preventDefault();
+              doAddBulk();
+            }
+          });
+          bulkInput.addEventListener('click', (e) => e.stopPropagation());
+        }
+
+        return li;
+      }
+
+      function addBulkTile(){
+        const li = el('li',{class:'thumb add','data-add':'1'});
         const box = el('div',{class:'addbox'},[
           el('div',{text:'Add those IMDb tt in bulk'}),
           el('textarea',{placeholder:'tt1234567 tt7654321 or IMDb URLs', spellcheck:'false'}),
