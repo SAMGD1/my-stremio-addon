@@ -1,38 +1,53 @@
 # My Lists Stremio Addon (v12.4.0)
 
-A Stremio addon that turns IMDb + Trakt sources into customizable catalogs, with an admin UI for sorting, freezing, editing, and backup management.
+**Are you tired of tracking services with tight list limits, missing images, or item caps?**
+Move to IMDb and use virtually unlimited lists (IMDb supports large lists — commonly up to ~10,000 items per list), then control everything in Stremio with **My Lists Addon**.
 
-## Data sources & expectations
-- Parses publicly available list pages and APIs on a best-effort basis.
-- May stop working if upstream site layouts or response formats change.
-- No guarantees are provided; behavior can vary by region, network, or account status.
+This addon turns your IMDb and Trakt sources into fully customizable Stremio catalogs, with a powerful Admin UI for sorting, freezing, editing, and backups.
 
-## What’s new in the current version
-- **Supabase-backed persistence** for snapshot/manual/frozen/backup JSON data.
-- **Manual discovered-list refresh** from Admin (`Discover now`) so discovery no longer auto-runs on every admin page load.
-- **Background bulk-sync UX**: bulk add returns quickly and sync continues in background.
-- **Improved admin loading states** for snapshot/custom-list sections.
-- **Frozen state reconciliation** on save to prevent stale frozen files from resurrecting later.
+> **Responsibility notice**: This project is provided “as-is.” You are responsible for how you use it and for following the terms of any services you connect to. The addon does not grant you rights to content — it only organizes lists you already manage.
+
+---
+
+## Highlights
+- **Use IMDb lists as unlimited, image-rich catalogs** in Stremio.
+- **Customize layout and sorting** per list, including custom order.
+- **Advanced tools**: bulk add to lists, freeze/unfreeze, duplicate, merge, and backups.
+- **Optional TMDB enrichment** for posters and metadata.
+- **Self-hosted**: run locally or deploy with Supabase + Render.
+
+---
+
+## What this addon does
+1. Reads your configured **IMDb/Trakt list sources**.
+2. Normalizes everything into **IMDb IDs (tt...)**.
+3. Stores a snapshot and list metadata.
+4. Serves Stremio catalogs via the standard addon routes.
+5. Gives you a full Admin UI to customize everything.
 
 ---
 
 ## Features
-- Import and sync from:
-  - IMDb user lists and watchlists
-  - IMDb list URLs / `ls...` ids
-  - Trakt lists and watchlists
-  - Trakt user list discovery
-- Advanced admin controls:
-  - Enable/disable catalogs
-  - Drag/drop + button reorder
-  - Per-list sort + sort options
-  - Add/remove items in lists
-  - Duplicate, merge, rename, and block lists
-  - Freeze/unfreeze lists
-  - Backup link configs
-- Optional TMDB enrichment for posters/metadata.
-- Save/Remove stream actions from Stremio.
-- Manifest revision bump on save for easier Stremio refresh behavior.
+
+### Source support
+- **IMDb user lists** (from your public `/user/.../lists/` page)
+- **IMDb list URLs** or `ls...` list IDs
+- **IMDb watchlists**
+- **Trakt lists and watchlists**
+- **Trakt user list discovery**
+
+### Admin controls
+- Enable/disable catalogs
+- Drag & drop ordering (plus up/down buttons)
+- Per-list default sort + available sort options
+- **Add/remove items in lists**
+- **Bulk add IMDb IDs** (Advanced mode)
+- Duplicate, merge, rename, or block lists
+- Freeze/unfreeze list snapshots
+- Backup link configuration
+
+### Optional metadata
+- **TMDB enrichment** for posters, ratings, and extra fields
 
 ---
 
@@ -41,7 +56,7 @@ A Stremio addon that turns IMDb + Trakt sources into customizable catalogs, with
 
 ---
 
-## Installation
+## Quick start (local)
 ```bash
 npm install
 npm start
@@ -67,12 +82,18 @@ http://localhost:7000/manifest.json?key=YOUR_SHARED_SECRET
 
 ---
 
-## Render deployment
+## Hosting online
+You can run this locally **or** deploy it to a cloud host.
+
+### Option A: Render (recommended for server hosting)
 Recommended service settings:
 - **Build Command**: `npm install`
 - **Start Command**: `node index.js`
 
-Then add environment variables from the table below.
+### Option B: Supabase (recommended for storage)
+Supabase stores snapshots, frozen lists, and backups so your data persists even if the server restarts.
+
+**You can use both Render + Supabase together** for a full online deployment.
 
 ---
 
@@ -84,7 +105,7 @@ Then add environment variables from the table below.
 | `ADMIN_PASSWORD` | Protects admin UI/API. |
 | `SHARED_SECRET` | Protects public addon routes (`manifest`, `catalog`, etc.). |
 | `SUPABASE_URL` | Supabase project URL for storage persistence. |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service role key used by server-side Supabase storage access. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-side Supabase key for storage access. |
 | `SUPABASE_BUCKET` | Bucket name used for addon JSON data (example: `mylist-data`). |
 
 ### Sync + source behavior
@@ -104,67 +125,104 @@ Then add environment variables from the table below.
 
 ---
 
+## Setup guide (step-by-step)
+
+### 1) Create your lists
+- Go to **IMDb** and create lists (public or unlisted).
+- Optionally set a primary list or watchlist.
+
+### 2) Get your list links
+Use any of these formats:
+- `https://www.imdb.com/user/urXXXXXXX/lists/`
+- `https://www.imdb.com/list/lsXXXXXXX/`
+- `lsXXXXXXX`
+
+If using Trakt:
+- `https://trakt.tv/users/USERNAME/lists`
+- `https://trakt.tv/users/USERNAME/watchlist`
+
+### 3) Start the server
+```bash
+npm start
+```
+
+### 4) Open Admin UI
+```text
+http://localhost:7000/admin?admin=YOUR_ADMIN_PASSWORD
+```
+
+### 5) Add sources
+In **Add Lists**:
+- Add a user list URL or list ID.
+- Use bulk input for many sources at once.
+
+### 6) Customize layout
+In **Customize Layout**:
+- Enable/disable lists
+- Reorder lists
+- Choose default list and sort
+- Open **Advanced** for per-list tools
+
+---
+
+## Advanced mode (per list)
+Turn on **Advanced** in Customize Layout, then open a list row to see:
+- Rename list
+- Duplicate list
+- Freeze/unfreeze list
+- Manual sync (when frozen)
+- Backup settings
+- **Bulk add IMDb IDs** to the list
+
+Bulk add responds quickly and loads metadata in the background for a smoother experience.
+
+---
+
+## APIs & services used
+You can enable these based on your needs:
+
+### IMDb
+- Used for list discovery and list item IDs.
+- Works best with public or unlisted lists.
+
+### Trakt
+- Optional list source.
+- Requires `TRAKT_CLIENT_ID`.
+
+### TMDB
+- Optional metadata enrichment (posters/ratings).
+- Requires `TMDB_API_KEY`.
+
+### Supabase
+- Optional but recommended for storage persistence.
+
+---
+
 ## Storage model (Supabase)
-The addon stores JSON in your Supabase bucket using these logical paths:
+The addon stores JSON in your Supabase bucket using these paths:
 - `snapshot.json`
 - `manual/*.json`
 - `frozen/*.json`
 - `backup/*.json`
 - plus index files such as `manual/index.json`, `frozen/index.json`, `backup/index.json`
 
-The app also keeps local best-effort files under `data/`, but Supabase is the primary shared persistence layer.
-
----
-
-## Admin usage guide
-
-### 1) Add sources
-Use Admin to add:
-- IMDb user/list URLs
-- Trakt users/lists
-- bulk input (multiple lines)
-
-Bulk add now returns quickly and shows a status message while sync runs in background.
-
-### 2) Save layout & prefs
-In **Customize**, configure:
-- enabled lists
-- order
-- default list
-- per-list sorting options
-
-Click **Save** to persist state. Save now reconciles frozen backups to your current UI state.
-
-### 3) Freeze / Unfreeze
-- Freeze captures list ids/orders as a frozen snapshot.
-- Unfreeze removes frozen state.
-- On save, stale frozen Supabase files are reconciled/deleted to match the current UI state.
-
-### 4) Discover behavior
-The **Discovered** section is now manual:
-- Open Discovered panel
-- Click **Discover now**
-
-Admin page reload alone does not automatically trigger discovery fetches for that panel.
+The app also keeps local files under `data/`, but Supabase is the primary shared persistence layer.
 
 ---
 
 ## Troubleshooting
 
-### Repeated IMDb 503 logs
-- If they occur during scheduled sync, reduce/disable interval:
-  - set `IMDB_SYNC_MINUTES=0` for no periodic rediscovery.
-- Discovery from the admin panel is manual (`Discover now`).
-
 ### Lists appear empty briefly in Admin
-- Current UI shows explicit loading states (`Loading lists...`, `Loading custom lists...`) while data fetches.
+- The UI shows loading states while data fetches finish.
 
-### Frozen lists come back after restart
-- Ensure you **Save** after bulk unfreeze actions.
-- Current version includes frozen-backup reconciliation during snapshot persistence.
+### Sync feels slow
+- Large lists can take time. Reduce the auto-sync interval or use manual sync.
 
-### Supabase leftovers
-- The addon now deletes stale frozen/manual/backup files during relevant flows and uses index/list fallback loading logic.
+### Frozen lists reappear after restart
+- Save after unfreezing.
+
+### Registry install errors
+- If `npm install` fails due to restricted network policies, use a different network or preinstall dependencies.
 
 ---
 
@@ -177,6 +235,8 @@ Admin page reload alone does not automatically trigger discovery fetches for tha
 
 ## License
 MIT. See [LICENSE](LICENSE).
+
+---
 
 ## High-level architecture
 1. Source discovery/collection (IMDb/Trakt/custom)
