@@ -1,6 +1,6 @@
 # My Lists Stremio Addon (v12.4.0)
 
-**Are you tired of tracking services with tight list limits, missing images, or item caps?**
+**Are you tired of Trakt’s tight list limits and caps?**
 Move to IMDb and use virtually unlimited lists (IMDb supports large lists — commonly up to ~10,000 items per list), then control everything in Stremio with **My Lists Addon**.
 
 This addon turns your IMDb and Trakt sources into fully customizable Stremio catalogs, with a powerful Admin UI for sorting, freezing, editing, and backups.
