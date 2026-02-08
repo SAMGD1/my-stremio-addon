@@ -3018,6 +3018,8 @@ app.post("/api/list-bulk-add", async (req, res) => {
     }
     if (!ids.length) return res.status(400).send("Bad input");
 
+    let addedCount = ids.length;
+
     if (isOfflineList(lsid)) {
       const list = LISTS[lsid];
       if (!list) return res.status(404).send("List not found");
@@ -3026,10 +3028,11 @@ app.post("/api/list-bulk-add", async (req, res) => {
       list.orders = list.orders || {};
       list.orders.imdb = list.ids.slice();
       await saveOfflineList(lsid);
-      res.json({ ok: true, added: list.ids.length - before });
+      addedCount = list.ids.length - before;
     } else {
       PREFS.listEdits = PREFS.listEdits || {};
       const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+      const beforeAdded = (ed.added || []).length;
       const addedSet = new Set(ed.added || []);
       ids.forEach((tt) => {
         if (!addedSet.has(tt)) {
@@ -3039,10 +3042,12 @@ app.post("/api/list-bulk-add", async (req, res) => {
       });
       ed.removed = (ed.removed || []).filter(x => !addedSet.has(x));
       syncFrozenEdits(lsid);
-      res.json({ ok: true, added: ids.length });
+      addedCount = (ed.added || []).length - beforeAdded;
     }
 
     await persistSnapshot();
+
+    res.json({ ok: true, added: addedCount });
 
     (async () => {
       for (const id of ids) {
@@ -3432,8 +3437,8 @@ app.get("/admin", async (req,res)=>{
     border:1px dashed var(--border);
     min-height:90px;
   }
+  .thumb.add.bulk{position:relative;}
   .thumb.add.bulk .addbox{
-    position:relative;
     text-align:left;
     width:100%;
   }
@@ -3443,8 +3448,8 @@ app.get("/admin", async (req,res)=>{
   }
   .thumb.add.bulk .bulk-btn{
     position:absolute;
-    top:6px;
-    right:6px;
+    top:8px;
+    right:8px;
     width:26px;
     height:26px;
     border-radius:999px;
