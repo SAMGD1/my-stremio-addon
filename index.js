@@ -3371,13 +3371,6 @@ app.get("/admin", async (req,res)=>{
     border:1px dashed var(--border);
     min-height:90px;
   }
-  .thumb.add.bulk{
-    grid-column:1 / -1;
-  }
-  .thumb.add.bulk .addbox{
-    max-width:420px;
-    margin:0 auto;
-  }
   .tile-move{margin-left:auto;display:flex;flex-direction:column;gap:4px;align-items:flex-end;}
   .tile-move button{padding:4px 6px;font-size:12px;}
   .addbox{width:100%;text-align:center}
@@ -4769,15 +4762,22 @@ async function render() {
         return li;
       }
 
-      function addSingleTile(){
+      function addTile(){
         const li = el('li',{class:'thumb add','data-add':'1'});
         const box = el('div',{class:'addbox'},[
           el('div',{text:'Add by IMDb ID (tt...)'}),
-          el('input',{type:'text',placeholder:'tt1234567 or IMDb URL', spellcheck:'false'})
+          el('input',{type:'text',placeholder:'tt1234567 or IMDb URL', spellcheck:'false'}),
+          el('div',{class:'mini muted', text:'Add those IMDb tt in bulk'}),
+          el('textarea',{placeholder:'tt1234567 tt7654321 or IMDb URLs', spellcheck:'false'}),
+          el('button',{class:'bulk-btn', type:'button', text:'Add bulk'}),
+          el('span',{class:'mini muted bulk-status'})
         ]);
         li.appendChild(box);
 
         const input = box.querySelector('input');
+        const bulkInput = box.querySelector('textarea');
+        const bulkBtn = box.querySelector('.bulk-btn');
+        const bulkStatus = box.querySelector('.bulk-status');
 
         async function doAddReal(){
           const v = (input.value || '').trim();
@@ -4797,33 +4797,12 @@ async function render() {
           }
         }
 
-        input.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') { e.preventDefault(); doAddReal(); }
-        });
-        input.addEventListener('click', (e) => e.stopPropagation());
-
-        return li;
-      }
-
-      function addBulkTile(){
-        const li = el('li',{class:'thumb add bulk','data-add':'1'});
-        const box = el('div',{class:'addbox'},[
-          el('div',{text:'Add those IMDb tt in bulk'}),
-          el('textarea',{placeholder:'tt1234567 tt7654321 or IMDb URLs', spellcheck:'false'}),
-          el('button',{class:'bulk-btn', type:'button', text:'Add bulk'}),
-          el('span',{class:'mini muted bulk-status'})
-        ]);
-        li.appendChild(box);
-
-        const bulkInput = box.querySelector('textarea');
-        const bulkBtn = box.querySelector('.bulk-btn');
-        const bulkStatus = box.querySelector('.bulk-status');
-
         async function doAddBulk(){
           const ids = parseImdbIdsFromText(bulkInput.value);
           if (!ids.length) { alert('Enter IMDb ids or IMDb URLs.'); return; }
           bulkBtn.disabled = true;
           bulkInput.disabled = true;
+          input.disabled = true;
           if (bulkStatus) bulkStatus.textContent = 'Adding…';
           let added = 0;
           try {
@@ -4843,9 +4822,14 @@ async function render() {
           } finally {
             bulkBtn.disabled = false;
             bulkInput.disabled = false;
+            input.disabled = false;
           }
         }
 
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); doAddReal(); }
+        });
+        input.addEventListener('click', (e) => e.stopPropagation());
         if (bulkBtn) {
           bulkBtn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -4883,8 +4867,7 @@ async function render() {
       function renderList(arr){
         ul.innerHTML = '';
         applyReverse(arr).forEach(it => ul.appendChild(liFor(it)));
-        ul.appendChild(addSingleTile());
-        ul.appendChild(addBulkTile());
+        ul.appendChild(addTile());
         attachThumbDnD(ul);
       }
 
