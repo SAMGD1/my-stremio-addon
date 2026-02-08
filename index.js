@@ -2998,6 +2998,63 @@ app.post("/api/list-add", async (req, res) => {
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
+// add many items (tt...) to a list
+app.post("/api/list-add-bulk", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const lsid = String(req.body.lsid || "");
+    const rawIds = Array.isArray(req.body.ids) ? req.body.ids : [];
+    if (!isListId(lsid)) return res.status(400).send("Bad input");
+    if (!rawIds.length) return res.status(400).send("Missing ids");
+
+    const seen = new Set();
+    const ids = [];
+    for (const raw of rawIds) {
+      const tt = extractImdbId(raw);
+      if (!tt || !isImdb(tt) || seen.has(tt)) continue;
+      seen.add(tt);
+      ids.push(tt);
+    }
+    if (!ids.length) return res.status(400).send("Bad input");
+
+    const existing = new Set(listIdsWithEdits(lsid));
+    const toAdd = ids.filter(id => !existing.has(id));
+
+    if (isOfflineList(lsid)) {
+      const list = LISTS[lsid];
+      if (!list) return res.status(404).send("List not found");
+      list.ids = appendUniqueIds(list.ids || [], toAdd);
+      list.orders = list.orders || {};
+      list.orders.imdb = list.ids.slice();
+      await saveOfflineList(lsid);
+    } else {
+      PREFS.listEdits = PREFS.listEdits || {};
+      const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+      toAdd.forEach(tt => {
+        if (!ed.added.includes(tt)) ed.added.push(tt);
+      });
+      ed.removed = (ed.removed || []).filter(x => !toAdd.includes(x));
+      syncFrozenEdits(lsid);
+    }
+
+    await persistSnapshot();
+
+    res.json({ ok: true, added: toAdd.length, requested: ids.length });
+
+    if (toAdd.length) {
+      setTimeout(async () => {
+        for (const tt of toAdd) {
+          try {
+            await getBestMeta(tt);
+            CARD.set(tt, cardFor(tt));
+          } catch (e) { /* ignore */ }
+        }
+        await persistSnapshot();
+      }, 0);
+    }
+  } catch (e) { console.error(e); res.status(500).send("Failed"); }
+});
+
 // remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -4805,66 +4862,6 @@ async function render() {
         return li;
       }
 
-      function addBulkTile(){
-        const li = el('li',{class:'thumb add bulk','data-add':'1'});
-        const box = el('div',{class:'addbox'},[
-          el('div',{text:'Add those IMDb tt in bulk'}),
-          el('textarea',{placeholder:'tt1234567 tt7654321 or IMDb URLs', spellcheck:'false'}),
-          el('button',{class:'bulk-btn', type:'button', text:'Add bulk'}),
-          el('span',{class:'mini muted bulk-status'})
-        ]);
-        li.appendChild(box);
-
-        const bulkInput = box.querySelector('textarea');
-        const bulkBtn = box.querySelector('.bulk-btn');
-        const bulkStatus = box.querySelector('.bulk-status');
-
-        async function doAddBulk(){
-          const ids = parseImdbIdsFromText(bulkInput.value);
-          if (!ids.length) { alert('Enter IMDb ids or IMDb URLs.'); return; }
-          bulkBtn.disabled = true;
-          bulkInput.disabled = true;
-          if (bulkStatus) bulkStatus.textContent = 'Adding…';
-          let added = 0;
-          try {
-            for (const id of ids) {
-              await fetch('/api/list-add?admin='+ADMIN, {
-                method: 'POST',
-                headers: { 'Content-Type':'application/json' },
-                body: JSON.stringify({ lsid, id })
-              });
-              added += 1;
-            }
-            bulkInput.value = '';
-            if (bulkStatus) bulkStatus.textContent = 'Added ' + added + ' item' + (added === 1 ? '' : 's') + '.';
-            await refresh();
-          } catch (e) {
-            if (bulkStatus) bulkStatus.textContent = 'Bulk add failed.';
-          } finally {
-            bulkBtn.disabled = false;
-            bulkInput.disabled = false;
-          }
-        }
-
-        if (bulkBtn) {
-          bulkBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            doAddBulk();
-          });
-        }
-        if (bulkInput) {
-          bulkInput.addEventListener('keydown', (e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-              e.preventDefault();
-              doAddBulk();
-            }
-          });
-          bulkInput.addEventListener('click', (e) => e.stopPropagation());
-        }
-
-        return li;
-      }
 
       function moveThumb(li, dir){
         const parent = li.parentNode;
@@ -4884,7 +4881,6 @@ async function render() {
         ul.innerHTML = '';
         applyReverse(arr).forEach(it => ul.appendChild(liFor(it)));
         ul.appendChild(addSingleTile());
-        ul.appendChild(addBulkTile());
         attachThumbDnD(ul);
       }
 
@@ -5222,6 +5218,54 @@ async function render() {
     }
     actionRow.appendChild(status);
 
+    const bulkRow = el('div', { class: 'advanced-row' });
+    const bulkBox = el('div', { class: 'imdb-box' });
+    const bulkLabel = el('label', { class: 'mini bulk-label', text: 'Add those IMDb tt in bulk' });
+    const bulkInput = el('textarea', { placeholder: 'tt1234567 tt7654321 or IMDb URLs', spellcheck: 'false' });
+    const bulkBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Add bulk' });
+    const bulkStatus = el('span', { class: 'mini muted bulk-status' });
+    bulkBox.appendChild(bulkLabel);
+    bulkBox.appendChild(bulkInput);
+    bulkBox.appendChild(bulkBtn);
+    bulkBox.appendChild(bulkStatus);
+    bulkRow.appendChild(bulkBox);
+    const doBulkAdd = async () => {
+      const ids = parseImdbIdsFromText(bulkInput.value);
+      if (!ids.length) { alert('Enter IMDb ids or IMDb URLs.'); return; }
+      bulkBtn.disabled = true;
+      bulkInput.disabled = true;
+      bulkStatus.textContent = 'Adding…';
+      try {
+        const r = await fetch('/api/list-add-bulk?admin=' + ADMIN, {
+          method: 'POST',
+          headers: { 'Content-Type':'application/json' },
+          body: JSON.stringify({ lsid, ids })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.message || 'Bulk add failed');
+        const added = Number.isFinite(data.added) ? data.added : ids.length;
+        const skipped = Number.isFinite(data.requested) ? Math.max(0, data.requested - added) : 0;
+        bulkInput.value = '';
+        bulkStatus.textContent = 'Added ' + added + ' item' + (added === 1 ? '' : 's') + (skipped ? ' (' + skipped + ' skipped).' : '.');
+        await refresh();
+      } catch (e) {
+        bulkStatus.textContent = e.message || 'Bulk add failed.';
+      } finally {
+        bulkBtn.disabled = false;
+        bulkInput.disabled = false;
+      }
+    };
+    bulkBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      doBulkAdd();
+    });
+    bulkInput.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        doBulkAdd();
+      }
+    });
+
     const mainRow = el('div', { class: 'advanced-row' });
     const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Toggle Stremlist save link' });
     mainBtnAdvanced.innerHTML = mainBtnSvg;
@@ -5247,6 +5291,7 @@ async function render() {
 
     advancedPanel.appendChild(renameRow);
     advancedPanel.appendChild(actionRow);
+    advancedPanel.appendChild(bulkRow);
     if (!isOfflineList) advancedPanel.appendChild(mainRow);
     if (isCustom) {
       const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Manual list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
