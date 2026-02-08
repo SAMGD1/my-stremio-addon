@@ -2998,81 +2998,6 @@ app.post("/api/list-add", async (req, res) => {
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
-// add multiple items (tt...) to a list
-app.post("/api/list-bulk-add", async (req, res) => {
-  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  try {
-    const lsid = String(req.body.lsid || "");
-    const rawIds = Array.isArray(req.body.ids) ? req.body.ids : [];
-    const rawText = String(req.body.text || "");
-    if (!isListId(lsid) || (!rawIds.length && !rawText)) return res.status(400).send("Bad input");
-
-    const seen = new Set();
-    const ids = [];
-    for (const raw of rawIds) {
-      const m = String(raw || "").match(/tt\\d{7,}/i);
-      if (!m) continue;
-      const tt = m[0];
-      if (seen.has(tt)) continue;
-      seen.add(tt);
-      ids.push(tt);
-    }
-    if (!ids.length && rawText) {
-      const matches = rawText.matchAll(/tt\\d{7,}/gi);
-      for (const m of matches) {
-        const tt = m[0];
-        if (seen.has(tt)) continue;
-        seen.add(tt);
-        ids.push(tt);
-      }
-    }
-    if (!ids.length) return res.status(400).send("Bad input");
-
-    let addedCount = ids.length;
-
-    if (isOfflineList(lsid)) {
-      const list = LISTS[lsid];
-      if (!list) return res.status(404).send("List not found");
-      const before = (list.ids || []).length;
-      list.ids = appendUniqueIds(list.ids || [], ids);
-      list.orders = list.orders || {};
-      list.orders.imdb = list.ids.slice();
-      await saveOfflineList(lsid);
-      addedCount = list.ids.length - before;
-    } else {
-      PREFS.listEdits = PREFS.listEdits || {};
-      const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
-      const beforeAdded = (ed.added || []).length;
-      const addedSet = new Set(ed.added || []);
-      ids.forEach((tt) => {
-        if (!addedSet.has(tt)) {
-          ed.added.push(tt);
-          addedSet.add(tt);
-        }
-      });
-      ed.removed = (ed.removed || []).filter(x => !addedSet.has(x));
-      syncFrozenEdits(lsid);
-      addedCount = (ed.added || []).length - beforeAdded;
-    }
-
-    await persistSnapshot();
-
-    res.json({ ok: true, added: addedCount });
-
-    (async () => {
-      for (const id of ids) {
-        try {
-          await getBestMeta(id);
-          CARD.set(id, cardFor(id));
-        } catch (e) {
-          console.warn("[BULK] meta failed:", e?.message || e);
-        }
-      }
-      await persistSnapshot();
-    })();
-  } catch (e) { console.error(e); res.status(500).send("Failed"); }
-});
-
 // remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -3402,7 +3327,6 @@ app.get("/admin", async (req,res)=>{
     margin:12px 0;
     padding:0;
     list-style:none;
-    align-items:start;
   }
   .thumb{
     position:relative;
@@ -3447,34 +3371,12 @@ app.get("/admin", async (req,res)=>{
     border:1px dashed var(--border);
     min-height:90px;
   }
-  .thumb.add.bulk{position:relative;}
+  .thumb.add.bulk{
+    grid-column:1 / -1;
+  }
   .thumb.add.bulk .addbox{
-    text-align:left;
-    width:100%;
-  }
-  .thumb.add.bulk textarea{
-    min-height:48px;
-    resize:vertical;
-  }
-  .thumb.add.bulk .bulk-btn{
-    position:absolute;
-    top:8px;
-    right:8px;
-    width:26px;
-    height:26px;
-    border-radius:999px;
-    padding:0;
-    font-size:14px;
-    line-height:1;
-    background:var(--accent2);
-    color:#fff;
-    box-shadow:0 6px 14px rgba(139,124,247,.45);
-  }
-  .thumb.add.bulk .bulk-btn:disabled{
-    box-shadow:none;
-  }
-  .thumb.add.bulk .bulk-status{
-    margin-top:4px;
+    max-width:420px;
+    margin:0 auto;
   }
   .tile-move{margin-left:auto;display:flex;flex-direction:column;gap:4px;align-items:flex-end;}
   .tile-move button{padding:4px 6px;font-size:12px;}
@@ -4908,7 +4810,7 @@ async function render() {
         const box = el('div',{class:'addbox'},[
           el('div',{text:'Add those IMDb tt in bulk'}),
           el('textarea',{placeholder:'tt1234567 tt7654321 or IMDb URLs', spellcheck:'false'}),
-          el('button',{class:'bulk-btn', type:'button', text:'✓', title:'Add bulk'}),
+          el('button',{class:'bulk-btn', type:'button', text:'Add bulk'}),
           el('span',{class:'mini muted bulk-status'})
         ]);
         li.appendChild(box);
@@ -4919,19 +4821,20 @@ async function render() {
 
         async function doAddBulk(){
           const ids = parseImdbIdsFromText(bulkInput.value);
-          if (!bulkInput.value.trim()) { alert('Enter IMDb ids or IMDb URLs.'); return; }
+          if (!ids.length) { alert('Enter IMDb ids or IMDb URLs.'); return; }
           bulkBtn.disabled = true;
           bulkInput.disabled = true;
           if (bulkStatus) bulkStatus.textContent = 'Adding…';
+          let added = 0;
           try {
-            const r = await fetch('/api/list-bulk-add?admin='+ADMIN, {
-              method: 'POST',
-              headers: { 'Content-Type':'application/json' },
-              body: JSON.stringify({ lsid, ids, text: bulkInput.value })
-            });
-            if (!r.ok) throw new Error(await r.text());
-            const data = await r.json().catch(() => ({}));
-            const added = Number.isFinite(data.added) ? data.added : ids.length;
+            for (const id of ids) {
+              await fetch('/api/list-add?admin='+ADMIN, {
+                method: 'POST',
+                headers: { 'Content-Type':'application/json' },
+                body: JSON.stringify({ lsid, id })
+              });
+              added += 1;
+            }
             bulkInput.value = '';
             if (bulkStatus) bulkStatus.textContent = 'Added ' + added + ' item' + (added === 1 ? '' : 's') + '.';
             await refresh();
