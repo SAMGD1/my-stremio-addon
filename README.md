@@ -2,6 +2,11 @@
 
 A Stremio addon that turns IMDb + Trakt sources into customizable catalogs, with an admin UI for sorting, freezing, editing, and backup management.
 
+## Data sources & expectations
+- Parses publicly available list pages and APIs on a best-effort basis.
+- May stop working if upstream site layouts or response formats change.
+- No guarantees are provided; behavior can vary by region, network, or account status.
+
 ## What’s new in the current version
 - **Supabase-backed persistence** for snapshot/manual/frozen/backup JSON data.
 - **Manual discovered-list refresh** from Admin (`Discover now`) so discovery no longer auto-runs on every admin page load.
@@ -96,7 +101,6 @@ Then add environment variables from the table below.
 |---|---|
 | `TRAKT_CLIENT_ID` | Required for Trakt API ingestion. |
 | `TMDB_API_KEY` | Optional TMDB key/token for enhanced metadata. |
-| `IMDB_COOKIE` | Optional cookie if IMDb access requires it in your environment. |
 
 ---
 
@@ -170,6 +174,9 @@ Admin page reload alone does not automatically trigger discovery fetches for tha
 - Keep `ADMIN_PASSWORD` and `SHARED_SECRET` strong and private.
 
 ---
+
+## License
+MIT. See [LICENSE](LICENSE).
 
 ## High-level architecture
 1. Source discovery/collection (IMDb/Trakt/custom)
