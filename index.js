@@ -16,8 +16,6 @@ const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // https://www.imdb.c
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
 const PRELOAD_CARDS = String(process.env.PRELOAD_CARDS || "true").toLowerCase() !== "false";
-const IMDB_COOKIE = process.env.IMDB_COOKIE || "";
-
 // fetch IMDb’s own release-date page order so our date sort matches IMDb exactly
 const IMDB_FETCH_RELEASE_ORDERS = String(process.env.IMDB_FETCH_RELEASE_ORDERS || "true").toLowerCase() !== "false";
 
@@ -365,7 +363,6 @@ const imdbGraphqlHeaders = () => {
     "origin": "https://www.imdb.com",
     "referer": "https://www.imdb.com/"
   };
-  if (IMDB_COOKIE) headers.cookie = IMDB_COOKIE;
   return headers;
 };
 
