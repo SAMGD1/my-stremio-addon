@@ -2508,7 +2508,6 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
 app.get("/stream/:type/:id.json", async (req, res) => {
   try {
     if (!addonAllowed(req)) return res.status(403).send("Forbidden");
-    maybeBackgroundSync();
     const imdbId = resolveStreamImdbId(req.params.id);
     if (!imdbId) return res.json({ streams: [] });
 
