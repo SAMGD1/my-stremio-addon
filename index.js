@@ -3202,9 +3202,6 @@ app.post("/api/block-list", async (req,res)=>{
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
     if (PREFS.frozenLists) delete PREFS.frozenLists[lsid];
     if (PREFS.displayNames) delete PREFS.displayNames[lsid];
-    if (PREFS.sources?.lists) {
-      PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
-    }
     if (Array.isArray(PREFS.mainLists)) {
       PREFS.mainLists = PREFS.mainLists.filter(id => id !== lsid);
     }
@@ -3235,9 +3232,6 @@ app.post("/api/remove-list", async (req,res)=>{
     PREFS.blocked = Array.from(new Set([ ...(PREFS.blocked||[]), lsid ]));
     if (PREFS.frozenLists) delete PREFS.frozenLists[lsid];
     if (PREFS.displayNames) delete PREFS.displayNames[lsid];
-    if (PREFS.sources?.lists) {
-      PREFS.sources.lists = PREFS.sources.lists.filter(v => !removeValues.has(v));
-    }
     if (Array.isArray(PREFS.mainLists)) {
       PREFS.mainLists = PREFS.mainLists.filter(id => id !== lsid);
     }
