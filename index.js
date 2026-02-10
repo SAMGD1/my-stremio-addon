@@ -3677,6 +3677,27 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
   }
+  .merge-dropdown{
+    margin-top:8px;
+    border:1px solid var(--border);
+    border-radius:12px;
+    background:rgba(18,15,37,.7);
+    overflow:hidden;
+  }
+  .merge-dropdown > summary{
+    list-style:none;
+    cursor:pointer;
+    padding:10px 12px;
+    font-weight:600;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+  }
+  .merge-dropdown > summary::-webkit-details-marker{display:none;}
+  .merge-dropdown > summary::after{content:'▾';opacity:.8;transition:transform .2s ease;}
+  .merge-dropdown[open] > summary::after{transform:rotate(180deg);}
+  .merge-dropdown-body{padding:0 12px 12px;display:grid;gap:10px;}
   .advanced-panel{
     margin-top:8px;
     padding:10px;
@@ -4692,7 +4713,18 @@ async function render() {
     if (!on) return;
     mergeBuilder.innerHTML = '';
     mergeBuilder.appendChild(el('h4', { text: 'Merge Lists (up to 4)' }));
-    mergeBuilder.appendChild(el('div', { class: 'mini muted', text: 'Select up to 4 lists to create a merged list. Duplicates are deduped by IMDb ID in first-appearance order.' }));
+    const dropdown = el('details', { class: 'merge-dropdown' });
+    const isOpen = localStorage.getItem('mergeBuilderOpen') === 'true';
+    dropdown.open = isOpen;
+    dropdown.ontoggle = () => {
+      localStorage.setItem('mergeBuilderOpen', dropdown.open ? 'true' : 'false');
+    };
+
+    const summary = el('summary', { text: 'Merge list options' });
+    dropdown.appendChild(summary);
+
+    const body = el('div', { class: 'merge-dropdown-body' });
+    body.appendChild(el('div', { class: 'mini muted', text: 'Select up to 4 lists to create a merged list. Duplicates are deduped by IMDb ID in first-appearance order.' }));
     const grid = el('div', { class: 'merge-grid' });
     order.forEach(lsid => {
       const lab = el('label', { class: 'pill' });
@@ -4708,7 +4740,7 @@ async function render() {
       lab.appendChild(el('span', { text: displayName(lsid) }));
       grid.appendChild(lab);
     });
-    mergeBuilder.appendChild(grid);
+    body.appendChild(grid);
     const row = el('div', { class: 'rowtools' });
     const nameInput = el('input', { type: 'text', placeholder: 'Merged list name (optional)' });
     const mergeBtn = el('button', { text: 'Create merged list', type: 'button' });
@@ -4735,7 +4767,9 @@ async function render() {
     row.appendChild(nameInput);
     row.appendChild(mergeBtn);
     row.appendChild(status);
-    mergeBuilder.appendChild(row);
+    body.appendChild(row);
+    dropdown.appendChild(body);
+    mergeBuilder.appendChild(dropdown);
   }
 
   const table = el('table');
