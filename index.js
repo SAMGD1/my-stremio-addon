@@ -1674,6 +1674,46 @@ async function fetchTmdbMeta(imdbId) {
     return null;
   }
 }
+async function searchTmdbTitles(query, { limit = 5 } = {}) {
+  if (!tmdbEnabled()) return [];
+  const term = String(query || "").trim();
+  if (!term) return [];
+  const apiKey = getTmdbKey();
+  const search = await fetchTmdbJson(`/search/multi?query=${encodeURIComponent(term)}&include_adult=false&page=1`, apiKey);
+  const pool = Array.isArray(search?.results)
+    ? search.results.filter(x => x && (x.media_type === "movie" || x.media_type === "tv"))
+    : [];
+  const out = [];
+  for (const item of pool) {
+    if (out.length >= limit) break;
+    const mediaType = item.media_type;
+    const tmdbId = Number(item.id);
+    if (!Number.isFinite(tmdbId)) continue;
+
+    let imdbId = "";
+    try {
+      const external = await fetchTmdbJson(`/${mediaType}/${tmdbId}/external_ids`, apiKey);
+      imdbId = extractImdbId(external?.imdb_id || "");
+    } catch {
+      imdbId = "";
+    }
+
+    const title = mediaType === "movie"
+      ? sanitizeName(item.title || item.original_title || "")
+      : sanitizeName(item.name || item.original_name || "");
+    const released = mediaType === "movie" ? item.release_date : item.first_air_date;
+    const year = released ? Number(String(released).slice(0, 4)) : null;
+    out.push({
+      tmdbId,
+      mediaType,
+      title,
+      year: Number.isFinite(year) ? year : null,
+      poster: tmdbImage(item.poster_path, "w342"),
+      imdbId
+    });
+  }
+  return out;
+}
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -3055,6 +3095,31 @@ app.post("/api/list-add-bulk", async (req, res) => {
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
+app.get("/api/list-search-title", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const lsid = String(req.query.lsid || "").trim();
+    const q = String(req.query.q || "").trim();
+    const limitRaw = Number(req.query.limit);
+    const limit = Math.min(10, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 5));
+    if (!isListId(lsid)) return res.status(400).send("Bad list");
+    if (!q) return res.status(400).send("Missing query");
+    if (!tmdbEnabled()) return res.status(400).send("TMDB key missing or invalid");
+
+    const results = await searchTmdbTitles(q, { limit });
+    const existing = new Set(listIdsWithEdits(lsid));
+    const items = results.map(item => ({
+      ...item,
+      canAdd: !!(item.imdbId && isImdb(item.imdbId) && !existing.has(item.imdbId)),
+      inList: !!(item.imdbId && existing.has(item.imdbId))
+    }));
+    res.json({ ok: true, items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Search failed");
+  }
+});
+
 // remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -3599,6 +3664,59 @@ app.get("/admin", async (req,res)=>{
   }
   .imdb-box .bulk-btn{
     margin-top:8px;
+  }
+  .title-search-box{
+    margin-top:10px;
+    border-top:1px dashed var(--border);
+    padding-top:10px;
+  }
+  .title-search-row{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex-wrap:wrap;
+  }
+  .title-search-row input{
+    flex:1;
+    min-width:180px;
+  }
+  .title-search-results{
+    margin-top:8px;
+    display:grid;
+    gap:6px;
+  }
+  .title-search-item{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:6px 8px;
+    background:rgba(16,13,36,.6);
+  }
+  .title-search-item img{
+    width:36px;
+    height:54px;
+    object-fit:cover;
+    border-radius:6px;
+    border:1px solid var(--border);
+    background:#0f0c21;
+  }
+  .title-search-item .meta{
+    flex:1;
+    min-width:0;
+    line-height:1.2;
+  }
+  .title-search-item .meta .name{
+    font-size:13px;
+    font-weight:600;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .title-search-item .meta .sub{
+    font-size:11px;
+    color:var(--muted);
   }
   .sort-wrap{display:flex;align-items:center;gap:6px;}
   .sort-reverse-btn{
@@ -5291,6 +5409,100 @@ async function render() {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         doBulkAdd();
+      }
+    });
+
+    const searchBox = el('div', { class: 'title-search-box' });
+    const searchLabel = el('label', { class: 'mini bulk-label', text: 'Search TMDB by title, then add to list' });
+    const searchRow = el('div', { class: 'title-search-row' });
+    const searchInput = el('input', { type: 'text', placeholder: 'Type title name (e.g. Inception)', spellcheck: 'false' });
+    const searchBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Search' });
+    const searchStatus = el('span', { class: 'mini muted bulk-status' });
+    const searchResults = el('div', { class: 'title-search-results' });
+    searchRow.appendChild(searchInput);
+    searchRow.appendChild(searchBtn);
+    searchBox.appendChild(searchLabel);
+    searchBox.appendChild(searchRow);
+    searchBox.appendChild(searchStatus);
+    searchBox.appendChild(searchResults);
+    bulkBox.appendChild(searchBox);
+
+    const renderSearchResults = (items) => {
+      searchResults.innerHTML = '';
+      if (!items.length) return;
+      items.forEach((item) => {
+        const row = el('div', { class: 'title-search-item' });
+        const poster = document.createElement('img');
+        poster.src = item.poster || 'https://images.metahub.space/poster/small/' + 'tt0111161' + '/img';
+        poster.alt = item.title || 'Poster';
+        const meta = el('div', { class: 'meta' });
+        const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
+        const yearText = Number.isFinite(item.year) ? String(item.year) : 'Unknown year';
+        const name = el('div', { class: 'name', text: (item.title || 'Untitled') + ' (' + yearText + ')' });
+        const subtitle = el('div', { class: 'sub', text: typeLabel + (item.imdbId ? ' • ' + item.imdbId : ' • no IMDb id') });
+        meta.appendChild(name);
+        meta.appendChild(subtitle);
+
+        const addBtn = el('button', { class: 'btn2', type: 'button', text: item.inList ? 'Added' : 'Add' });
+        addBtn.disabled = !item.canAdd;
+        addBtn.onclick = async () => {
+          if (!item.imdbId) return;
+          addBtn.disabled = true;
+          addBtn.textContent = 'Adding…';
+          searchStatus.textContent = 'Adding ' + item.imdbId + '…';
+          try {
+            const r = await fetch('/api/list-add?admin=' + ADMIN, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ lsid, id: item.imdbId })
+            });
+            if (!r.ok) throw new Error(await r.text());
+            addBtn.textContent = 'Added';
+            searchStatus.textContent = 'Added ' + item.imdbId + '.';
+            await refresh();
+          } catch (e) {
+            addBtn.disabled = false;
+            addBtn.textContent = 'Add';
+            searchStatus.textContent = e.message || 'Add failed.';
+          }
+        };
+
+        row.appendChild(poster);
+        row.appendChild(meta);
+        row.appendChild(addBtn);
+        searchResults.appendChild(row);
+      });
+    };
+
+    const doSearchTitles = async () => {
+      const q = (searchInput.value || '').trim();
+      if (!q) { alert('Enter a title to search.'); return; }
+      searchBtn.disabled = true;
+      searchInput.disabled = true;
+      searchStatus.textContent = 'Searching…';
+      searchResults.innerHTML = '';
+      try {
+        const r = await fetch('/api/list-search-title?admin=' + ADMIN + '&lsid=' + encodeURIComponent(lsid) + '&q=' + encodeURIComponent(q) + '&limit=5');
+        const data = await r.json().catch(() => ({ items: [] }));
+        if (!r.ok) throw new Error((data && data.message) || 'Title search failed');
+        const items = Array.isArray(data.items) ? data.items : [];
+        renderSearchResults(items);
+        searchStatus.textContent = items.length ? ('Found ' + items.length + ' result' + (items.length === 1 ? '' : 's') + '.') : 'No matches found.';
+      } catch (e) {
+        searchStatus.textContent = e.message || 'Title search failed.';
+      } finally {
+        searchBtn.disabled = false;
+        searchInput.disabled = false;
+      }
+    };
+    searchBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      doSearchTitles();
+    });
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doSearchTitles();
       }
     });
 
