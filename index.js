@@ -82,6 +82,7 @@ let LISTS = Object.create(null);
 let PREFS = {
   listEdits: {},          // { [listId]: { added: ["tt..."], removed: ["tt..."] } }
   enabled: [],            // listIds shown in Stremio
+  hiddenLists: [],        // listIds hidden from web UI and catalogs
   order: [],              // listIds order in manifest
   defaultList: "",
   perListSort: {},        // { listId: 'date_asc' | ... | 'custom' }
@@ -1904,6 +1905,50 @@ function mergeListItems(sourceIds, sourceMap = LISTS) {
   return merged;
 }
 
+async function fetchLiveListIds(lsid, sourceMap = LISTS, seen = new Set()) {
+  if (!isListId(lsid) || seen.has(lsid)) return [];
+  seen.add(lsid);
+  const source = sourceMap[lsid] || LISTS[lsid];
+  const customMeta = PREFS.customLists && PREFS.customLists[lsid];
+
+  if (customMeta && (customMeta.kind === "merged" || customMeta.kind === "duplicate")) {
+    const linkedSources = customMeta.kind === "duplicate"
+      ? (Array.isArray(customMeta.sources) ? customMeta.sources.slice(0, 1) : [])
+      : (customMeta.sources || []);
+    const merged = [];
+    const dedupe = new Set();
+    for (const srcId of linkedSources) {
+      const srcIds = await fetchLiveListIds(srcId, sourceMap, seen);
+      for (const tt of srcIds) {
+        if (!dedupe.has(tt)) {
+          dedupe.add(tt);
+          merged.push(tt);
+        }
+      }
+    }
+    return merged;
+  }
+
+  if (customMeta) return Array.isArray(source?.ids) ? source.ids.slice() : [];
+
+  if (isTraktListId(lsid)) {
+    const ts = parseTraktListKey(lsid);
+    if (!ts || !TRAKT_CLIENT_ID) return [];
+    try { return await fetchTraktListImdbIds(ts); }
+    catch (e) { console.warn("[SYNC] Trakt fetch failed for", lsid, e.message); return []; }
+  }
+
+  const url = source?.url || `https://www.imdb.com/list/${lsid}/`;
+  try {
+    if (isImdbListId(lsid)) return await fetchImdbListIdsAllPages(url);
+    if (isImdbWatchlistUrl(url)) return await fetchImdbWatchlistIdsAllPages(url);
+    return await fetchImdbSearchOrPageIds(url);
+  } catch (e) {
+    console.warn("[SYNC] IMDb list fetch failed for", lsid, e.message);
+    return [];
+  }
+}
+
 // ----------------- SYNC -----------------
 function manifestKey() {
   const enabled = (PREFS.enabled && PREFS.enabled.length) ? PREFS.enabled : Object.keys(LISTS);
@@ -1915,9 +1960,10 @@ function manifestKey() {
   const order   = (PREFS.order || []).join(",");
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
+  const hidden = (PREFS.hiddenLists || []).join(",");
 
   const mainLists = JSON.stringify(PREFS.mainLists || []);
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}#h${hidden}`;
 }
 
 async function harvestSources() {
@@ -2104,7 +2150,17 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         const linkedSources = customMeta.kind === "duplicate"
           ? (Array.isArray(customMeta.sources) ? customMeta.sources.slice(0, 1) : [])
           : (customMeta.sources || []);
-        const merged = mergeListItems(linkedSources, next);
+        const merged = [];
+        const seenMerged = new Set();
+        for (const srcId of linkedSources) {
+          const srcIds = await fetchLiveListIds(srcId, next);
+          for (const tt of srcIds) {
+            if (!seenMerged.has(tt)) {
+              seenMerged.add(tt);
+              merged.push(tt);
+            }
+          }
+        }
         list.ids = merged;
         list.orders = list.orders || {};
         list.orders.imdb = merged.slice();
@@ -2289,7 +2345,16 @@ async function syncSingleList(lsid, { manual = false } = {}) {
     const linkedSources = customMeta.kind === "duplicate"
       ? (Array.isArray(customMeta.sources) ? customMeta.sources.slice(0, 1) : [])
       : (customMeta.sources || []);
-    raw = mergeListItems(linkedSources);
+    const seenMerged = new Set();
+    for (const srcId of linkedSources) {
+      const srcIds = await fetchLiveListIds(srcId);
+      for (const tt of srcIds) {
+        if (!seenMerged.has(tt)) {
+          seenMerged.add(tt);
+          raw.push(tt);
+        }
+      }
+    }
     orders = { ...orders, imdb: raw.slice() };
   } else if (customMeta) {
     throw new Error("Custom lists have no source to sync");
@@ -2392,7 +2457,8 @@ const baseManifest = {
 
 function getEnabledOrderedIds() {
   const allIds  = Object.keys(LISTS);
-  const enabled = new Set(PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds);
+  const hidden = new Set(PREFS.hiddenLists || []);
+  const enabled = new Set((PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds).filter(id => !hidden.has(id)));
   const base    = (PREFS.order && PREFS.order.length ? PREFS.order.filter(id => LISTS[id]) : []);
   const missing = allIds.filter(id => !base.includes(id))
     .sort((a,b)=>( listDisplayName(a).localeCompare(listDisplayName(b)) ));
@@ -2653,6 +2719,9 @@ app.post("/api/prefs", async (req,res) => {
   try{
     const body = req.body || {};
     PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
+    PREFS.hiddenLists     = Array.isArray(body.hiddenLists) ? body.hiddenLists.filter(isListId) : (PREFS.hiddenLists || []);
+    const hiddenSet = new Set(PREFS.hiddenLists);
+    PREFS.enabled = PREFS.enabled.filter(id => !hiddenSet.has(id));
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
     PREFS.mainLists       = Array.isArray(body.mainLists)
@@ -3917,6 +3986,7 @@ app.get("/admin", async (req,res)=>{
   .advanced-row.stack{display:grid;gap:8px;align-items:start;}
   .advanced-row.stack .imdb-box{margin:0;}
   .adv-inline-btn{margin-top:8px;margin-left:10px;padding:6px 10px;font-size:12px;}
+  .hide-list-btn{display:block;margin-top:8px;padding:5px 10px;font-size:12px;}
   tr.list-row.main + tr.advanced-drawer td{
     border-left-color:rgba(243,195,65,.35);
     border-right-color:rgba(243,195,65,.35);
@@ -4175,6 +4245,7 @@ app.get("/admin", async (req,res)=>{
       <p class="muted">Drag rows to reorder lists or use the arrows. Click ▾ to open the drawer and tune sort options or custom order.</p>
       <div class="rowtools">
         <label class="pill"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
+        <button id="showHiddenBtn" type="button" class="btn2" style="display:none;">Show hidden lists</button>
         <span class="mini muted">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
         <span class="rowtools-spacer"></span>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
@@ -5075,11 +5146,15 @@ async function render() {
 
   container.innerHTML = "";
 
-  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
+  const hiddenSet = new Set(Array.isArray(prefs.hiddenLists) ? prefs.hiddenLists.filter(id => lists[id]) : []);
+  const enabledSet = new Set((prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists)).filter(id => !hiddenSet.has(id)));
   const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
   const missing   = Object.keys(lists).filter(id => !baseOrder.includes(id))
     .sort((a,b)=>( displayName(a).localeCompare(displayName(b)) ));
   const order = baseOrder.concat(missing);
+
+  let showHiddenOnly = localStorage.getItem('showHiddenOnly') === 'true';
+  const showHiddenBtn = document.getElementById('showHiddenBtn');
 
   const advancedToggle = document.getElementById('advancedToggle');
   const mergeBuilder = document.getElementById('mergeBuilder');
@@ -5090,12 +5165,28 @@ async function render() {
     advancedToggle.onchange = () => {
       localStorage.setItem('advancedMode', advancedToggle.checked ? 'true' : 'false');
       updateAdvancedPanels();
-      renderMergeBuilder();
+      render();
+    };
+  }
+  if (showHiddenBtn) {
+    showHiddenBtn.onclick = () => {
+      showHiddenOnly = !showHiddenOnly;
+      localStorage.setItem('showHiddenOnly', showHiddenOnly ? 'true' : 'false');
+      render();
     };
   }
 
   function updateAdvancedPanels() {
     const on = advancedToggle && advancedToggle.checked;
+    if (showHiddenBtn) {
+      if (!on && showHiddenOnly) {
+        showHiddenOnly = false;
+        localStorage.setItem('showHiddenOnly', 'false');
+      }
+      showHiddenBtn.style.display = on ? '' : 'none';
+      showHiddenBtn.textContent = showHiddenOnly ? 'Show normal lists' : 'Show hidden lists';
+    }
+    document.querySelectorAll('.hide-list-btn').forEach(btn => { btn.style.display = on ? '' : 'none'; });
     document.querySelectorAll('.adv-inline-btn').forEach(btn => {
       btn.style.display = on ? '' : 'none';
       if (!on) btn.setAttribute('aria-expanded', 'false');
@@ -5108,6 +5199,10 @@ async function render() {
         btn.setAttribute('aria-expanded', 'false');
       });
     }
+  }
+
+  function visibleOrder() {
+    return order.filter(lsid => showHiddenOnly ? hiddenSet.has(lsid) : !hiddenSet.has(lsid));
   }
 
   function renderMergeBuilder() {
@@ -5130,7 +5225,7 @@ async function render() {
     const body = el('div', { class: 'merge-dropdown-body' });
     body.appendChild(el('div', { class: 'mini muted', text: 'Select up to 4 lists to create a merged list. Duplicates are deduped by IMDb ID in first-appearance order.' }));
     const grid = el('div', { class: 'merge-grid' });
-    order.forEach(lsid => {
+    visibleOrder().forEach(lsid => {
       const lab = el('label', { class: 'pill' });
       const cb = el('input', { type: 'checkbox' });
       cb.checked = mergeSelection.has(lsid);
@@ -5427,7 +5522,10 @@ async function render() {
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
     const chevTd = el('td',{class:'chev-cell'},[chev]);
 
-    const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
+    const isHidden = hiddenSet.has(lsid);
+    const cb = el('input', {type:'checkbox'}); cb.checked = !isHidden && enabledSet.has(lsid);
+    cb.disabled = isHidden;
+    cb.title = isHidden ? 'Hidden lists are always disabled' : '';
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
     const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" transform="rotate(45 12 12)"></rect><path d="M10.2 8.7a1 1 0 0 0-1.5.9v4.8a1 1 0 0 0 1.5.9l4.6-2.4a1 1 0 0 0 0-1.8l-4.6-2.4z" fill="currentColor"></path></svg>';
@@ -5461,6 +5559,17 @@ async function render() {
     }
     const advInlineBtn = el('button', { type: 'button', class: 'btn2 adv-inline-btn', text: 'Show advanced options', 'aria-expanded': 'false' });
     nameCell.appendChild(advInlineBtn);
+
+    const hideBtn = el('button', { type: 'button', class: 'btn2 hide-list-btn', text: isHidden ? 'Unhide list' : 'Hide list' });
+    hideBtn.onclick = () => {
+      if (hiddenSet.has(lsid)) {
+        hiddenSet.delete(lsid);
+      } else {
+        hiddenSet.add(lsid);
+        enabledSet.delete(lsid);
+      }
+      render();
+    };
 
     const count = el('td',{text:String(listCount(lsid))});
 
@@ -5906,7 +6015,10 @@ async function render() {
     advancedDrawer.style.display = 'none';
 
     tr.appendChild(chevTd);
-    tr.appendChild(el('td',{},[cb]));
+    const enabledCell = el('td');
+    enabledCell.appendChild(cb);
+    enabledCell.appendChild(hideBtn);
+    tr.appendChild(enabledCell);
     tr.appendChild(el('td',{},[mainBtn]));
     tr.appendChild(moveTd);
     tr.appendChild(nameCell);
@@ -5959,7 +6071,7 @@ async function render() {
     return tr;
   }
 
-  order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
+  visibleOrder().forEach(lsid => tbody.appendChild(makeRow(lsid)));
   table.appendChild(tbody);
   attachRowDnD(tbody);
 
@@ -5970,9 +6082,10 @@ async function render() {
   const msg = el('span',{class:'inline-note'});
   async function saveAll(text){
     const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
-    const enabled = Array.from(enabledSet);
+    const enabled = Array.from(enabledSet).filter(id => !hiddenSet.has(id));
     const body = {
       enabled,
+      hiddenLists: Array.from(hiddenSet),
       order: newOrder,
       defaultList: prefs.defaultList || (enabled[0] || ""),
       mainLists: prefs.mainLists || [],
@@ -6017,6 +6130,7 @@ render();
         PREFS.mainLists = PREFS.mainList && isListId(PREFS.mainList) ? [PREFS.mainList] : [];
       }
       if (PREFS.mainList) delete PREFS.mainList;
+      PREFS.hiddenLists = Array.isArray(PREFS.hiddenLists) ? PREFS.hiddenLists.filter(isListId) : [];
       FALLBK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
       CARD.clear();   if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
       EP2SER.clear(); if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
