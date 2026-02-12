@@ -3834,7 +3834,18 @@ app.get("/admin", async (req,res)=>{
   .merge-dropdown > summary::after{content:'▾';opacity:.8;transition:transform .2s ease;}
   .merge-dropdown[open] > summary::after{transform:rotate(180deg);}
   .merge-dropdown-body{padding:0 12px 12px;display:grid;gap:10px;}
-  .advanced-drawer td{background:#120f25;padding:10px 12px;}
+  .advanced-drawer{position:relative;top:-10px;}
+  .advanced-drawer td{
+    background:rgba(17,14,40,.7);
+    padding:0 10px 10px;
+    border-left:1px solid rgba(38,33,69,.85);
+    border-right:1px solid rgba(38,33,69,.85);
+    border-bottom:1px solid rgba(38,33,69,.85);
+    border-top:0;
+    border-radius:0 0 14px 14px;
+  }
+  tr.list-row.advanced-open td:first-child{border-radius:14px 0 0 0;}
+  tr.list-row.advanced-open td:last-child{border-radius:0 14px 0 0;}
   .advanced-panel{
     padding:12px;
     border-radius:14px;
@@ -3857,6 +3868,12 @@ app.get("/admin", async (req,res)=>{
   .advanced-row.stack{display:grid;gap:8px;align-items:start;}
   .advanced-row.stack .imdb-box{margin:0;}
   .adv-inline-btn{margin-top:8px;padding:6px 10px;font-size:12px;}
+  tr.list-row.main + tr.advanced-drawer td{
+    border-left-color:rgba(243,195,65,.35);
+    border-right-color:rgba(243,195,65,.35);
+    border-bottom-color:rgba(243,195,65,.35);
+    background:rgba(243,195,65,.08);
+  }
   tr.list-row td{
     background:rgba(17,14,40,.7);
     border-top:1px solid rgba(38,33,69,.85);
@@ -5000,6 +5017,11 @@ async function render() {
     });
     if (!on) {
       document.querySelectorAll('tr.advanced-drawer').forEach(row => { row.style.display = 'none'; });
+      document.querySelectorAll('tr.list-row').forEach(row => row.classList.remove('advanced-open'));
+      document.querySelectorAll('.adv-inline-btn').forEach(btn => {
+        btn.textContent = 'Show advanced options';
+        btn.setAttribute('aria-expanded', 'false');
+      });
     }
   }
 
@@ -5774,6 +5796,7 @@ async function render() {
       } else {
         advancedDrawer.style.display = 'none';
       }
+      tr.classList.toggle('advanced-open', advOpen);
     };
 
     chev.onclick = ()=>{
