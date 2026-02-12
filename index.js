@@ -5561,14 +5561,25 @@ async function render() {
     nameCell.appendChild(advInlineBtn);
 
     const hideBtn = el('button', { type: 'button', class: 'btn2 hide-list-btn', text: isHidden ? 'Unhide list' : 'Hide list' });
-    hideBtn.onclick = () => {
-      if (hiddenSet.has(lsid)) {
+    hideBtn.onclick = async () => {
+      hideBtn.disabled = true;
+      const wasHidden = hiddenSet.has(lsid);
+      if (wasHidden) {
         hiddenSet.delete(lsid);
       } else {
         hiddenSet.add(lsid);
         enabledSet.delete(lsid);
       }
-      render();
+      try {
+        await saveAll('Saved');
+        render();
+      } catch (e) {
+        if (wasHidden) hiddenSet.add(lsid);
+        else hiddenSet.delete(lsid);
+        alert('Failed to update hidden list state');
+      } finally {
+        hideBtn.disabled = false;
+      }
     };
 
     const count = el('td',{text:String(listCount(lsid))});
