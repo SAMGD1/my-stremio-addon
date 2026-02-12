@@ -82,6 +82,7 @@ let LISTS = Object.create(null);
 let PREFS = {
   listEdits: {},          // { [listId]: { added: ["tt..."], removed: ["tt..."] } }
   enabled: [],            // listIds shown in Stremio
+  hiddenLists: [],        // listIds hidden from web UI and catalogs
   order: [],              // listIds order in manifest
   defaultList: "",
   perListSort: {},        // { listId: 'date_asc' | ... | 'custom' }
@@ -326,11 +327,14 @@ function base64UrlDecode(str) {
   const padded = norm + "=".repeat((4 - (norm.length % 4)) % 4);
   return Buffer.from(padded, "base64").toString("utf8");
 }
+function listFileName(lsid) {
+  return `${String(lsid || "").trim()}.json`;
+}
 function frozenBackupPath(lsid) {
-  return `${FROZEN_DIR}/${base64Url(lsid)}.json`;
+  return `${FROZEN_DIR}/${listFileName(lsid)}`;
 }
 function linkBackupPath(lsid) {
-  return `${BACKUP_DIR}/${base64Url(lsid)}.json`;
+  return `${BACKUP_DIR}/${listFileName(lsid)}`;
 }
 
 const minutes = ms => Math.round(ms/60000);
@@ -390,9 +394,15 @@ function offlineSupabasePath(lsid) {
   return `manual/${offlineSafeName(lsid)}.json`;
 }
 function frozenSupabasePath(lsid) {
-  return `frozen/${base64Url(lsid)}.json`;
+  return `frozen/${listFileName(lsid)}`;
 }
 function linkBackupSupabasePath(lsid) {
+  return `backup/${listFileName(lsid)}`;
+}
+function frozenSupabaseLegacyPath(lsid) {
+  return `frozen/${base64Url(lsid)}.json`;
+}
+function linkBackupSupabaseLegacyPath(lsid) {
   return `backup/${base64Url(lsid)}.json`;
 }
 
@@ -709,8 +719,12 @@ async function saveFrozenBackup(lsid, frozen) {
     await fs.writeFile(path, JSON.stringify(payload, null, 2), "utf8");
   } catch {/* ignore */}
   try {
-    const { putJSON } = await getSupabaseApi();
+    const { putJSON, deleteJSON } = await getSupabaseApi();
     await putJSON(frozenSupabasePath(lsid), payload);
+    const legacy = frozenSupabaseLegacyPath(lsid);
+    if (legacy !== frozenSupabasePath(lsid)) {
+      try { await deleteJSON(legacy); } catch {/* ignore */}
+    }
   } catch (e) {
     console.warn("[SUPABASE] frozen backup save failed:", e?.message || e);
   }
@@ -719,6 +733,7 @@ async function deleteFrozenBackup(lsid) {
   const path = frozenBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
   await removeSupabaseFile(frozenSupabasePath(lsid), "frozen backup");
+  await removeSupabaseFile(frozenSupabaseLegacyPath(lsid), "frozen backup legacy");
 }
 async function persistFrozenBackups() {
   const frozen = PREFS.frozenLists || {};
@@ -748,8 +763,12 @@ async function saveLinkBackupConfig(lsid, config) {
     await fs.writeFile(path, JSON.stringify(payload, null, 2), "utf8");
   } catch {/* ignore */}
   try {
-    const { putJSON } = await getSupabaseApi();
+    const { putJSON, deleteJSON } = await getSupabaseApi();
     await putJSON(linkBackupSupabasePath(lsid), payload);
+    const legacy = linkBackupSupabaseLegacyPath(lsid);
+    if (legacy !== linkBackupSupabasePath(lsid)) {
+      try { await deleteJSON(legacy); } catch {/* ignore */}
+    }
     await addSupabaseIndexEntry(BACKUP_INDEX_PATH, lsid);
   } catch (e) {
     console.warn("[SUPABASE] link backup save failed:", e?.message || e);
@@ -759,6 +778,7 @@ async function deleteLinkBackupConfig(lsid) {
   const path = linkBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
   await removeSupabaseFile(linkBackupSupabasePath(lsid), "link backup");
+  await removeSupabaseFile(linkBackupSupabaseLegacyPath(lsid), "link backup legacy");
   await removeSupabaseIndexEntry(BACKUP_INDEX_PATH, lsid);
 }
 async function persistLinkBackupConfigs() {
@@ -791,7 +811,11 @@ async function loadLinkBackupConfigs() {
       if (!id || backups.has(id)) continue;
       try {
         const { getJSON } = await getSupabaseApi();
-        const parsed = await getJSON(linkBackupSupabasePath(id));
+        let parsed = null;
+        try { parsed = await getJSON(linkBackupSupabasePath(id)); } catch {/* ignore */}
+        if (!parsed) {
+          try { parsed = await getJSON(linkBackupSupabaseLegacyPath(id)); } catch {/* ignore */}
+        }
         if (parsed?.id) backups.set(String(parsed.id), parsed);
       } catch {/* ignore */}
     }
@@ -860,7 +884,11 @@ async function loadFrozenBackups() {
       if (!id || backups.has(id)) continue;
       try {
         const { getJSON } = await getSupabaseApi();
-        const parsed = await getJSON(frozenSupabasePath(id));
+        let parsed = null;
+        try { parsed = await getJSON(frozenSupabasePath(id)); } catch {/* ignore */}
+        if (!parsed) {
+          try { parsed = await getJSON(frozenSupabaseLegacyPath(id)); } catch {/* ignore */}
+        }
         if (parsed?.id) backups.set(String(parsed.id), parsed);
       } catch {/* ignore */}
     }
@@ -1674,6 +1702,46 @@ async function fetchTmdbMeta(imdbId) {
     return null;
   }
 }
+async function searchTmdbTitles(query, { limit = 5 } = {}) {
+  if (!tmdbEnabled()) return [];
+  const term = String(query || "").trim();
+  if (!term) return [];
+  const apiKey = getTmdbKey();
+  const search = await fetchTmdbJson(`/search/multi?query=${encodeURIComponent(term)}&include_adult=false&page=1`, apiKey);
+  const pool = Array.isArray(search?.results)
+    ? search.results.filter(x => x && (x.media_type === "movie" || x.media_type === "tv"))
+    : [];
+  const out = [];
+  for (const item of pool) {
+    if (out.length >= limit) break;
+    const mediaType = item.media_type;
+    const tmdbId = Number(item.id);
+    if (!Number.isFinite(tmdbId)) continue;
+
+    let imdbId = "";
+    try {
+      const external = await fetchTmdbJson(`/${mediaType}/${tmdbId}/external_ids`, apiKey);
+      imdbId = extractImdbId(external?.imdb_id || "");
+    } catch {
+      imdbId = "";
+    }
+
+    const title = mediaType === "movie"
+      ? sanitizeName(item.title || item.original_title || "")
+      : sanitizeName(item.name || item.original_name || "");
+    const released = mediaType === "movie" ? item.release_date : item.first_air_date;
+    const year = released ? Number(String(released).slice(0, 4)) : null;
+    out.push({
+      tmdbId,
+      mediaType,
+      title,
+      year: Number.isFinite(year) ? year : null,
+      poster: tmdbImage(item.poster_path, "w342"),
+      imdbId
+    });
+  }
+  return out;
+}
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -1837,6 +1905,50 @@ function mergeListItems(sourceIds, sourceMap = LISTS) {
   return merged;
 }
 
+async function fetchLiveListIds(lsid, sourceMap = LISTS, seen = new Set()) {
+  if (!isListId(lsid) || seen.has(lsid)) return [];
+  seen.add(lsid);
+  const source = sourceMap[lsid] || LISTS[lsid];
+  const customMeta = PREFS.customLists && PREFS.customLists[lsid];
+
+  if (customMeta && (customMeta.kind === "merged" || customMeta.kind === "duplicate")) {
+    const linkedSources = customMeta.kind === "duplicate"
+      ? (Array.isArray(customMeta.sources) ? customMeta.sources.slice(0, 1) : [])
+      : (customMeta.sources || []);
+    const merged = [];
+    const dedupe = new Set();
+    for (const srcId of linkedSources) {
+      const srcIds = await fetchLiveListIds(srcId, sourceMap, seen);
+      for (const tt of srcIds) {
+        if (!dedupe.has(tt)) {
+          dedupe.add(tt);
+          merged.push(tt);
+        }
+      }
+    }
+    return merged;
+  }
+
+  if (customMeta) return Array.isArray(source?.ids) ? source.ids.slice() : [];
+
+  if (isTraktListId(lsid)) {
+    const ts = parseTraktListKey(lsid);
+    if (!ts || !TRAKT_CLIENT_ID) return [];
+    try { return await fetchTraktListImdbIds(ts); }
+    catch (e) { console.warn("[SYNC] Trakt fetch failed for", lsid, e.message); return []; }
+  }
+
+  const url = source?.url || `https://www.imdb.com/list/${lsid}/`;
+  try {
+    if (isImdbListId(lsid)) return await fetchImdbListIdsAllPages(url);
+    if (isImdbWatchlistUrl(url)) return await fetchImdbWatchlistIdsAllPages(url);
+    return await fetchImdbSearchOrPageIds(url);
+  } catch (e) {
+    console.warn("[SYNC] IMDb list fetch failed for", lsid, e.message);
+    return [];
+  }
+}
+
 // ----------------- SYNC -----------------
 function manifestKey() {
   const enabled = (PREFS.enabled && PREFS.enabled.length) ? PREFS.enabled : Object.keys(LISTS);
@@ -1848,9 +1960,10 @@ function manifestKey() {
   const order   = (PREFS.order || []).join(",");
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
+  const hidden = (PREFS.hiddenLists || []).join(",");
 
   const mainLists = JSON.stringify(PREFS.mainLists || []);
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}#h${hidden}`;
 }
 
 async function harvestSources() {
@@ -2033,8 +2146,21 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         continue;
       }
 
-      if (customMeta && customMeta.kind === "merged") {
-        const merged = mergeListItems(customMeta.sources || [], next);
+      if (customMeta && (customMeta.kind === "merged" || customMeta.kind === "duplicate")) {
+        const linkedSources = customMeta.kind === "duplicate"
+          ? (Array.isArray(customMeta.sources) ? customMeta.sources.slice(0, 1) : [])
+          : (customMeta.sources || []);
+        const merged = [];
+        const seenMerged = new Set();
+        for (const srcId of linkedSources) {
+          const srcIds = await fetchLiveListIds(srcId, next);
+          for (const tt of srcIds) {
+            if (!seenMerged.has(tt)) {
+              seenMerged.add(tt);
+              merged.push(tt);
+            }
+          }
+        }
         list.ids = merged;
         list.orders = list.orders || {};
         list.orders.imdb = merged.slice();
@@ -2215,8 +2341,20 @@ async function syncSingleList(lsid, { manual = false } = {}) {
   let raw = [];
   let orders = list.orders || {};
 
-  if (customMeta && customMeta.kind === "merged") {
-    raw = mergeListItems(customMeta.sources || []);
+  if (customMeta && (customMeta.kind === "merged" || customMeta.kind === "duplicate")) {
+    const linkedSources = customMeta.kind === "duplicate"
+      ? (Array.isArray(customMeta.sources) ? customMeta.sources.slice(0, 1) : [])
+      : (customMeta.sources || []);
+    const seenMerged = new Set();
+    for (const srcId of linkedSources) {
+      const srcIds = await fetchLiveListIds(srcId);
+      for (const tt of srcIds) {
+        if (!seenMerged.has(tt)) {
+          seenMerged.add(tt);
+          raw.push(tt);
+        }
+      }
+    }
     orders = { ...orders, imdb: raw.slice() };
   } else if (customMeta) {
     throw new Error("Custom lists have no source to sync");
@@ -2319,7 +2457,8 @@ const baseManifest = {
 
 function getEnabledOrderedIds() {
   const allIds  = Object.keys(LISTS);
-  const enabled = new Set(PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds);
+  const hidden = new Set(PREFS.hiddenLists || []);
+  const enabled = new Set((PREFS.enabled && PREFS.enabled.length ? PREFS.enabled : allIds).filter(id => !hidden.has(id)));
   const base    = (PREFS.order && PREFS.order.length ? PREFS.order.filter(id => LISTS[id]) : []);
   const missing = allIds.filter(id => !base.includes(id))
     .sort((a,b)=>( listDisplayName(a).localeCompare(listDisplayName(b)) ));
@@ -2580,6 +2719,9 @@ app.post("/api/prefs", async (req,res) => {
   try{
     const body = req.body || {};
     PREFS.enabled         = Array.isArray(body.enabled) ? body.enabled.filter(isListId) : [];
+    PREFS.hiddenLists     = Array.isArray(body.hiddenLists) ? body.hiddenLists.filter(isListId) : (PREFS.hiddenLists || []);
+    const hiddenSet = new Set(PREFS.hiddenLists);
+    PREFS.enabled = PREFS.enabled.filter(id => !hiddenSet.has(id));
     PREFS.order           = Array.isArray(body.order)   ? body.order.filter(isListId)   : [];
     PREFS.defaultList     = isListId(body.defaultList) ? body.defaultList : "";
     PREFS.mainLists       = Array.isArray(body.mainLists)
@@ -3055,6 +3197,31 @@ app.post("/api/list-add-bulk", async (req, res) => {
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
+app.get("/api/list-search-title", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).json({ ok: false, message: "Forbidden" });
+  try {
+    const lsid = String(req.query.lsid || "").trim();
+    const q = String(req.query.q || "").trim();
+    const limitRaw = Number(req.query.limit);
+    const limit = Math.min(10, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 5));
+    if (lsid && !isListId(lsid)) return res.status(400).json({ ok: false, message: "Bad list" });
+    if (!q) return res.status(400).json({ ok: false, message: "Missing query" });
+    if (!tmdbEnabled()) return res.status(400).json({ ok: false, message: "TMDB key missing or invalid" });
+
+    const results = await searchTmdbTitles(q, { limit });
+    const existing = lsid ? new Set(listIdsWithEdits(lsid)) : new Set();
+    const items = results.map(item => ({
+      ...item,
+      canAdd: !!(item.imdbId && isImdb(item.imdbId) && !existing.has(item.imdbId)),
+      inList: !!(item.imdbId && existing.has(item.imdbId))
+    }));
+    res.json({ ok: true, items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, message: "Search failed" });
+  }
+});
+
 // remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -3520,7 +3687,7 @@ app.get("/admin", async (req,res)=>{
     color:#dcd8ff;
     cursor:pointer;
     transition:background .2s ease, border-color .2s ease;
-    min-height:150px;
+    min-height:190px;
     display:flex;
     flex-direction:column;
     align-items:center;
@@ -3546,6 +3713,22 @@ app.get("/admin", async (req,res)=>{
     height:100%;
     cursor:pointer;
   }
+
+  .csv-actions{
+    display:flex;
+    gap:8px;
+    margin-top:8px;
+    align-items:center;
+  }
+  .csv-inline-box{
+    border:1px dashed var(--border);
+    border-radius:12px;
+    padding:10px;
+    background:rgba(12,10,26,.35);
+    min-width:320px;
+  }
+  .csv-inline-box .mini{display:block;margin-bottom:6px;}
+  .csv-inline-box input[type="file"]{width:100%;}
   .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
   .pill{
     display:inline-flex;
@@ -3599,6 +3782,77 @@ app.get("/admin", async (req,res)=>{
   }
   .imdb-box .bulk-btn{
     margin-top:8px;
+  }
+  .title-search-box{
+    margin-top:10px;
+    border:1px dashed var(--border);
+    border-radius:12px;
+    padding:10px;
+    background:rgba(12,10,26,.35);
+  }
+  .drawer-search-center{
+    max-width:680px;
+    margin:10px auto 6px;
+  }
+  .title-search-row{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex-wrap:wrap;
+  }
+  .title-search-row input{
+    flex:1;
+    min-width:180px;
+  }
+  .title-search-clear{
+    min-width:34px;
+    padding:8px 11px;
+    justify-content:center;
+  }
+  .title-search-status{
+    display:block;
+    margin-top:7px;
+  }
+  .title-search-results{
+    margin-top:8px;
+    display:grid;
+    gap:6px;
+    max-height:340px;
+    overflow-y:auto;
+    padding-right:4px;
+  }
+  .title-search-item{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:6px 8px;
+    background:rgba(16,13,36,.6);
+  }
+  .title-search-item img{
+    width:36px;
+    height:54px;
+    object-fit:cover;
+    border-radius:6px;
+    border:1px solid var(--border);
+    background:#0f0c21;
+  }
+  .title-search-item .meta{
+    flex:1;
+    min-width:0;
+    line-height:1.2;
+  }
+  .title-search-item .meta .name{
+    font-size:13px;
+    font-weight:600;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .title-search-item .meta .sub{
+    font-size:11px;
+    color:var(--muted);
   }
   .sort-wrap{display:flex;align-items:center;gap:6px;}
   .sort-reverse-btn{
@@ -3698,20 +3952,46 @@ app.get("/admin", async (req,res)=>{
   .merge-dropdown > summary::after{content:'▾';opacity:.8;transition:transform .2s ease;}
   .merge-dropdown[open] > summary::after{transform:rotate(180deg);}
   .merge-dropdown-body{padding:0 12px 12px;display:grid;gap:10px;}
+  .advanced-drawer{position:relative;top:-10px;}
+  .advanced-drawer td{
+    background:rgba(17,14,40,.7);
+    padding:0 10px 10px;
+    border-left:1px solid rgba(38,33,69,.85);
+    border-right:1px solid rgba(38,33,69,.85);
+    border-bottom:1px solid rgba(38,33,69,.85);
+    border-top:0;
+    border-radius:0 0 14px 14px;
+  }
+  tr.list-row.advanced-open td:first-child{border-radius:14px 0 0 0;}
+  tr.list-row.advanced-open td:last-child{border-radius:0 14px 0 0;}
   .advanced-panel{
-    margin-top:8px;
-    padding:10px;
-    border-radius:12px;
+    padding:12px;
+    border-radius:14px;
     border:1px solid var(--border);
     background:#151130;
-    display:none;
+    display:grid;
+    gap:10px;
+    grid-template-columns:minmax(260px,1.3fr) minmax(280px,1fr);
+    align-items:start;
   }
-  .advanced-panel.active{display:block;}
+  @media(max-width:980px){
+    .advanced-panel{grid-template-columns:1fr;}
+  }
   .advanced-row{
     display:flex;
     flex-wrap:wrap;
     gap:8px;
     align-items:center;
+  }
+  .advanced-row.stack{display:grid;gap:8px;align-items:start;}
+  .advanced-row.stack .imdb-box{margin:0;}
+  .adv-inline-btn{margin-top:8px;margin-left:10px;padding:6px 10px;font-size:12px;}
+  .hide-list-btn{display:block;margin-top:8px;padding:5px 10px;font-size:12px;}
+  tr.list-row.main + tr.advanced-drawer td{
+    border-left-color:rgba(243,195,65,.35);
+    border-right-color:rgba(243,195,65,.35);
+    border-bottom-color:rgba(243,195,65,.35);
+    background:rgba(243,195,65,.08);
   }
   tr.list-row td{
     background:rgba(17,14,40,.7);
@@ -3965,6 +4245,7 @@ app.get("/admin", async (req,res)=>{
       <p class="muted">Drag rows to reorder lists or use the arrows. Click ▾ to open the drawer and tune sort options or custom order.</p>
       <div class="rowtools">
         <label class="pill"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
+        <button id="showHiddenBtn" type="button" class="btn2" style="display:none;">Show hidden lists</button>
         <span class="mini muted">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
         <span class="rowtools-spacer"></span>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
@@ -3987,16 +4268,21 @@ app.get("/admin", async (req,res)=>{
             <label class="csv-drop" id="offlineCsvDrop">
               <input id="offlineCsvInput" type="file" accept=".csv,text/csv" />
               <div class="csv-card">
-                <div><b>Drop your IMDb CSV</b> or click to upload</div>
-                <div class="mini muted">We read IMDb tt... IDs in order.</div>
+                <div><b>Drop your IMDb CSV</b> or click to choose file</div>
+                <div class="mini muted">Drag & drop is supported. We read IMDb tt... IDs in order.</div>
               </div>
               <div id="offlineCsvStatus" class="mini muted"></div>
             </label>
+            <div class="csv-actions">
+              <button id="offlineCsvImportBtn" type="button" disabled>Import CSV</button>
+              <button id="offlineCsvCancelBtn" type="button" class="btn2" disabled>Cancel CSV</button>
+            </div>
           </div>
           <div class="create-imdb">
             <div class="imdb-box">
               <label class="mini">Add by IMDb ID (tt...)</label>
               <input id="offlineAddIdInput" type="text" placeholder="tt1234567 or IMDb URL" />
+              <div id="offlineTitleSearchMount"></div>
               <label class="mini bulk-label">Add those IMDb tt in bulk</label>
               <textarea id="offlineAddBulkInput" placeholder="tt1234567 tt7654321 or IMDb URLs"></textarea>
               <button id="offlineAddBulkBtn" class="bulk-btn" type="button">Add bulk</button>
@@ -4150,11 +4436,14 @@ function wireOfflineCreatePanel(refresh) {
   const panel = document.getElementById('createOfflinePanel');
   const nameInput = document.getElementById('offlineListName');
   const addInput = document.getElementById('offlineAddIdInput');
+  const searchMount = document.getElementById('offlineTitleSearchMount');
   const addBulkInput = document.getElementById('offlineAddBulkInput');
   const addBulkBtn = document.getElementById('offlineAddBulkBtn');
   const csvInput = document.getElementById('offlineCsvInput');
   const csvDrop = document.getElementById('offlineCsvDrop');
   const csvStatus = document.getElementById('offlineCsvStatus');
+  const csvImportBtn = document.getElementById('offlineCsvImportBtn');
+  const csvCancelBtn = document.getElementById('offlineCsvCancelBtn');
   const saveBtn = document.getElementById('offlineSaveBtn');
   const cancelBtn = document.getElementById('offlineCancelBtn');
   const saveStatus = document.getElementById('offlineSaveStatus');
@@ -4162,6 +4451,23 @@ function wireOfflineCreatePanel(refresh) {
   if (!btn || !panel) return;
 
   let draftIds = [];
+  const draftSearch = (searchMount && typeof createTitleSearchWidget === 'function')
+    ? createTitleSearchWidget({
+        onAdd: async (imdbId) => {
+          if (!draftIds.includes(imdbId)) draftIds.push(imdbId);
+          updateCount();
+        }
+      })
+    : null;
+  if (draftSearch && searchMount) searchMount.appendChild(draftSearch.el);
+
+  let pendingCsvIds = [];
+  const setPendingCsv = (ids) => {
+    pendingCsvIds = Array.isArray(ids) ? ids.slice() : [];
+    const has = pendingCsvIds.length > 0;
+    if (csvImportBtn) csvImportBtn.disabled = !has;
+    if (csvCancelBtn) csvCancelBtn.disabled = !has;
+  };
 
   const updateCount = () => {
     if (countEl) countEl.textContent = String(draftIds.length);
@@ -4173,7 +4479,9 @@ function wireOfflineCreatePanel(refresh) {
     if (addBulkInput) addBulkInput.value = '';
     if (csvInput) csvInput.value = '';
     if (csvStatus) csvStatus.textContent = '';
+    setPendingCsv([]);
     if (saveStatus) saveStatus.textContent = '';
+    if (draftSearch) draftSearch.resetSession();
     panel.classList.remove('active');
     updateCount();
   };
@@ -4218,10 +4526,12 @@ function wireOfflineCreatePanel(refresh) {
     try {
       const text = await file.text();
       const ids = parseCsvImdbIds(text);
-      ids.forEach(id => { if (!draftIds.includes(id)) draftIds.push(id); });
-      if (csvStatus) csvStatus.textContent = 'Added ' + ids.length + ' IMDb IDs from CSV.';
-      updateCount();
+      setPendingCsv(ids);
+      if (csvStatus) csvStatus.textContent = ids.length
+        ? ('Loaded ' + ids.length + ' IMDb IDs. Click Import CSV to add them.')
+        : 'No IMDb IDs found in this CSV.';
     } catch (e) {
+      setPendingCsv([]);
       if (csvStatus) csvStatus.textContent = 'Failed to read CSV.';
     } finally {
       if (csvInput) csvInput.value = '';
@@ -4247,6 +4557,25 @@ function wireOfflineCreatePanel(refresh) {
       const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
       await handleCsvFile(file);
     });
+  }
+
+  if (csvImportBtn) {
+    csvImportBtn.onclick = (e) => {
+      e.preventDefault();
+      if (!pendingCsvIds.length) return;
+      pendingCsvIds.forEach(id => { if (!draftIds.includes(id)) draftIds.push(id); });
+      if (csvStatus) csvStatus.textContent = 'Imported ' + pendingCsvIds.length + ' IMDb IDs from CSV.';
+      setPendingCsv([]);
+      updateCount();
+    };
+  }
+  if (csvCancelBtn) {
+    csvCancelBtn.onclick = (e) => {
+      e.preventDefault();
+      setPendingCsv([]);
+      if (csvInput) csvInput.value = '';
+      if (csvStatus) csvStatus.textContent = 'CSV selection cleared.';
+    };
   }
 
   if (saveBtn) {
@@ -4317,6 +4646,143 @@ function parseCsvImdbIds(text){
     ids.push(tt);
   }
   return ids;
+}
+
+function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
+  const root = el('div', { class: 'title-search-box' });
+  const label = el('label', { class: 'mini', text: 'Search TMDB by title and add item' });
+  const row = el('div', { class: 'title-search-row' });
+  const input = el('input', { type: 'text', placeholder: 'Type title name (e.g. Inception)', spellcheck: 'false' });
+  const searchBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Search' });
+  const clearBtn = el('button', { class: 'btn2 title-search-clear', type: 'button', text: '✕', title: 'Clear search' });
+  const status = el('span', { class: 'mini muted title-search-status' });
+  const results = el('div', { class: 'title-search-results' });
+  row.appendChild(input);
+  row.appendChild(searchBtn);
+  row.appendChild(clearBtn);
+  root.appendChild(label);
+  root.appendChild(row);
+  root.appendChild(status);
+  root.appendChild(results);
+
+  const localAdded = new Set();
+  let lastItems = [];
+
+  function resetUi({ keepInput = false } = {}) {
+    if (!keepInput) input.value = '';
+    status.textContent = '';
+    results.innerHTML = '';
+    lastItems = [];
+  }
+
+  function canAddItem(item) {
+    if (!item || !item.imdbId) return false;
+    if (item.inList) return false;
+    if (localAdded.has(item.imdbId)) return false;
+    return !!item.canAdd;
+  }
+
+  function renderItems(items) {
+    results.innerHTML = '';
+    items.forEach((item) => {
+      const rowEl = el('div', { class: 'title-search-item' });
+      const poster = document.createElement('img');
+      poster.src = item.poster || 'https://images.metahub.space/poster/small/tt0111161/img';
+      poster.alt = item.title || 'Poster';
+      const meta = el('div', { class: 'meta' });
+      const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
+      const yearText = Number.isFinite(item.year) ? String(item.year) : 'Unknown year';
+      const name = el('div', { class: 'name', text: (item.title || 'Untitled') + ' (' + yearText + ')' });
+      const subtitle = el('div', { class: 'sub', text: typeLabel + (item.imdbId ? ' • ' + item.imdbId : ' • no IMDb id') });
+      meta.appendChild(name);
+      meta.appendChild(subtitle);
+
+      const addBtn = el('button', { class: 'btn2', type: 'button', text: item.inList || localAdded.has(item.imdbId) ? 'Added' : 'Add' });
+      addBtn.disabled = !canAddItem(item);
+      addBtn.onclick = async () => {
+        if (!item.imdbId || addBtn.disabled) return;
+        addBtn.disabled = true;
+        addBtn.textContent = 'Adding…';
+        status.textContent = 'Adding ' + item.imdbId + '…';
+        try {
+          if (typeof onAdd === 'function') await onAdd(item.imdbId, item);
+          else if (lsid) {
+            const r = await fetch('/api/list-add?admin=' + ADMIN, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ lsid, id: item.imdbId })
+            });
+            if (!r.ok) throw new Error(await r.text());
+          }
+          localAdded.add(item.imdbId);
+          item.canAdd = false;
+          addBtn.textContent = 'Added';
+          status.textContent = 'Added ' + item.imdbId + '.';
+        } catch (e) {
+          addBtn.disabled = false;
+          addBtn.textContent = 'Add';
+          status.textContent = e.message || 'Add failed.';
+        }
+      };
+
+      rowEl.appendChild(poster);
+      rowEl.appendChild(meta);
+      rowEl.appendChild(addBtn);
+      results.appendChild(rowEl);
+    });
+  }
+
+  async function runSearch() {
+    const q = (input.value || '').trim();
+    if (!q) { alert('Enter a title to search.'); return; }
+    searchBtn.disabled = true;
+    input.disabled = true;
+    clearBtn.disabled = true;
+    status.textContent = 'Searching…';
+    results.innerHTML = '';
+    try {
+      const qs = new URLSearchParams({ admin: ADMIN, q, limit: '20' });
+      if (lsid) qs.set('lsid', lsid);
+      const r = await fetch('/api/list-search-title?' + qs.toString());
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.message || 'Title search failed');
+      const items = Array.isArray(data.items) ? data.items : [];
+      lastItems = items;
+      renderItems(items);
+      status.textContent = items.length ? ('Found ' + items.length + ' result' + (items.length === 1 ? '' : 's') + '.') : 'No matches found.';
+    } catch (e) {
+      status.textContent = e.message || 'Title search failed.';
+    } finally {
+      searchBtn.disabled = false;
+      input.disabled = false;
+      clearBtn.disabled = false;
+    }
+  }
+
+  searchBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    runSearch();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      runSearch();
+    }
+  });
+  clearBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    resetUi();
+    input.focus();
+  });
+
+  return {
+    el: root,
+    clear: () => resetUi(),
+    resetSession: () => {
+      localAdded.clear();
+      resetUi();
+    }
+  };
 }
 
 // Row drag (table tbody)
@@ -4680,11 +5146,15 @@ async function render() {
 
   container.innerHTML = "";
 
-  const enabledSet = new Set(prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists));
+  const hiddenSet = new Set(Array.isArray(prefs.hiddenLists) ? prefs.hiddenLists.filter(id => lists[id]) : []);
+  const enabledSet = new Set((prefs.enabled && prefs.enabled.length ? prefs.enabled : Object.keys(lists)).filter(id => !hiddenSet.has(id)));
   const baseOrder = (prefs.order && prefs.order.length ? prefs.order.filter(id => lists[id]) : []);
   const missing   = Object.keys(lists).filter(id => !baseOrder.includes(id))
     .sort((a,b)=>( displayName(a).localeCompare(displayName(b)) ));
   const order = baseOrder.concat(missing);
+
+  let showHiddenOnly = localStorage.getItem('showHiddenOnly') === 'true';
+  const showHiddenBtn = document.getElementById('showHiddenBtn');
 
   const advancedToggle = document.getElementById('advancedToggle');
   const mergeBuilder = document.getElementById('mergeBuilder');
@@ -4695,15 +5165,44 @@ async function render() {
     advancedToggle.onchange = () => {
       localStorage.setItem('advancedMode', advancedToggle.checked ? 'true' : 'false');
       updateAdvancedPanels();
-      renderMergeBuilder();
+      render();
+    };
+  }
+  if (showHiddenBtn) {
+    showHiddenBtn.onclick = () => {
+      showHiddenOnly = !showHiddenOnly;
+      localStorage.setItem('showHiddenOnly', showHiddenOnly ? 'true' : 'false');
+      render();
     };
   }
 
   function updateAdvancedPanels() {
     const on = advancedToggle && advancedToggle.checked;
-    document.querySelectorAll('.advanced-panel').forEach(panel => {
-      panel.classList.toggle('active', !!on);
+    if (showHiddenBtn) {
+      if (!on && showHiddenOnly) {
+        showHiddenOnly = false;
+        localStorage.setItem('showHiddenOnly', 'false');
+      }
+      showHiddenBtn.style.display = on ? '' : 'none';
+      showHiddenBtn.textContent = showHiddenOnly ? 'Show normal lists' : 'Show hidden lists';
+    }
+    document.querySelectorAll('.hide-list-btn').forEach(btn => { btn.style.display = on ? '' : 'none'; });
+    document.querySelectorAll('.adv-inline-btn').forEach(btn => {
+      btn.style.display = on ? '' : 'none';
+      if (!on) btn.setAttribute('aria-expanded', 'false');
     });
+    if (!on) {
+      document.querySelectorAll('tr.advanced-drawer').forEach(row => { row.style.display = 'none'; });
+      document.querySelectorAll('tr.list-row').forEach(row => row.classList.remove('advanced-open'));
+      document.querySelectorAll('.adv-inline-btn').forEach(btn => {
+        btn.textContent = 'Show advanced options';
+        btn.setAttribute('aria-expanded', 'false');
+      });
+    }
+  }
+
+  function visibleOrder() {
+    return order.filter(lsid => showHiddenOnly ? hiddenSet.has(lsid) : !hiddenSet.has(lsid));
   }
 
   function renderMergeBuilder() {
@@ -4726,7 +5225,7 @@ async function render() {
     const body = el('div', { class: 'merge-dropdown-body' });
     body.appendChild(el('div', { class: 'mini muted', text: 'Select up to 4 lists to create a merged list. Duplicates are deduped by IMDb ID in first-appearance order.' }));
     const grid = el('div', { class: 'merge-grid' });
-    order.forEach(lsid => {
+    visibleOrder().forEach(lsid => {
       const lab = el('label', { class: 'pill' });
       const cb = el('input', { type: 'checkbox' });
       cb.checked = mergeSelection.has(lsid);
@@ -4824,6 +5323,22 @@ async function render() {
 
       td.appendChild(tools);
       td.appendChild(optsWrap);
+
+      const searchWrap = el('div', { class: 'drawer-search-center' });
+      const drawerSearch = createTitleSearchWidget({
+        lsid,
+        onAdd: async (imdbId) => {
+          const r = await fetch('/api/list-add?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, id: imdbId })
+          });
+          if (!r.ok) throw new Error(await r.text());
+          await refresh();
+        }
+      });
+      searchWrap.appendChild(drawerSearch.el);
+      td.appendChild(searchWrap);
 
       const ul = el('ul',{class:'thumbs'});
       td.appendChild(ul);
@@ -5007,7 +5522,10 @@ async function render() {
     const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
     const chevTd = el('td',{class:'chev-cell'},[chev]);
 
-    const cb = el('input', {type:'checkbox'}); cb.checked = enabledSet.has(lsid);
+    const isHidden = hiddenSet.has(lsid);
+    const cb = el('input', {type:'checkbox'}); cb.checked = !isHidden && enabledSet.has(lsid);
+    cb.disabled = isHidden;
+    cb.title = isHidden ? 'Hidden lists are always disabled' : '';
     cb.addEventListener('change', ()=>{ if (cb.checked) enabledSet.add(lsid); else enabledSet.delete(lsid); });
 
     const mainBtnSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" transform="rotate(45 12 12)"></rect><path d="M10.2 8.7a1 1 0 0 0-1.5.9v4.8a1 1 0 0 0 1.5.9l4.6-2.4a1 1 0 0 0 0-1.8l-4.6-2.4z" fill="currentColor"></path></svg>';
@@ -5039,6 +5557,30 @@ async function render() {
     if (customMeta?.kind === 'merged') {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
+    const advInlineBtn = el('button', { type: 'button', class: 'btn2 adv-inline-btn', text: 'Show advanced options', 'aria-expanded': 'false' });
+    nameCell.appendChild(advInlineBtn);
+
+    const hideBtn = el('button', { type: 'button', class: 'btn2 hide-list-btn', text: isHidden ? 'Unhide list' : 'Hide list' });
+    hideBtn.onclick = async () => {
+      hideBtn.disabled = true;
+      const wasHidden = hiddenSet.has(lsid);
+      if (wasHidden) {
+        hiddenSet.delete(lsid);
+      } else {
+        hiddenSet.add(lsid);
+        enabledSet.delete(lsid);
+      }
+      try {
+        await saveAll('Saved');
+        render();
+      } catch (e) {
+        if (wasHidden) hiddenSet.add(lsid);
+        else hiddenSet.delete(lsid);
+        alert('Failed to update hidden list state');
+      } finally {
+        hideBtn.disabled = false;
+      }
+    };
 
     const count = el('td',{text:String(listCount(lsid))});
 
@@ -5125,7 +5667,7 @@ async function render() {
       };
     }
 
-    const advancedPanel = el('div', { class: 'advanced-panel' });
+    const advancedPanel = el('div', { class: 'advanced-panel landscape' });
     const renameRow = el('div', { class: 'advanced-row' });
     const renameInput = el('input', { type: 'text', value: displayName(lsid), placeholder: 'Rename list' });
     const renameBtn = el('button', { type: 'button', text: 'Save name' });
@@ -5195,7 +5737,7 @@ async function render() {
         }
       };
       actionRow.appendChild(freezeBtn);
-      if (isFrozen && (!customMeta || customMeta.kind === 'merged')) actionRow.appendChild(syncBtn);
+      if (isFrozen && (!customMeta || customMeta.kind === 'merged' || customMeta.kind === 'duplicate')) actionRow.appendChild(syncBtn);
     }
     dupBtn.onclick = async () => {
       dupBtn.disabled = true;
@@ -5217,36 +5759,89 @@ async function render() {
     };
     actionRow.appendChild(dupBtn);
     if (isOfflineList) {
-      const csvWrap = el('label', { class: 'pill', title: 'Add CSV from IMDb' });
+      const csvBox = el('div', { class: 'csv-inline-box' });
+      const csvTitle = el('span', { class: 'mini', text: 'Add CSV from IMDb (drag/drop or choose file)' });
       const csvInput = el('input', { type: 'file', accept: '.csv,text/csv' });
-      const csvText = el('span', { text: 'Add CSV from IMDb' });
-      csvInput.onchange = async () => {
-        const file = csvInput.files && csvInput.files[0];
+      const csvActions = el('div', { class: 'csv-actions' });
+      const csvImportBtn = el('button', { type: 'button', text: 'Import CSV', disabled: 'disabled' });
+      const csvCancelBtn = el('button', { type: 'button', text: 'Cancel CSV', class: 'btn2', disabled: 'disabled' });
+      let pendingCsvText = '';
+      let pendingCsvCount = 0;
+
+      const setPending = (text, count) => {
+        pendingCsvText = text || '';
+        pendingCsvCount = Number.isFinite(count) ? count : 0;
+        const has = !!pendingCsvText;
+        csvImportBtn.disabled = !has;
+        csvCancelBtn.disabled = !has;
+      };
+      const readCsv = async (file) => {
         if (!file) return;
-        status.textContent = 'Uploading CSV…';
+        status.textContent = 'Reading CSV…';
         try {
           const text = await file.text();
-          const r = await fetch('/api/list-import-csv?admin=' + ADMIN, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lsid, csvText: text })
-          });
-          if (!r.ok) throw new Error(await r.text());
-          status.textContent = 'CSV imported.';
-          await refresh();
+          const count = parseCsvImdbIds(text).length;
+          setPending(text, count);
+          status.textContent = count
+            ? ('CSV ready: ' + count + ' IMDb IDs. Click Import CSV.')
+            : 'No IMDb IDs found in CSV.';
         } catch (e) {
-          status.textContent = e.message || 'CSV import failed.';
+          setPending('', 0);
+          status.textContent = 'CSV read failed.';
         } finally {
           csvInput.value = '';
         }
       };
-      csvWrap.appendChild(csvInput);
-      csvWrap.appendChild(csvText);
-      actionRow.appendChild(csvWrap);
+
+      csvInput.onchange = async () => {
+        const file = csvInput.files && csvInput.files[0];
+        await readCsv(file);
+      };
+      csvBox.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        csvBox.classList.add('dragover');
+      });
+      csvBox.addEventListener('dragleave', () => csvBox.classList.remove('dragover'));
+      csvBox.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        csvBox.classList.remove('dragover');
+        const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        await readCsv(file);
+      });
+
+      csvImportBtn.onclick = async () => {
+        if (!pendingCsvText) return;
+        status.textContent = 'Importing CSV…';
+        try {
+          const r = await fetch('/api/list-import-csv?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, csvText: pendingCsvText })
+          });
+          if (!r.ok) throw new Error(await r.text());
+          status.textContent = 'CSV imported (' + pendingCsvCount + ' IDs).';
+          setPending('', 0);
+          await refresh();
+        } catch (e) {
+          status.textContent = e.message || 'CSV import failed.';
+        }
+      };
+      csvCancelBtn.onclick = () => {
+        setPending('', 0);
+        csvInput.value = '';
+        status.textContent = 'CSV selection cleared.';
+      };
+
+      csvActions.appendChild(csvImportBtn);
+      csvActions.appendChild(csvCancelBtn);
+      csvBox.appendChild(csvTitle);
+      csvBox.appendChild(csvInput);
+      csvBox.appendChild(csvActions);
+      actionRow.appendChild(csvBox);
     }
     actionRow.appendChild(status);
 
-    const bulkRow = el('div', { class: 'advanced-row' });
+    const bulkRow = el('div', { class: 'advanced-row stack' });
     const bulkBox = el('div', { class: 'imdb-box' });
     const bulkLabel = el('label', { class: 'mini bulk-label', text: 'Add those IMDb tt in bulk' });
     const bulkInput = el('textarea', { placeholder: 'tt1234567 tt7654321 or IMDb URLs', spellcheck: 'false' });
@@ -5319,15 +5914,28 @@ async function render() {
 
     advancedPanel.appendChild(renameRow);
     advancedPanel.appendChild(actionRow);
-    advancedPanel.appendChild(bulkRow);
     if (!isOfflineList) advancedPanel.appendChild(mainRow);
+    advancedPanel.appendChild(bulkRow);
+    // Safety: never show TMDB title search inside advanced inline panel.
+    advancedPanel.querySelectorAll('.title-search-box').forEach(node => node.remove());
     if (isCustom) {
       const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Manual list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
-      advancedPanel.appendChild(customNote);
+      const noteWrap = el('div', { class: 'advanced-row' });
+      noteWrap.appendChild(customNote);
+      advancedPanel.appendChild(noteWrap);
     }
 
+    const advancedDrawer = el('tr', { class: 'advanced-drawer', 'data-advanced-for': lsid });
+    const advancedTd = el('td', { colspan: '9' });
+    advancedTd.appendChild(advancedPanel);
+    advancedDrawer.appendChild(advancedTd);
+    advancedDrawer.style.display = 'none';
+
     tr.appendChild(chevTd);
-    tr.appendChild(el('td',{},[cb]));
+    const enabledCell = el('td');
+    enabledCell.appendChild(cb);
+    enabledCell.appendChild(hideBtn);
+    tr.appendChild(enabledCell);
     tr.appendChild(el('td',{},[mainBtn]));
     tr.appendChild(moveTd);
     tr.appendChild(nameCell);
@@ -5335,29 +5943,52 @@ async function render() {
     tr.appendChild(el('td',{},[sortWrap]));
     tr.appendChild(el('td',{},[cloudBtn]));
     tr.appendChild(el('td',{},[rmBtn]));
-    nameCell.appendChild(advancedPanel);
 
     let drawer = null; let open = false;
+    let advOpen = false;
+    function orderDetailRows() {
+      if (!tr.parentNode) return;
+      let anchor = tr.nextSibling;
+      if (advOpen) {
+        tr.parentNode.insertBefore(advancedDrawer, anchor);
+        advancedDrawer.style.display = '';
+        anchor = advancedDrawer.nextSibling;
+      } else {
+        advancedDrawer.style.display = 'none';
+      }
+      if (drawer) {
+        if (open) {
+          tr.parentNode.insertBefore(drawer, anchor);
+          drawer.style.display = '';
+        } else {
+          drawer.style.display = 'none';
+        }
+      }
+    }
+    advInlineBtn.onclick = () => {
+      if (!(advancedToggle && advancedToggle.checked)) return;
+      advOpen = !advOpen;
+      advInlineBtn.textContent = advOpen ? 'Hide advanced options' : 'Show advanced options';
+      advInlineBtn.setAttribute('aria-expanded', advOpen ? 'true' : 'false');
+      tr.classList.toggle('advanced-open', advOpen);
+      orderDetailRows();
+    };
+
     chev.onclick = ()=>{
       open = !open;
       if (open) {
         chev.textContent = "▴";
-        if (!drawer) {
-          drawer = makeDrawer(lsid);
-          tr.parentNode.insertBefore(drawer, tr.nextSibling);
-        } else {
-          drawer.style.display = "";
-        }
+        if (!drawer) drawer = makeDrawer(lsid);
       } else {
         chev.textContent = "▾";
-        if (drawer) drawer.style.display = "none";
       }
+      orderDetailRows();
     };
 
     return tr;
   }
 
-  order.forEach(lsid => tbody.appendChild(makeRow(lsid)));
+  visibleOrder().forEach(lsid => tbody.appendChild(makeRow(lsid)));
   table.appendChild(tbody);
   attachRowDnD(tbody);
 
@@ -5368,9 +5999,10 @@ async function render() {
   const msg = el('span',{class:'inline-note'});
   async function saveAll(text){
     const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
-    const enabled = Array.from(enabledSet);
+    const enabled = Array.from(enabledSet).filter(id => !hiddenSet.has(id));
     const body = {
       enabled,
+      hiddenLists: Array.from(hiddenSet),
       order: newOrder,
       defaultList: prefs.defaultList || (enabled[0] || ""),
       mainLists: prefs.mainLists || [],
@@ -5415,6 +6047,7 @@ render();
         PREFS.mainLists = PREFS.mainList && isListId(PREFS.mainList) ? [PREFS.mainList] : [];
       }
       if (PREFS.mainList) delete PREFS.mainList;
+      PREFS.hiddenLists = Array.isArray(PREFS.hiddenLists) ? PREFS.hiddenLists.filter(isListId) : [];
       FALLBK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
       CARD.clear();   if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
       EP2SER.clear(); if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
