@@ -3699,6 +3699,9 @@ app.get("/admin", async (req,res)=>{
     margin-top:8px;
     display:grid;
     gap:6px;
+    max-height:340px;
+    overflow-y:auto;
+    padding-right:4px;
   }
   .title-search-item{
     display:flex;
@@ -3831,21 +3834,29 @@ app.get("/admin", async (req,res)=>{
   .merge-dropdown > summary::after{content:'▾';opacity:.8;transition:transform .2s ease;}
   .merge-dropdown[open] > summary::after{transform:rotate(180deg);}
   .merge-dropdown-body{padding:0 12px 12px;display:grid;gap:10px;}
+  .advanced-drawer td{background:#120f25;padding:10px 12px;}
   .advanced-panel{
-    margin-top:8px;
-    padding:10px;
-    border-radius:12px;
+    padding:12px;
+    border-radius:14px;
     border:1px solid var(--border);
     background:#151130;
-    display:none;
+    display:grid;
+    gap:10px;
+    grid-template-columns:minmax(260px,1.3fr) minmax(280px,1fr);
+    align-items:start;
   }
-  .advanced-panel.active{display:block;}
+  @media(max-width:980px){
+    .advanced-panel{grid-template-columns:1fr;}
+  }
   .advanced-row{
     display:flex;
     flex-wrap:wrap;
     gap:8px;
     align-items:center;
   }
+  .advanced-row.stack{display:grid;gap:8px;align-items:start;}
+  .advanced-row.stack .imdb-box{margin:0;}
+  .adv-inline-btn{margin-top:8px;padding:6px 10px;font-size:12px;}
   tr.list-row td{
     background:rgba(17,14,40,.7);
     border-top:1px solid rgba(38,33,69,.85);
@@ -4557,7 +4568,7 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
     status.textContent = 'Searching…';
     results.innerHTML = '';
     try {
-      const qs = new URLSearchParams({ admin: ADMIN, q, limit: '5' });
+      const qs = new URLSearchParams({ admin: ADMIN, q, limit: '20' });
       if (lsid) qs.set('lsid', lsid);
       const r = await fetch('/api/list-search-title?' + qs.toString());
       const data = await r.json().catch(() => ({}));
@@ -4983,9 +4994,13 @@ async function render() {
 
   function updateAdvancedPanels() {
     const on = advancedToggle && advancedToggle.checked;
-    document.querySelectorAll('.advanced-panel').forEach(panel => {
-      panel.classList.toggle('active', !!on);
+    document.querySelectorAll('.adv-inline-btn').forEach(btn => {
+      btn.style.display = on ? '' : 'none';
+      if (!on) btn.setAttribute('aria-expanded', 'false');
     });
+    if (!on) {
+      document.querySelectorAll('tr.advanced-drawer').forEach(row => { row.style.display = 'none'; });
+    }
   }
 
   function renderMergeBuilder() {
@@ -5337,6 +5352,8 @@ async function render() {
     if (customMeta?.kind === 'merged') {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
+    const advInlineBtn = el('button', { type: 'button', class: 'btn2 adv-inline-btn', text: 'Show advanced options', 'aria-expanded': 'false' });
+    nameCell.appendChild(advInlineBtn);
 
     const count = el('td',{text:String(listCount(lsid))});
 
@@ -5423,7 +5440,7 @@ async function render() {
       };
     }
 
-    const advancedPanel = el('div', { class: 'advanced-panel' });
+    const advancedPanel = el('div', { class: 'advanced-panel landscape' });
     const renameRow = el('div', { class: 'advanced-row' });
     const renameInput = el('input', { type: 'text', value: displayName(lsid), placeholder: 'Rename list' });
     const renameBtn = el('button', { type: 'button', text: 'Save name' });
@@ -5544,7 +5561,7 @@ async function render() {
     }
     actionRow.appendChild(status);
 
-    const bulkRow = el('div', { class: 'advanced-row' });
+    const bulkRow = el('div', { class: 'advanced-row stack' });
     const bulkBox = el('div', { class: 'imdb-box' });
     const bulkLabel = el('label', { class: 'mini bulk-label', text: 'Add those IMDb tt in bulk' });
     const bulkInput = el('textarea', { placeholder: 'tt1234567 tt7654321 or IMDb URLs', spellcheck: 'false' });
@@ -5711,14 +5728,22 @@ async function render() {
 
     advancedPanel.appendChild(renameRow);
     advancedPanel.appendChild(actionRow);
+    if (!isOfflineList) advancedPanel.appendChild(mainRow);
     advancedPanel.appendChild(bulkRow);
     // Safety: never show TMDB title search inside advanced inline panel.
     advancedPanel.querySelectorAll('.title-search-box').forEach(node => node.remove());
-    if (!isOfflineList) advancedPanel.appendChild(mainRow);
     if (isCustom) {
       const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Manual list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
-      advancedPanel.appendChild(customNote);
+      const noteWrap = el('div', { class: 'advanced-row' });
+      noteWrap.appendChild(customNote);
+      advancedPanel.appendChild(noteWrap);
     }
+
+    const advancedDrawer = el('tr', { class: 'advanced-drawer', 'data-advanced-for': lsid });
+    const advancedTd = el('td', { colspan: '9' });
+    advancedTd.appendChild(advancedPanel);
+    advancedDrawer.appendChild(advancedTd);
+    advancedDrawer.style.display = 'none';
 
     tr.appendChild(chevTd);
     tr.appendChild(el('td',{},[cb]));
@@ -5729,9 +5754,28 @@ async function render() {
     tr.appendChild(el('td',{},[sortWrap]));
     tr.appendChild(el('td',{},[cloudBtn]));
     tr.appendChild(el('td',{},[rmBtn]));
-    nameCell.appendChild(advancedPanel);
 
     let drawer = null; let open = false;
+    let advOpen = false;
+    function placeUnderRow(row) {
+      if (!tr.parentNode || !row) return;
+      const customDrawer = drawer && drawer.style.display !== 'none' ? drawer : null;
+      if (customDrawer && customDrawer.parentNode === tr.parentNode) tr.parentNode.insertBefore(row, customDrawer.nextSibling);
+      else tr.parentNode.insertBefore(row, tr.nextSibling);
+    }
+    advInlineBtn.onclick = () => {
+      if (!(advancedToggle && advancedToggle.checked)) return;
+      advOpen = !advOpen;
+      advInlineBtn.textContent = advOpen ? 'Hide advanced options' : 'Show advanced options';
+      advInlineBtn.setAttribute('aria-expanded', advOpen ? 'true' : 'false');
+      if (advOpen) {
+        placeUnderRow(advancedDrawer);
+        advancedDrawer.style.display = '';
+      } else {
+        advancedDrawer.style.display = 'none';
+      }
+    };
+
     chev.onclick = ()=>{
       open = !open;
       if (open) {
@@ -5742,9 +5786,11 @@ async function render() {
         } else {
           drawer.style.display = "";
         }
+        if (advOpen) placeUnderRow(advancedDrawer);
       } else {
         chev.textContent = "▾";
         if (drawer) drawer.style.display = "none";
+        if (advOpen) placeUnderRow(advancedDrawer);
       }
     };
 
