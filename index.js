@@ -326,11 +326,14 @@ function base64UrlDecode(str) {
   const padded = norm + "=".repeat((4 - (norm.length % 4)) % 4);
   return Buffer.from(padded, "base64").toString("utf8");
 }
+function listFileName(lsid) {
+  return `${String(lsid || "").trim()}.json`;
+}
 function frozenBackupPath(lsid) {
-  return `${FROZEN_DIR}/${base64Url(lsid)}.json`;
+  return `${FROZEN_DIR}/${listFileName(lsid)}`;
 }
 function linkBackupPath(lsid) {
-  return `${BACKUP_DIR}/${base64Url(lsid)}.json`;
+  return `${BACKUP_DIR}/${listFileName(lsid)}`;
 }
 
 const minutes = ms => Math.round(ms/60000);
@@ -390,9 +393,15 @@ function offlineSupabasePath(lsid) {
   return `manual/${offlineSafeName(lsid)}.json`;
 }
 function frozenSupabasePath(lsid) {
-  return `frozen/${base64Url(lsid)}.json`;
+  return `frozen/${listFileName(lsid)}`;
 }
 function linkBackupSupabasePath(lsid) {
+  return `backup/${listFileName(lsid)}`;
+}
+function frozenSupabaseLegacyPath(lsid) {
+  return `frozen/${base64Url(lsid)}.json`;
+}
+function linkBackupSupabaseLegacyPath(lsid) {
   return `backup/${base64Url(lsid)}.json`;
 }
 
@@ -709,8 +718,12 @@ async function saveFrozenBackup(lsid, frozen) {
     await fs.writeFile(path, JSON.stringify(payload, null, 2), "utf8");
   } catch {/* ignore */}
   try {
-    const { putJSON } = await getSupabaseApi();
+    const { putJSON, deleteJSON } = await getSupabaseApi();
     await putJSON(frozenSupabasePath(lsid), payload);
+    const legacy = frozenSupabaseLegacyPath(lsid);
+    if (legacy !== frozenSupabasePath(lsid)) {
+      try { await deleteJSON(legacy); } catch {/* ignore */}
+    }
   } catch (e) {
     console.warn("[SUPABASE] frozen backup save failed:", e?.message || e);
   }
@@ -719,6 +732,7 @@ async function deleteFrozenBackup(lsid) {
   const path = frozenBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
   await removeSupabaseFile(frozenSupabasePath(lsid), "frozen backup");
+  await removeSupabaseFile(frozenSupabaseLegacyPath(lsid), "frozen backup legacy");
 }
 async function persistFrozenBackups() {
   const frozen = PREFS.frozenLists || {};
@@ -748,8 +762,12 @@ async function saveLinkBackupConfig(lsid, config) {
     await fs.writeFile(path, JSON.stringify(payload, null, 2), "utf8");
   } catch {/* ignore */}
   try {
-    const { putJSON } = await getSupabaseApi();
+    const { putJSON, deleteJSON } = await getSupabaseApi();
     await putJSON(linkBackupSupabasePath(lsid), payload);
+    const legacy = linkBackupSupabaseLegacyPath(lsid);
+    if (legacy !== linkBackupSupabasePath(lsid)) {
+      try { await deleteJSON(legacy); } catch {/* ignore */}
+    }
     await addSupabaseIndexEntry(BACKUP_INDEX_PATH, lsid);
   } catch (e) {
     console.warn("[SUPABASE] link backup save failed:", e?.message || e);
@@ -759,6 +777,7 @@ async function deleteLinkBackupConfig(lsid) {
   const path = linkBackupPath(lsid);
   try { await fs.unlink(path); } catch {/* ignore */}
   await removeSupabaseFile(linkBackupSupabasePath(lsid), "link backup");
+  await removeSupabaseFile(linkBackupSupabaseLegacyPath(lsid), "link backup legacy");
   await removeSupabaseIndexEntry(BACKUP_INDEX_PATH, lsid);
 }
 async function persistLinkBackupConfigs() {
@@ -791,7 +810,11 @@ async function loadLinkBackupConfigs() {
       if (!id || backups.has(id)) continue;
       try {
         const { getJSON } = await getSupabaseApi();
-        const parsed = await getJSON(linkBackupSupabasePath(id));
+        let parsed = null;
+        try { parsed = await getJSON(linkBackupSupabasePath(id)); } catch {/* ignore */}
+        if (!parsed) {
+          try { parsed = await getJSON(linkBackupSupabaseLegacyPath(id)); } catch {/* ignore */}
+        }
         if (parsed?.id) backups.set(String(parsed.id), parsed);
       } catch {/* ignore */}
     }
@@ -860,7 +883,11 @@ async function loadFrozenBackups() {
       if (!id || backups.has(id)) continue;
       try {
         const { getJSON } = await getSupabaseApi();
-        const parsed = await getJSON(frozenSupabasePath(id));
+        let parsed = null;
+        try { parsed = await getJSON(frozenSupabasePath(id)); } catch {/* ignore */}
+        if (!parsed) {
+          try { parsed = await getJSON(frozenSupabaseLegacyPath(id)); } catch {/* ignore */}
+        }
         if (parsed?.id) backups.set(String(parsed.id), parsed);
       } catch {/* ignore */}
     }
@@ -3889,7 +3916,7 @@ app.get("/admin", async (req,res)=>{
   }
   .advanced-row.stack{display:grid;gap:8px;align-items:start;}
   .advanced-row.stack .imdb-box{margin:0;}
-  .adv-inline-btn{margin-top:8px;padding:6px 10px;font-size:12px;}
+  .adv-inline-btn{margin-top:8px;margin-left:10px;padding:6px 10px;font-size:12px;}
   tr.list-row.main + tr.advanced-drawer td{
     border-left-color:rgba(243,195,65,.35);
     border-right-color:rgba(243,195,65,.35);
@@ -5890,42 +5917,43 @@ async function render() {
 
     let drawer = null; let open = false;
     let advOpen = false;
-    function placeUnderRow(row) {
-      if (!tr.parentNode || !row) return;
-      const customDrawer = drawer && drawer.style.display !== 'none' ? drawer : null;
-      if (customDrawer && customDrawer.parentNode === tr.parentNode) tr.parentNode.insertBefore(row, customDrawer.nextSibling);
-      else tr.parentNode.insertBefore(row, tr.nextSibling);
+    function orderDetailRows() {
+      if (!tr.parentNode) return;
+      let anchor = tr.nextSibling;
+      if (advOpen) {
+        tr.parentNode.insertBefore(advancedDrawer, anchor);
+        advancedDrawer.style.display = '';
+        anchor = advancedDrawer.nextSibling;
+      } else {
+        advancedDrawer.style.display = 'none';
+      }
+      if (drawer) {
+        if (open) {
+          tr.parentNode.insertBefore(drawer, anchor);
+          drawer.style.display = '';
+        } else {
+          drawer.style.display = 'none';
+        }
+      }
     }
     advInlineBtn.onclick = () => {
       if (!(advancedToggle && advancedToggle.checked)) return;
       advOpen = !advOpen;
       advInlineBtn.textContent = advOpen ? 'Hide advanced options' : 'Show advanced options';
       advInlineBtn.setAttribute('aria-expanded', advOpen ? 'true' : 'false');
-      if (advOpen) {
-        placeUnderRow(advancedDrawer);
-        advancedDrawer.style.display = '';
-      } else {
-        advancedDrawer.style.display = 'none';
-      }
       tr.classList.toggle('advanced-open', advOpen);
+      orderDetailRows();
     };
 
     chev.onclick = ()=>{
       open = !open;
       if (open) {
         chev.textContent = "▴";
-        if (!drawer) {
-          drawer = makeDrawer(lsid);
-          tr.parentNode.insertBefore(drawer, tr.nextSibling);
-        } else {
-          drawer.style.display = "";
-        }
-        if (advOpen) placeUnderRow(advancedDrawer);
+        if (!drawer) drawer = makeDrawer(lsid);
       } else {
         chev.textContent = "▾";
-        if (drawer) drawer.style.display = "none";
-        if (advOpen) placeUnderRow(advancedDrawer);
       }
+      orderDetailRows();
     };
 
     return tr;
