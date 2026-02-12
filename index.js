@@ -2073,8 +2073,11 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         continue;
       }
 
-      if (customMeta && customMeta.kind === "merged") {
-        const merged = mergeListItems(customMeta.sources || [], next);
+      if (customMeta && (customMeta.kind === "merged" || customMeta.kind === "duplicate")) {
+        const linkedSources = customMeta.kind === "duplicate"
+          ? (Array.isArray(customMeta.sources) ? customMeta.sources.slice(0, 1) : [])
+          : (customMeta.sources || []);
+        const merged = mergeListItems(linkedSources, next);
         list.ids = merged;
         list.orders = list.orders || {};
         list.orders.imdb = merged.slice();
@@ -2255,8 +2258,11 @@ async function syncSingleList(lsid, { manual = false } = {}) {
   let raw = [];
   let orders = list.orders || {};
 
-  if (customMeta && customMeta.kind === "merged") {
-    raw = mergeListItems(customMeta.sources || []);
+  if (customMeta && (customMeta.kind === "merged" || customMeta.kind === "duplicate")) {
+    const linkedSources = customMeta.kind === "duplicate"
+      ? (Array.isArray(customMeta.sources) ? customMeta.sources.slice(0, 1) : [])
+      : (customMeta.sources || []);
+    raw = mergeListItems(linkedSources);
     orders = { ...orders, imdb: raw.slice() };
   } else if (customMeta) {
     throw new Error("Custom lists have no source to sync");
@@ -3585,7 +3591,7 @@ app.get("/admin", async (req,res)=>{
     color:#dcd8ff;
     cursor:pointer;
     transition:background .2s ease, border-color .2s ease;
-    min-height:150px;
+    min-height:190px;
     display:flex;
     flex-direction:column;
     align-items:center;
@@ -3611,6 +3617,22 @@ app.get("/admin", async (req,res)=>{
     height:100%;
     cursor:pointer;
   }
+
+  .csv-actions{
+    display:flex;
+    gap:8px;
+    margin-top:8px;
+    align-items:center;
+  }
+  .csv-inline-box{
+    border:1px dashed var(--border);
+    border-radius:12px;
+    padding:10px;
+    background:rgba(12,10,26,.35);
+    min-width:320px;
+  }
+  .csv-inline-box .mini{display:block;margin-bottom:6px;}
+  .csv-inline-box input[type="file"]{width:100%;}
   .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
   .pill{
     display:inline-flex;
@@ -4148,11 +4170,15 @@ app.get("/admin", async (req,res)=>{
             <label class="csv-drop" id="offlineCsvDrop">
               <input id="offlineCsvInput" type="file" accept=".csv,text/csv" />
               <div class="csv-card">
-                <div><b>Drop your IMDb CSV</b> or click to upload</div>
-                <div class="mini muted">We read IMDb tt... IDs in order.</div>
+                <div><b>Drop your IMDb CSV</b> or click to choose file</div>
+                <div class="mini muted">Drag & drop is supported. We read IMDb tt... IDs in order.</div>
               </div>
               <div id="offlineCsvStatus" class="mini muted"></div>
             </label>
+            <div class="csv-actions">
+              <button id="offlineCsvImportBtn" type="button" disabled>Import CSV</button>
+              <button id="offlineCsvCancelBtn" type="button" class="btn2" disabled>Cancel CSV</button>
+            </div>
           </div>
           <div class="create-imdb">
             <div class="imdb-box">
@@ -4318,6 +4344,8 @@ function wireOfflineCreatePanel(refresh) {
   const csvInput = document.getElementById('offlineCsvInput');
   const csvDrop = document.getElementById('offlineCsvDrop');
   const csvStatus = document.getElementById('offlineCsvStatus');
+  const csvImportBtn = document.getElementById('offlineCsvImportBtn');
+  const csvCancelBtn = document.getElementById('offlineCsvCancelBtn');
   const saveBtn = document.getElementById('offlineSaveBtn');
   const cancelBtn = document.getElementById('offlineCancelBtn');
   const saveStatus = document.getElementById('offlineSaveStatus');
@@ -4335,6 +4363,14 @@ function wireOfflineCreatePanel(refresh) {
     : null;
   if (draftSearch && searchMount) searchMount.appendChild(draftSearch.el);
 
+  let pendingCsvIds = [];
+  const setPendingCsv = (ids) => {
+    pendingCsvIds = Array.isArray(ids) ? ids.slice() : [];
+    const has = pendingCsvIds.length > 0;
+    if (csvImportBtn) csvImportBtn.disabled = !has;
+    if (csvCancelBtn) csvCancelBtn.disabled = !has;
+  };
+
   const updateCount = () => {
     if (countEl) countEl.textContent = String(draftIds.length);
   };
@@ -4345,6 +4381,7 @@ function wireOfflineCreatePanel(refresh) {
     if (addBulkInput) addBulkInput.value = '';
     if (csvInput) csvInput.value = '';
     if (csvStatus) csvStatus.textContent = '';
+    setPendingCsv([]);
     if (saveStatus) saveStatus.textContent = '';
     if (draftSearch) draftSearch.resetSession();
     panel.classList.remove('active');
@@ -4391,10 +4428,12 @@ function wireOfflineCreatePanel(refresh) {
     try {
       const text = await file.text();
       const ids = parseCsvImdbIds(text);
-      ids.forEach(id => { if (!draftIds.includes(id)) draftIds.push(id); });
-      if (csvStatus) csvStatus.textContent = 'Added ' + ids.length + ' IMDb IDs from CSV.';
-      updateCount();
+      setPendingCsv(ids);
+      if (csvStatus) csvStatus.textContent = ids.length
+        ? ('Loaded ' + ids.length + ' IMDb IDs. Click Import CSV to add them.')
+        : 'No IMDb IDs found in this CSV.';
     } catch (e) {
+      setPendingCsv([]);
       if (csvStatus) csvStatus.textContent = 'Failed to read CSV.';
     } finally {
       if (csvInput) csvInput.value = '';
@@ -4420,6 +4459,25 @@ function wireOfflineCreatePanel(refresh) {
       const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
       await handleCsvFile(file);
     });
+  }
+
+  if (csvImportBtn) {
+    csvImportBtn.onclick = (e) => {
+      e.preventDefault();
+      if (!pendingCsvIds.length) return;
+      pendingCsvIds.forEach(id => { if (!draftIds.includes(id)) draftIds.push(id); });
+      if (csvStatus) csvStatus.textContent = 'Imported ' + pendingCsvIds.length + ' IMDb IDs from CSV.';
+      setPendingCsv([]);
+      updateCount();
+    };
+  }
+  if (csvCancelBtn) {
+    csvCancelBtn.onclick = (e) => {
+      e.preventDefault();
+      setPendingCsv([]);
+      if (csvInput) csvInput.value = '';
+      if (csvStatus) csvStatus.textContent = 'CSV selection cleared.';
+    };
   }
 
   if (saveBtn) {
@@ -5532,7 +5590,7 @@ async function render() {
         }
       };
       actionRow.appendChild(freezeBtn);
-      if (isFrozen && (!customMeta || customMeta.kind === 'merged')) actionRow.appendChild(syncBtn);
+      if (isFrozen && (!customMeta || customMeta.kind === 'merged' || customMeta.kind === 'duplicate')) actionRow.appendChild(syncBtn);
     }
     dupBtn.onclick = async () => {
       dupBtn.disabled = true;
@@ -5554,32 +5612,85 @@ async function render() {
     };
     actionRow.appendChild(dupBtn);
     if (isOfflineList) {
-      const csvWrap = el('label', { class: 'pill', title: 'Add CSV from IMDb' });
+      const csvBox = el('div', { class: 'csv-inline-box' });
+      const csvTitle = el('span', { class: 'mini', text: 'Add CSV from IMDb (drag/drop or choose file)' });
       const csvInput = el('input', { type: 'file', accept: '.csv,text/csv' });
-      const csvText = el('span', { text: 'Add CSV from IMDb' });
-      csvInput.onchange = async () => {
-        const file = csvInput.files && csvInput.files[0];
+      const csvActions = el('div', { class: 'csv-actions' });
+      const csvImportBtn = el('button', { type: 'button', text: 'Import CSV', disabled: 'disabled' });
+      const csvCancelBtn = el('button', { type: 'button', text: 'Cancel CSV', class: 'btn2', disabled: 'disabled' });
+      let pendingCsvText = '';
+      let pendingCsvCount = 0;
+
+      const setPending = (text, count) => {
+        pendingCsvText = text || '';
+        pendingCsvCount = Number.isFinite(count) ? count : 0;
+        const has = !!pendingCsvText;
+        csvImportBtn.disabled = !has;
+        csvCancelBtn.disabled = !has;
+      };
+      const readCsv = async (file) => {
         if (!file) return;
-        status.textContent = 'Uploading CSV…';
+        status.textContent = 'Reading CSV…';
         try {
           const text = await file.text();
-          const r = await fetch('/api/list-import-csv?admin=' + ADMIN, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lsid, csvText: text })
-          });
-          if (!r.ok) throw new Error(await r.text());
-          status.textContent = 'CSV imported.';
-          await refresh();
+          const count = parseCsvImdbIds(text).length;
+          setPending(text, count);
+          status.textContent = count
+            ? ('CSV ready: ' + count + ' IMDb IDs. Click Import CSV.')
+            : 'No IMDb IDs found in CSV.';
         } catch (e) {
-          status.textContent = e.message || 'CSV import failed.';
+          setPending('', 0);
+          status.textContent = 'CSV read failed.';
         } finally {
           csvInput.value = '';
         }
       };
-      csvWrap.appendChild(csvInput);
-      csvWrap.appendChild(csvText);
-      actionRow.appendChild(csvWrap);
+
+      csvInput.onchange = async () => {
+        const file = csvInput.files && csvInput.files[0];
+        await readCsv(file);
+      };
+      csvBox.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        csvBox.classList.add('dragover');
+      });
+      csvBox.addEventListener('dragleave', () => csvBox.classList.remove('dragover'));
+      csvBox.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        csvBox.classList.remove('dragover');
+        const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        await readCsv(file);
+      });
+
+      csvImportBtn.onclick = async () => {
+        if (!pendingCsvText) return;
+        status.textContent = 'Importing CSV…';
+        try {
+          const r = await fetch('/api/list-import-csv?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, csvText: pendingCsvText })
+          });
+          if (!r.ok) throw new Error(await r.text());
+          status.textContent = 'CSV imported (' + pendingCsvCount + ' IDs).';
+          setPending('', 0);
+          await refresh();
+        } catch (e) {
+          status.textContent = e.message || 'CSV import failed.';
+        }
+      };
+      csvCancelBtn.onclick = () => {
+        setPending('', 0);
+        csvInput.value = '';
+        status.textContent = 'CSV selection cleared.';
+      };
+
+      csvActions.appendChild(csvImportBtn);
+      csvActions.appendChild(csvCancelBtn);
+      csvBox.appendChild(csvTitle);
+      csvBox.appendChild(csvInput);
+      csvBox.appendChild(csvActions);
+      actionRow.appendChild(csvBox);
     }
     actionRow.appendChild(status);
 
