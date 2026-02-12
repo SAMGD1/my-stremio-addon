@@ -6091,8 +6091,17 @@ async function render() {
   renderMergeBuilder();
 
   const msg = el('span',{class:'inline-note'});
+  function mergeVisibleOrderIntoFull(nextVisibleOrder) {
+    const visibleCheck = (id) => showHiddenOnly ? hiddenSet.has(id) : !hiddenSet.has(id);
+    const queue = nextVisibleOrder.slice();
+    const merged = order.map(id => (visibleCheck(id) ? (queue.shift() || id) : id));
+    while (queue.length) merged.push(queue.shift());
+    return Array.from(new Set(merged)).filter(id => lists[id]);
+  }
+
   async function saveAll(text){
-    const newOrder = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+    const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+    const newOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
     const enabled = Array.from(enabledSet).filter(id => !hiddenSet.has(id));
     const body = {
       enabled,
