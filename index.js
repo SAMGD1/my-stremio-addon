@@ -5712,6 +5712,8 @@ async function render() {
     advancedPanel.appendChild(renameRow);
     advancedPanel.appendChild(actionRow);
     advancedPanel.appendChild(bulkRow);
+    // Safety: never show TMDB title search inside advanced inline panel.
+    advancedPanel.querySelectorAll('.title-search-box').forEach(node => node.remove());
     if (!isOfflineList) advancedPanel.appendChild(mainRow);
     if (isCustom) {
       const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Manual list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
