@@ -5609,6 +5609,100 @@ async function render() {
       }
     });
 
+    const searchBox = el('div', { class: 'title-search-box' });
+    const searchLabel = el('label', { class: 'mini bulk-label', text: 'Search TMDB by title, then add to list' });
+    const searchRow = el('div', { class: 'title-search-row' });
+    const searchInput = el('input', { type: 'text', placeholder: 'Type title name (e.g. Inception)', spellcheck: 'false' });
+    const searchBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Search' });
+    const searchStatus = el('span', { class: 'mini muted bulk-status' });
+    const searchResults = el('div', { class: 'title-search-results' });
+    searchRow.appendChild(searchInput);
+    searchRow.appendChild(searchBtn);
+    searchBox.appendChild(searchLabel);
+    searchBox.appendChild(searchRow);
+    searchBox.appendChild(searchStatus);
+    searchBox.appendChild(searchResults);
+    bulkBox.appendChild(searchBox);
+
+    const renderSearchResults = (items) => {
+      searchResults.innerHTML = '';
+      if (!items.length) return;
+      items.forEach((item) => {
+        const row = el('div', { class: 'title-search-item' });
+        const poster = document.createElement('img');
+        poster.src = item.poster || 'https://images.metahub.space/poster/small/' + 'tt0111161' + '/img';
+        poster.alt = item.title || 'Poster';
+        const meta = el('div', { class: 'meta' });
+        const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
+        const yearText = Number.isFinite(item.year) ? String(item.year) : 'Unknown year';
+        const name = el('div', { class: 'name', text: (item.title || 'Untitled') + ' (' + yearText + ')' });
+        const subtitle = el('div', { class: 'sub', text: typeLabel + (item.imdbId ? ' • ' + item.imdbId : ' • no IMDb id') });
+        meta.appendChild(name);
+        meta.appendChild(subtitle);
+
+        const addBtn = el('button', { class: 'btn2', type: 'button', text: item.inList ? 'Added' : 'Add' });
+        addBtn.disabled = !item.canAdd;
+        addBtn.onclick = async () => {
+          if (!item.imdbId) return;
+          addBtn.disabled = true;
+          addBtn.textContent = 'Adding…';
+          searchStatus.textContent = 'Adding ' + item.imdbId + '…';
+          try {
+            const r = await fetch('/api/list-add?admin=' + ADMIN, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ lsid, id: item.imdbId })
+            });
+            if (!r.ok) throw new Error(await r.text());
+            addBtn.textContent = 'Added';
+            searchStatus.textContent = 'Added ' + item.imdbId + '.';
+            await refresh();
+          } catch (e) {
+            addBtn.disabled = false;
+            addBtn.textContent = 'Add';
+            searchStatus.textContent = e.message || 'Add failed.';
+          }
+        };
+
+        row.appendChild(poster);
+        row.appendChild(meta);
+        row.appendChild(addBtn);
+        searchResults.appendChild(row);
+      });
+    };
+
+    const doSearchTitles = async () => {
+      const q = (searchInput.value || '').trim();
+      if (!q) { alert('Enter a title to search.'); return; }
+      searchBtn.disabled = true;
+      searchInput.disabled = true;
+      searchStatus.textContent = 'Searching…';
+      searchResults.innerHTML = '';
+      try {
+        const r = await fetch('/api/list-search-title?admin=' + ADMIN + '&lsid=' + encodeURIComponent(lsid) + '&q=' + encodeURIComponent(q) + '&limit=5');
+        const data = await r.json().catch(() => ({ items: [] }));
+        if (!r.ok) throw new Error((data && data.message) || 'Title search failed');
+        const items = Array.isArray(data.items) ? data.items : [];
+        renderSearchResults(items);
+        searchStatus.textContent = items.length ? ('Found ' + items.length + ' result' + (items.length === 1 ? '' : 's') + '.') : 'No matches found.';
+      } catch (e) {
+        searchStatus.textContent = e.message || 'Title search failed.';
+      } finally {
+        searchBtn.disabled = false;
+        searchInput.disabled = false;
+      }
+    };
+    searchBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      doSearchTitles();
+    });
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doSearchTitles();
+      }
+    });
+
     const mainRow = el('div', { class: 'advanced-row' });
     const mainBtnAdvanced = el('button', { type: 'button', class: 'icon-btn home', title: 'Toggle Stremlist save link' });
     mainBtnAdvanced.innerHTML = mainBtnSvg;
