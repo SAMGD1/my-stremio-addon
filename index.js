@@ -1674,6 +1674,46 @@ async function fetchTmdbMeta(imdbId) {
     return null;
   }
 }
+async function searchTmdbTitles(query, { limit = 5 } = {}) {
+  if (!tmdbEnabled()) return [];
+  const term = String(query || "").trim();
+  if (!term) return [];
+  const apiKey = getTmdbKey();
+  const search = await fetchTmdbJson(`/search/multi?query=${encodeURIComponent(term)}&include_adult=false&page=1`, apiKey);
+  const pool = Array.isArray(search?.results)
+    ? search.results.filter(x => x && (x.media_type === "movie" || x.media_type === "tv"))
+    : [];
+  const out = [];
+  for (const item of pool) {
+    if (out.length >= limit) break;
+    const mediaType = item.media_type;
+    const tmdbId = Number(item.id);
+    if (!Number.isFinite(tmdbId)) continue;
+
+    let imdbId = "";
+    try {
+      const external = await fetchTmdbJson(`/${mediaType}/${tmdbId}/external_ids`, apiKey);
+      imdbId = extractImdbId(external?.imdb_id || "");
+    } catch {
+      imdbId = "";
+    }
+
+    const title = mediaType === "movie"
+      ? sanitizeName(item.title || item.original_title || "")
+      : sanitizeName(item.name || item.original_name || "");
+    const released = mediaType === "movie" ? item.release_date : item.first_air_date;
+    const year = released ? Number(String(released).slice(0, 4)) : null;
+    out.push({
+      tmdbId,
+      mediaType,
+      title,
+      year: Number.isFinite(year) ? year : null,
+      poster: tmdbImage(item.poster_path, "w342"),
+      imdbId
+    });
+  }
+  return out;
+}
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -3055,6 +3095,31 @@ app.post("/api/list-add-bulk", async (req, res) => {
   } catch (e) { console.error(e); res.status(500).send("Failed"); }
 });
 
+app.get("/api/list-search-title", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).json({ ok: false, message: "Forbidden" });
+  try {
+    const lsid = String(req.query.lsid || "").trim();
+    const q = String(req.query.q || "").trim();
+    const limitRaw = Number(req.query.limit);
+    const limit = Math.min(10, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 5));
+    if (lsid && !isListId(lsid)) return res.status(400).json({ ok: false, message: "Bad list" });
+    if (!q) return res.status(400).json({ ok: false, message: "Missing query" });
+    if (!tmdbEnabled()) return res.status(400).json({ ok: false, message: "TMDB key missing or invalid" });
+
+    const results = await searchTmdbTitles(q, { limit });
+    const existing = lsid ? new Set(listIdsWithEdits(lsid)) : new Set();
+    const items = results.map(item => ({
+      ...item,
+      canAdd: !!(item.imdbId && isImdb(item.imdbId) && !existing.has(item.imdbId)),
+      inList: !!(item.imdbId && existing.has(item.imdbId))
+    }));
+    res.json({ ok: true, items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, message: "Search failed" });
+  }
+});
+
 // remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -3600,6 +3665,77 @@ app.get("/admin", async (req,res)=>{
   .imdb-box .bulk-btn{
     margin-top:8px;
   }
+  .title-search-box{
+    margin-top:10px;
+    border:1px dashed var(--border);
+    border-radius:12px;
+    padding:10px;
+    background:rgba(12,10,26,.35);
+  }
+  .drawer-search-center{
+    max-width:680px;
+    margin:10px auto 6px;
+  }
+  .title-search-row{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex-wrap:wrap;
+  }
+  .title-search-row input{
+    flex:1;
+    min-width:180px;
+  }
+  .title-search-clear{
+    min-width:34px;
+    padding:8px 11px;
+    justify-content:center;
+  }
+  .title-search-status{
+    display:block;
+    margin-top:7px;
+  }
+  .title-search-results{
+    margin-top:8px;
+    display:grid;
+    gap:6px;
+    max-height:340px;
+    overflow-y:auto;
+    padding-right:4px;
+  }
+  .title-search-item{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:6px 8px;
+    background:rgba(16,13,36,.6);
+  }
+  .title-search-item img{
+    width:36px;
+    height:54px;
+    object-fit:cover;
+    border-radius:6px;
+    border:1px solid var(--border);
+    background:#0f0c21;
+  }
+  .title-search-item .meta{
+    flex:1;
+    min-width:0;
+    line-height:1.2;
+  }
+  .title-search-item .meta .name{
+    font-size:13px;
+    font-weight:600;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .title-search-item .meta .sub{
+    font-size:11px;
+    color:var(--muted);
+  }
   .sort-wrap{display:flex;align-items:center;gap:6px;}
   .sort-reverse-btn{
     padding:6px 9px;
@@ -3698,21 +3834,29 @@ app.get("/admin", async (req,res)=>{
   .merge-dropdown > summary::after{content:'▾';opacity:.8;transition:transform .2s ease;}
   .merge-dropdown[open] > summary::after{transform:rotate(180deg);}
   .merge-dropdown-body{padding:0 12px 12px;display:grid;gap:10px;}
+  .advanced-drawer td{background:#120f25;padding:10px 12px;}
   .advanced-panel{
-    margin-top:8px;
-    padding:10px;
-    border-radius:12px;
+    padding:12px;
+    border-radius:14px;
     border:1px solid var(--border);
     background:#151130;
-    display:none;
+    display:grid;
+    gap:10px;
+    grid-template-columns:minmax(260px,1.3fr) minmax(280px,1fr);
+    align-items:start;
   }
-  .advanced-panel.active{display:block;}
+  @media(max-width:980px){
+    .advanced-panel{grid-template-columns:1fr;}
+  }
   .advanced-row{
     display:flex;
     flex-wrap:wrap;
     gap:8px;
     align-items:center;
   }
+  .advanced-row.stack{display:grid;gap:8px;align-items:start;}
+  .advanced-row.stack .imdb-box{margin:0;}
+  .adv-inline-btn{margin-top:8px;padding:6px 10px;font-size:12px;}
   tr.list-row td{
     background:rgba(17,14,40,.7);
     border-top:1px solid rgba(38,33,69,.85);
@@ -3997,6 +4141,7 @@ app.get("/admin", async (req,res)=>{
             <div class="imdb-box">
               <label class="mini">Add by IMDb ID (tt...)</label>
               <input id="offlineAddIdInput" type="text" placeholder="tt1234567 or IMDb URL" />
+              <div id="offlineTitleSearchMount"></div>
               <label class="mini bulk-label">Add those IMDb tt in bulk</label>
               <textarea id="offlineAddBulkInput" placeholder="tt1234567 tt7654321 or IMDb URLs"></textarea>
               <button id="offlineAddBulkBtn" class="bulk-btn" type="button">Add bulk</button>
@@ -4150,6 +4295,7 @@ function wireOfflineCreatePanel(refresh) {
   const panel = document.getElementById('createOfflinePanel');
   const nameInput = document.getElementById('offlineListName');
   const addInput = document.getElementById('offlineAddIdInput');
+  const searchMount = document.getElementById('offlineTitleSearchMount');
   const addBulkInput = document.getElementById('offlineAddBulkInput');
   const addBulkBtn = document.getElementById('offlineAddBulkBtn');
   const csvInput = document.getElementById('offlineCsvInput');
@@ -4162,6 +4308,15 @@ function wireOfflineCreatePanel(refresh) {
   if (!btn || !panel) return;
 
   let draftIds = [];
+  const draftSearch = (searchMount && typeof createTitleSearchWidget === 'function')
+    ? createTitleSearchWidget({
+        onAdd: async (imdbId) => {
+          if (!draftIds.includes(imdbId)) draftIds.push(imdbId);
+          updateCount();
+        }
+      })
+    : null;
+  if (draftSearch && searchMount) searchMount.appendChild(draftSearch.el);
 
   const updateCount = () => {
     if (countEl) countEl.textContent = String(draftIds.length);
@@ -4174,6 +4329,7 @@ function wireOfflineCreatePanel(refresh) {
     if (csvInput) csvInput.value = '';
     if (csvStatus) csvStatus.textContent = '';
     if (saveStatus) saveStatus.textContent = '';
+    if (draftSearch) draftSearch.resetSession();
     panel.classList.remove('active');
     updateCount();
   };
@@ -4317,6 +4473,143 @@ function parseCsvImdbIds(text){
     ids.push(tt);
   }
   return ids;
+}
+
+function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
+  const root = el('div', { class: 'title-search-box' });
+  const label = el('label', { class: 'mini', text: 'Search TMDB by title and add item' });
+  const row = el('div', { class: 'title-search-row' });
+  const input = el('input', { type: 'text', placeholder: 'Type title name (e.g. Inception)', spellcheck: 'false' });
+  const searchBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Search' });
+  const clearBtn = el('button', { class: 'btn2 title-search-clear', type: 'button', text: '✕', title: 'Clear search' });
+  const status = el('span', { class: 'mini muted title-search-status' });
+  const results = el('div', { class: 'title-search-results' });
+  row.appendChild(input);
+  row.appendChild(searchBtn);
+  row.appendChild(clearBtn);
+  root.appendChild(label);
+  root.appendChild(row);
+  root.appendChild(status);
+  root.appendChild(results);
+
+  const localAdded = new Set();
+  let lastItems = [];
+
+  function resetUi({ keepInput = false } = {}) {
+    if (!keepInput) input.value = '';
+    status.textContent = '';
+    results.innerHTML = '';
+    lastItems = [];
+  }
+
+  function canAddItem(item) {
+    if (!item || !item.imdbId) return false;
+    if (item.inList) return false;
+    if (localAdded.has(item.imdbId)) return false;
+    return !!item.canAdd;
+  }
+
+  function renderItems(items) {
+    results.innerHTML = '';
+    items.forEach((item) => {
+      const rowEl = el('div', { class: 'title-search-item' });
+      const poster = document.createElement('img');
+      poster.src = item.poster || 'https://images.metahub.space/poster/small/tt0111161/img';
+      poster.alt = item.title || 'Poster';
+      const meta = el('div', { class: 'meta' });
+      const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
+      const yearText = Number.isFinite(item.year) ? String(item.year) : 'Unknown year';
+      const name = el('div', { class: 'name', text: (item.title || 'Untitled') + ' (' + yearText + ')' });
+      const subtitle = el('div', { class: 'sub', text: typeLabel + (item.imdbId ? ' • ' + item.imdbId : ' • no IMDb id') });
+      meta.appendChild(name);
+      meta.appendChild(subtitle);
+
+      const addBtn = el('button', { class: 'btn2', type: 'button', text: item.inList || localAdded.has(item.imdbId) ? 'Added' : 'Add' });
+      addBtn.disabled = !canAddItem(item);
+      addBtn.onclick = async () => {
+        if (!item.imdbId || addBtn.disabled) return;
+        addBtn.disabled = true;
+        addBtn.textContent = 'Adding…';
+        status.textContent = 'Adding ' + item.imdbId + '…';
+        try {
+          if (typeof onAdd === 'function') await onAdd(item.imdbId, item);
+          else if (lsid) {
+            const r = await fetch('/api/list-add?admin=' + ADMIN, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ lsid, id: item.imdbId })
+            });
+            if (!r.ok) throw new Error(await r.text());
+          }
+          localAdded.add(item.imdbId);
+          item.canAdd = false;
+          addBtn.textContent = 'Added';
+          status.textContent = 'Added ' + item.imdbId + '.';
+        } catch (e) {
+          addBtn.disabled = false;
+          addBtn.textContent = 'Add';
+          status.textContent = e.message || 'Add failed.';
+        }
+      };
+
+      rowEl.appendChild(poster);
+      rowEl.appendChild(meta);
+      rowEl.appendChild(addBtn);
+      results.appendChild(rowEl);
+    });
+  }
+
+  async function runSearch() {
+    const q = (input.value || '').trim();
+    if (!q) { alert('Enter a title to search.'); return; }
+    searchBtn.disabled = true;
+    input.disabled = true;
+    clearBtn.disabled = true;
+    status.textContent = 'Searching…';
+    results.innerHTML = '';
+    try {
+      const qs = new URLSearchParams({ admin: ADMIN, q, limit: '20' });
+      if (lsid) qs.set('lsid', lsid);
+      const r = await fetch('/api/list-search-title?' + qs.toString());
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.message || 'Title search failed');
+      const items = Array.isArray(data.items) ? data.items : [];
+      lastItems = items;
+      renderItems(items);
+      status.textContent = items.length ? ('Found ' + items.length + ' result' + (items.length === 1 ? '' : 's') + '.') : 'No matches found.';
+    } catch (e) {
+      status.textContent = e.message || 'Title search failed.';
+    } finally {
+      searchBtn.disabled = false;
+      input.disabled = false;
+      clearBtn.disabled = false;
+    }
+  }
+
+  searchBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    runSearch();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      runSearch();
+    }
+  });
+  clearBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    resetUi();
+    input.focus();
+  });
+
+  return {
+    el: root,
+    clear: () => resetUi(),
+    resetSession: () => {
+      localAdded.clear();
+      resetUi();
+    }
+  };
 }
 
 // Row drag (table tbody)
@@ -4701,9 +4994,13 @@ async function render() {
 
   function updateAdvancedPanels() {
     const on = advancedToggle && advancedToggle.checked;
-    document.querySelectorAll('.advanced-panel').forEach(panel => {
-      panel.classList.toggle('active', !!on);
+    document.querySelectorAll('.adv-inline-btn').forEach(btn => {
+      btn.style.display = on ? '' : 'none';
+      if (!on) btn.setAttribute('aria-expanded', 'false');
     });
+    if (!on) {
+      document.querySelectorAll('tr.advanced-drawer').forEach(row => { row.style.display = 'none'; });
+    }
   }
 
   function renderMergeBuilder() {
@@ -4824,6 +5121,22 @@ async function render() {
 
       td.appendChild(tools);
       td.appendChild(optsWrap);
+
+      const searchWrap = el('div', { class: 'drawer-search-center' });
+      const drawerSearch = createTitleSearchWidget({
+        lsid,
+        onAdd: async (imdbId) => {
+          const r = await fetch('/api/list-add?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, id: imdbId })
+          });
+          if (!r.ok) throw new Error(await r.text());
+          await refresh();
+        }
+      });
+      searchWrap.appendChild(drawerSearch.el);
+      td.appendChild(searchWrap);
 
       const ul = el('ul',{class:'thumbs'});
       td.appendChild(ul);
@@ -5039,6 +5352,8 @@ async function render() {
     if (customMeta?.kind === 'merged') {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
+    const advInlineBtn = el('button', { type: 'button', class: 'btn2 adv-inline-btn', text: 'Show advanced options', 'aria-expanded': 'false' });
+    nameCell.appendChild(advInlineBtn);
 
     const count = el('td',{text:String(listCount(lsid))});
 
@@ -5125,7 +5440,7 @@ async function render() {
       };
     }
 
-    const advancedPanel = el('div', { class: 'advanced-panel' });
+    const advancedPanel = el('div', { class: 'advanced-panel landscape' });
     const renameRow = el('div', { class: 'advanced-row' });
     const renameInput = el('input', { type: 'text', value: displayName(lsid), placeholder: 'Rename list' });
     const renameBtn = el('button', { type: 'button', text: 'Save name' });
@@ -5246,7 +5561,7 @@ async function render() {
     }
     actionRow.appendChild(status);
 
-    const bulkRow = el('div', { class: 'advanced-row' });
+    const bulkRow = el('div', { class: 'advanced-row stack' });
     const bulkBox = el('div', { class: 'imdb-box' });
     const bulkLabel = el('label', { class: 'mini bulk-label', text: 'Add those IMDb tt in bulk' });
     const bulkInput = el('textarea', { placeholder: 'tt1234567 tt7654321 or IMDb URLs', spellcheck: 'false' });
@@ -5319,12 +5634,22 @@ async function render() {
 
     advancedPanel.appendChild(renameRow);
     advancedPanel.appendChild(actionRow);
-    advancedPanel.appendChild(bulkRow);
     if (!isOfflineList) advancedPanel.appendChild(mainRow);
+    advancedPanel.appendChild(bulkRow);
+    // Safety: never show TMDB title search inside advanced inline panel.
+    advancedPanel.querySelectorAll('.title-search-box').forEach(node => node.remove());
     if (isCustom) {
       const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Manual list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
-      advancedPanel.appendChild(customNote);
+      const noteWrap = el('div', { class: 'advanced-row' });
+      noteWrap.appendChild(customNote);
+      advancedPanel.appendChild(noteWrap);
     }
+
+    const advancedDrawer = el('tr', { class: 'advanced-drawer', 'data-advanced-for': lsid });
+    const advancedTd = el('td', { colspan: '9' });
+    advancedTd.appendChild(advancedPanel);
+    advancedDrawer.appendChild(advancedTd);
+    advancedDrawer.style.display = 'none';
 
     tr.appendChild(chevTd);
     tr.appendChild(el('td',{},[cb]));
@@ -5335,9 +5660,28 @@ async function render() {
     tr.appendChild(el('td',{},[sortWrap]));
     tr.appendChild(el('td',{},[cloudBtn]));
     tr.appendChild(el('td',{},[rmBtn]));
-    nameCell.appendChild(advancedPanel);
 
     let drawer = null; let open = false;
+    let advOpen = false;
+    function placeUnderRow(row) {
+      if (!tr.parentNode || !row) return;
+      const customDrawer = drawer && drawer.style.display !== 'none' ? drawer : null;
+      if (customDrawer && customDrawer.parentNode === tr.parentNode) tr.parentNode.insertBefore(row, customDrawer.nextSibling);
+      else tr.parentNode.insertBefore(row, tr.nextSibling);
+    }
+    advInlineBtn.onclick = () => {
+      if (!(advancedToggle && advancedToggle.checked)) return;
+      advOpen = !advOpen;
+      advInlineBtn.textContent = advOpen ? 'Hide advanced options' : 'Show advanced options';
+      advInlineBtn.setAttribute('aria-expanded', advOpen ? 'true' : 'false');
+      if (advOpen) {
+        placeUnderRow(advancedDrawer);
+        advancedDrawer.style.display = '';
+      } else {
+        advancedDrawer.style.display = 'none';
+      }
+    };
+
     chev.onclick = ()=>{
       open = !open;
       if (open) {
@@ -5348,9 +5692,11 @@ async function render() {
         } else {
           drawer.style.display = "";
         }
+        if (advOpen) placeUnderRow(advancedDrawer);
       } else {
         chev.textContent = "▾";
         if (drawer) drawer.style.display = "none";
+        if (advOpen) placeUnderRow(advancedDrawer);
       }
     };
 
