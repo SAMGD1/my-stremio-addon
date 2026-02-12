@@ -28,6 +28,7 @@ const SNAP_LOCAL    = "data/snapshot.json";
 const FROZEN_DIR    = "data/frozen";
 const BACKUP_DIR    = "data/backup";
 const OFFLINE_DIR   = "data/manual";
+const CUSTOM_DIR    = "data/custom";
 
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
@@ -384,6 +385,7 @@ async function imdbGraphqlGet(operationName, variables, sha256Hash) {
 // ---- Supabase snapshot ----
 const SNAPSHOT_PATH = "snapshot.json";
 const MANUAL_INDEX_PATH = "manual/index.json";
+const CUSTOM_INDEX_PATH = "custom/index.json";
 const FROZEN_INDEX_PATH = "frozen/index.json";
 const BACKUP_INDEX_PATH = "backup/index.json";
 
@@ -392,6 +394,25 @@ function offlineSafeName(lsid) {
 }
 function offlineSupabasePath(lsid) {
   return `manual/${offlineSafeName(lsid)}.json`;
+}
+function customKindSafe(kind) {
+  return String(kind || "custom").toLowerCase().replace(/[^a-z0-9._-]+/g, "_");
+}
+function customListFileName(lsid) {
+  return String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_") + ".json";
+}
+function customListDir(kind) {
+  return `${CUSTOM_DIR}/${customKindSafe(kind)}`;
+}
+function customListFilePath(lsid, kind) {
+  return `${customListDir(kind)}/${customListFileName(lsid)}`;
+}
+function customSupabasePath(lsid, kind) {
+  return `custom/${customKindSafe(kind)}/${customListFileName(lsid)}`;
+}
+function isBackedCustomList(lsid) {
+  const kind = PREFS.customLists?.[lsid]?.kind;
+  return !!kind && kind !== "offline";
 }
 function frozenSupabasePath(lsid) {
   return `frozen/${listFileName(lsid)}`;
@@ -698,6 +719,124 @@ async function persistSnapshot() {
   await persistFrozenBackups();
   await reconcileFrozenBackups();
   await persistLinkBackupConfigs();
+}
+
+async function saveCustomListBackup(lsid) {
+  const meta = PREFS.customLists?.[lsid];
+  if (!meta || meta.kind === "offline") return;
+  const list = LISTS[lsid];
+  if (!list) return;
+  const kind = customKindSafe(meta.kind);
+  await fs.mkdir(customListDir(kind), { recursive: true });
+  const payload = {
+    id: lsid,
+    kind: meta.kind,
+    sources: Array.isArray(meta.sources) ? meta.sources.slice() : [],
+    createdAt: meta.createdAt || Date.now(),
+    name: list.name || lsid,
+    url: list.url || null,
+    ids: Array.isArray(list.ids) ? list.ids.slice() : [],
+    orders: list.orders || {},
+    displayName: PREFS.displayNames?.[lsid] || "",
+    savedAt: Date.now()
+  };
+  await fs.writeFile(customListFilePath(lsid, kind), JSON.stringify(payload, null, 2), "utf8");
+  try {
+    const { putJSON } = await getSupabaseApi();
+    await putJSON(customSupabasePath(lsid, kind), payload);
+  } catch (e) {
+    console.warn("[SUPABASE] custom list save failed:", e?.message || e);
+  }
+}
+
+async function deleteCustomListBackup(lsid, kind = null) {
+  const kinds = kind ? [kind] : ["merged", "duplicate", "custom"];
+  await Promise.all(kinds.map(async (k) => {
+    try { await fs.unlink(customListFilePath(lsid, k)); } catch {}
+    await removeSupabaseFile(customSupabasePath(lsid, k), "custom list");
+  }));
+}
+
+async function loadCustomLists() {
+  const backedKinds = new Set(["merged", "duplicate"]);
+  try {
+    await fs.mkdir(CUSTOM_DIR, { recursive: true });
+    const kindDirs = await fs.readdir(CUSTOM_DIR, { withFileTypes: true });
+    for (const dir of kindDirs) {
+      if (!dir.isDirectory()) continue;
+      const kind = customKindSafe(dir.name);
+      if (!backedKinds.has(kind)) continue;
+      const base = `${CUSTOM_DIR}/${dir.name}`;
+      const entries = await fs.readdir(base, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        try {
+          const txt = await fs.readFile(`${base}/${entry.name}`, 'utf8');
+          const payload = JSON.parse(txt);
+          const id = String(payload?.id || '').trim();
+          if (!isCustomListId(id)) continue;
+          if (LISTS[id]) continue;
+          LISTS[id] = {
+            id,
+            name: sanitizeName(payload.name || id),
+            url: payload.url || null,
+            ids: Array.isArray(payload.ids) ? payload.ids.slice() : [],
+            orders: payload.orders || {}
+          };
+          PREFS.customLists = PREFS.customLists || {};
+          PREFS.customLists[id] = {
+            kind: backedKinds.has(payload.kind) ? payload.kind : kind,
+            sources: Array.isArray(payload.sources) ? payload.sources.slice() : [],
+            createdAt: payload.createdAt || Date.now()
+          };
+          if (payload.displayName) {
+            PREFS.displayNames = PREFS.displayNames || {};
+            PREFS.displayNames[id] = sanitizeName(payload.displayName);
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  try {
+    const ids = await loadSupabaseIndex(CUSTOM_INDEX_PATH);
+    for (const raw of ids) {
+      const id = String(raw || '').trim();
+      if (!isCustomListId(id) || LISTS[id]) continue;
+      const meta = PREFS.customLists?.[id];
+      const kind = customKindSafe(meta?.kind || 'custom');
+      if (!backedKinds.has(kind)) continue;
+      try {
+        const payload = await getJSON(customSupabasePath(id, kind));
+        if (!payload || !Array.isArray(payload.ids)) continue;
+        LISTS[id] = {
+          id,
+          name: sanitizeName(payload.name || id),
+          url: payload.url || null,
+          ids: payload.ids.slice(),
+          orders: payload.orders || {}
+        };
+        PREFS.customLists = PREFS.customLists || {};
+        PREFS.customLists[id] = {
+          kind: backedKinds.has(payload.kind) ? payload.kind : kind,
+          sources: Array.isArray(payload.sources) ? payload.sources.slice() : [],
+          createdAt: payload.createdAt || Date.now()
+        };
+      } catch (e) {
+        console.warn('[SUPABASE] custom list load failed:', id, e?.message || e);
+      }
+    }
+  } catch {}
+}
+
+async function saveCustomIndex() {
+  const ids = Object.keys(PREFS.customLists || {}).filter(id => isBackedCustomList(id));
+  try {
+    const { putJSON } = await getSupabaseApi();
+    await putJSON(CUSTOM_INDEX_PATH, ids);
+  } catch (e) {
+    console.warn('[SUPABASE] custom index save failed:', e?.message || e);
+  }
 }
 
 async function saveFrozenBackup(lsid, frozen) {
@@ -2760,6 +2899,9 @@ app.post("/api/prefs", async (req,res) => {
     if (PREFS.customLists) {
       const offlineIds = Object.keys(PREFS.customLists).filter(isOfflineList);
       await Promise.all(offlineIds.map(id => saveOfflineList(id)));
+      const customIds = Object.keys(PREFS.customLists).filter(id => isBackedCustomList(id));
+      await Promise.all(customIds.map(id => saveCustomListBackup(id)));
+      await saveCustomIndex();
     }
 
     const key = manifestKey();
@@ -2884,6 +3026,7 @@ app.post("/api/list-duplicate", async (req, res) => {
     PREFS.enabled = Array.isArray(PREFS.enabled) ? Array.from(new Set([ ...PREFS.enabled, newId ])) : [newId];
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
     if (isOffline) await saveOfflineList(newId);
+    else { await saveCustomListBackup(newId); await saveCustomIndex(); }
     await persistSnapshot();
     res.json({ ok: true, id: newId });
   } catch (e) { res.status(500).send("Duplicate failed"); }
@@ -2968,6 +3111,8 @@ app.post("/api/list-merge", async (req, res) => {
     if (name) PREFS.displayNames[mergedId] = name;
     PREFS.order = Array.isArray(PREFS.order) ? PREFS.order.concat(mergedId) : [mergedId];
     PREFS.enabled = Array.isArray(PREFS.enabled) ? Array.from(new Set([ ...PREFS.enabled, mergedId ])) : [mergedId];
+    await saveCustomListBackup(mergedId);
+    await saveCustomIndex();
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
     await persistSnapshot();
     res.json({ ok: true, id: mergedId });
@@ -3006,6 +3151,8 @@ app.post("/api/delete-custom-list", async (req, res) => {
     PREFS.order = (PREFS.order || []).filter(id => id !== lsid);
     await deleteFrozenBackup(lsid);
     await deleteOfflineListFile(lsid);
+    await deleteCustomListBackup(lsid);
+    await saveCustomIndex();
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
     await persistSnapshot();
     res.json({ ok: true });
@@ -3134,6 +3281,7 @@ app.post("/api/list-add", async (req, res) => {
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
 
+    if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     await persistSnapshot();
 
     res.status(200).send("Added");
@@ -3179,6 +3327,7 @@ app.post("/api/list-add-bulk", async (req, res) => {
       syncFrozenEdits(lsid);
     }
 
+    if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -3248,6 +3397,7 @@ app.post("/api/list-remove", async (req, res) => {
       syncFrozenEdits(lsid);
     }
 
+    if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     await persistSnapshot();
 
     res.status(200).send("Removed");
@@ -5637,9 +5787,9 @@ async function render() {
       cloudBtn.title = isActive ? 'Un-backup this list' : 'Back up this list';
     };
     updateCloudBtn(backupActive);
-    if (isOfflineList) {
+    if (isCustom) {
       cloudBtn.disabled = true;
-      cloudBtn.title = 'Offline lists have no backup link';
+      cloudBtn.title = isOfflineList ? 'Offline lists use manual backups' : 'Custom lists use custom backups';
     } else {
       cloudBtn.onclick = async () => {
         cloudBtn.disabled = true;
@@ -6165,6 +6315,7 @@ render();
       console.log("[BOOT] snapshot loaded");
     }
     await loadOfflineLists();
+    await loadCustomLists();
     const frozenBackups = await loadFrozenBackups();
     let restored = false;
     if (frozenBackups.size) {
