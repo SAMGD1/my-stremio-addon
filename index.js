@@ -4318,7 +4318,7 @@ function wireOfflineCreatePanel(refresh) {
     if (csvInput) csvInput.value = '';
     if (csvStatus) csvStatus.textContent = '';
     if (saveStatus) saveStatus.textContent = '';
-    if (draftSearch) draftSearch.clear();
+    if (draftSearch) draftSearch.resetSession();
     panel.classList.remove('active');
     updateCount();
   };
@@ -4594,7 +4594,10 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
   return {
     el: root,
     clear: () => resetUi(),
-    refreshResults: () => renderItems(lastItems)
+    resetSession: () => {
+      localAdded.clear();
+      resetUi();
+    }
   };
 }
 
