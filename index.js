@@ -5,6 +5,23 @@
 const express = require("express");
 const fs = require("fs/promises");
 
+(function loadDotEnvLocal() {
+  try {
+    const raw = require("fs").readFileSync(".env", "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const eq = t.indexOf("=");
+      if (eq <= 0) continue;
+      const key = t.slice(0, eq).trim();
+      if (!key || Object.prototype.hasOwnProperty.call(process.env, key)) continue;
+      let val = t.slice(eq + 1).trim();
+      if ((val.startsWith("\"") && val.endsWith("\"")) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+      process.env[key] = val;
+    }
+  } catch {}
+})();
+
 // ----------------- ENV -----------------
 const PORT  = Number(process.env.PORT || 7000);
 const HOST  = "0.0.0.0";
@@ -33,6 +50,11 @@ const CUSTOM_DIR    = "data/custom";
 // NEW: Trakt support (public API key / client id)
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID || "";
 const TMDB_API_KEY = process.env.TMDB_API_KEY || "";
+const SUPABASE_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+if (!SUPABASE_ENABLED) {
+  console.log("[STORAGE] Supabase disabled (local-only mode)");
+}
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MyListsAddon/12.4.0";
 const REQ_HEADERS = {
@@ -342,7 +364,14 @@ const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
 let supabaseApiPromise = null;
+const supabaseNoopApi = {
+  putJSON: async () => {},
+  getJSON: async () => null,
+  deleteJSON: async () => {},
+  listJSON: async () => []
+};
 const getSupabaseApi = async () => {
+  if (!SUPABASE_ENABLED) return supabaseNoopApi;
   if (!supabaseApiPromise) supabaseApiPromise = import("./storage/supabase.mjs");
   return supabaseApiPromise;
 };
@@ -436,7 +465,7 @@ function scheduleSave(snapshot) {
     getSupabaseApi()
       .then(({ putJSON }) => putJSON(SNAPSHOT_PATH, data))
       .catch((err) => {
-        console.warn("[SNAPSHOT] supabase save failed:", err?.message || err);
+        if (SUPABASE_ENABLED) console.warn("[SNAPSHOT] supabase save failed:", err?.message || err);
       });
   }, 10000);
 }
@@ -456,7 +485,7 @@ async function saveSupabaseIndex(path, ids) {
     const { putJSON } = await getSupabaseApi();
     await putJSON(path, ids);
   } catch (e) {
-    console.warn("[SUPABASE] index save failed:", e?.message || e);
+    if (SUPABASE_ENABLED) console.warn("[SUPABASE] index save failed:", e?.message || e);
   }
 }
 
@@ -481,7 +510,7 @@ async function removeSupabaseFile(path, label) {
     const { deleteJSON } = await getSupabaseApi();
     await deleteJSON(path);
   } catch (e) {
-    console.warn(`[SUPABASE] ${label} delete failed:`, e?.message || e);
+    if (SUPABASE_ENABLED) console.warn(`[SUPABASE] ${label} delete failed:`, e?.message || e);
   }
 }
 
@@ -532,7 +561,7 @@ async function saveOfflineList(lsid) {
       await putJSON(offlineSupabasePath(lsid), payload);
       await addSupabaseIndexEntry(MANUAL_INDEX_PATH, lsid);
     } catch (e) {
-      console.warn("[SUPABASE] manual list save failed:", e?.message || e);
+      if (SUPABASE_ENABLED) console.warn("[SUPABASE] manual list save failed:", e?.message || e);
     }
   } catch (e) {
     console.warn("[OFFLINE] save failed:", e.message || e);
@@ -618,7 +647,7 @@ async function loadOfflineLists() {
             if (!PREFS.mainLists.includes(id)) PREFS.mainLists.push(id);
           }
         } catch (e) {
-          console.warn("[SUPABASE] manual list load failed:", id, e?.message || e);
+          if (SUPABASE_ENABLED) console.warn("[SUPABASE] manual list load failed:", id, e?.message || e);
         }
       }
     } else {
@@ -654,7 +683,7 @@ async function loadOfflineLists() {
           }
         }
       } catch (e) {
-        console.warn("[SUPABASE] manual list listing failed:", e?.message || e);
+        if (SUPABASE_ENABLED) console.warn("[SUPABASE] manual list listing failed:", e?.message || e);
       }
     }
   } catch (e) {
@@ -696,11 +725,11 @@ async function reconcileFrozenBackups() {
       }
       if (!id || desired.has(id)) continue;
       try { await deleteJSON(path); } catch (e) {
-        console.warn("[SUPABASE] frozen cleanup delete failed:", e?.message || e);
+        if (SUPABASE_ENABLED) console.warn("[SUPABASE] frozen cleanup delete failed:", e?.message || e);
       }
     }
   } catch (e) {
-    console.warn("[SUPABASE] frozen cleanup list failed:", e?.message || e);
+    if (SUPABASE_ENABLED) console.warn("[SUPABASE] frozen cleanup list failed:", e?.message || e);
   }
 
   await saveSupabaseIndex(FROZEN_INDEX_PATH, Array.from(desired));
@@ -745,7 +774,7 @@ async function saveCustomListBackup(lsid) {
     const { putJSON } = await getSupabaseApi();
     await putJSON(customSupabasePath(lsid, kind), payload);
   } catch (e) {
-    console.warn("[SUPABASE] custom list save failed:", e?.message || e);
+    if (SUPABASE_ENABLED) console.warn("[SUPABASE] custom list save failed:", e?.message || e);
   }
 }
 
@@ -823,7 +852,7 @@ async function loadCustomLists() {
           createdAt: payload.createdAt || Date.now()
         };
       } catch (e) {
-        console.warn('[SUPABASE] custom list load failed:', id, e?.message || e);
+        if (SUPABASE_ENABLED) console.warn('[SUPABASE] custom list load failed:', id, e?.message || e);
       }
     }
   } catch {}
@@ -835,7 +864,7 @@ async function saveCustomIndex() {
     const { putJSON } = await getSupabaseApi();
     await putJSON(CUSTOM_INDEX_PATH, ids);
   } catch (e) {
-    console.warn('[SUPABASE] custom index save failed:', e?.message || e);
+    if (SUPABASE_ENABLED) console.warn('[SUPABASE] custom index save failed:', e?.message || e);
   }
 }
 

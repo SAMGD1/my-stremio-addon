@@ -12,7 +12,7 @@ This addon turns your IMDb and Trakt sources into fully customizable Stremio cat
 ## Highlights
 - **Use IMDb lists as unlimited, image-rich catalogs** in Stremio.
 - **Customize layout and sorting** per list, including custom order.
-- **Advanced tools**: bulk add to lists, freeze/unfreeze, duplicate, merge, and backups.
+- **Advanced tools**: bulk add, hide/unhide lists, freeze/unfreeze, duplicate, merge, and backups.
 - **Optional TMDB enrichment** for posters and metadata.
 - **Self-hosted**: run locally or deploy with Supabase + Render.
 
@@ -35,6 +35,7 @@ This addon turns your IMDb and Trakt sources into fully customizable Stremio cat
 - **IMDb watchlists**
 - **Trakt lists and watchlists**
 - **Trakt user list discovery**
+- **Custom lists** (manual/offline, merged, duplicate)
 
 ### Admin controls
 - Enable/disable catalogs
@@ -45,6 +46,10 @@ This addon turns your IMDb and Trakt sources into fully customizable Stremio cat
 - Duplicate, merge, rename, or block lists
 - Freeze/unfreeze list snapshots
 - Backup link configuration
+- Hide lists + hidden-only view toggle (Advanced mode)
+- Per-list "Show advanced options" drawer toggle
+- Create/manual list workflow with staged CSV import (Import/Cancel) and drag-drop hinting
+- TMDB title search-and-add widget (when TMDB key is configured)
 
 ### Optional metadata
 - **TMDB enrichment** for posters, ratings, and extra fields
@@ -59,6 +64,8 @@ This addon turns your IMDb and Trakt sources into fully customizable Stremio cat
 ## Quick start (local)
 ```bash
 npm install
+cp .env.example .env
+# edit .env
 npm start
 ```
 
@@ -81,6 +88,9 @@ http://localhost:7000/manifest.json?key=YOUR_SHARED_SECRET
 ```
 
 ---
+
+### Local-only mode (no Supabase)
+If you leave `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` empty in `.env`, the app runs in local-only storage mode (`data/` files) without Supabase warning spam.
 
 ## Hosting online
 You can run this locally **or** deploy it to a cloud host.
@@ -163,16 +173,26 @@ In **Customize Layout**:
 - Choose default list and sort
 - Open **Advanced** for per-list tools
 
+### 7) Create manual/custom lists
+In **Customize Layout** → **Create list** you can:
+- add items by IMDb `tt...` or URLs
+- drag/drop or select IMDb CSV files
+- stage CSV before commit with **Import CSV** / **Cancel CSV**
+- use TMDB title search widget (if enabled) to find titles and add directly
+
 ---
 
 ## Advanced mode (per list)
-Turn on **Advanced** in Customize Layout, then open a list row to see:
+Turn on **Advanced** in Customize Layout, then use **Show advanced options** on any row to open its drawer.
+
+You can:
 - Rename list
 - Duplicate list
 - Freeze/unfreeze list
 - Manual sync (when frozen)
-- Backup settings
-- **Bulk add IMDb IDs** to the list
+- Hide/unhide list
+- Bulk add IMDb IDs
+- TMDB title search + add (if TMDB is enabled)
 
 Bulk add responds quickly and loads metadata in the background for a smoother experience.
 
@@ -202,11 +222,15 @@ You can enable these based on your needs:
 The addon stores JSON in your Supabase bucket using these paths:
 - `snapshot.json`
 - `manual/*.json`
+- `custom/merged/*.json`
+- `custom/duplicate/*.json`
 - `frozen/*.json`
 - `backup/*.json`
-- plus index files such as `manual/index.json`, `frozen/index.json`, `backup/index.json`
+- plus index files such as `manual/index.json`, `custom/index.json`, `frozen/index.json`, `backup/index.json`
 
 The app also keeps local files under `data/`, but Supabase is the primary shared persistence layer.
+
+Custom merged/duplicate lists use their own custom backup storage (`custom/...`) and therefore do not use link-backup cloud toggle.
 
 ---
 
