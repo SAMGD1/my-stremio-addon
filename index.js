@@ -1870,38 +1870,73 @@ async function fetchTmdbMeta(imdbId) {
     return null;
   }
 }
-async function searchTmdbTitles(query, { limit = 5 } = {}) {
+function normalizeTitleSearchQuery(raw, forcedType = "all") {
+  const text = String(raw || "").trim();
+  const yearMatch = text.match(/(19\d{2}|20\d{2})/);
+  const year = yearMatch ? Number(yearMatch[1]) : null;
+  let cleaned = text.replace(/(19\d{2}|20\d{2})/g, " ");
+  let inferredType = forcedType;
+  if (forcedType === "all") {
+    if (/(series|show|tv)/i.test(text)) inferredType = "tv";
+    else if (/(movie|film)/i.test(text)) inferredType = "movie";
+  }
+  cleaned = cleaned.replace(/(series|show|tv|movie|film)/gi, " ").replace(/\s+/g, " ").trim();
+  return { term: cleaned || text, year: Number.isFinite(year) ? year : null, mediaType: inferredType };
+}
+
+async function searchTmdbTitles(query, { limit = 5, mediaType = "all" } = {}) {
   if (!tmdbEnabled()) return [];
-  const term = String(query || "").trim();
+  const normalized = normalizeTitleSearchQuery(query, mediaType);
+  const term = normalized.term;
   if (!term) return [];
   const apiKey = getTmdbKey();
-  const search = await fetchTmdbJson(`/search/multi?query=${encodeURIComponent(term)}&include_adult=false&page=1`, apiKey);
-  const pool = Array.isArray(search?.results)
-    ? search.results.filter(x => x && (x.media_type === "movie" || x.media_type === "tv"))
-    : [];
+
+  let pool = [];
+  if (normalized.mediaType === "movie") {
+    const yearParam = normalized.year ? `&year=${normalized.year}` : "";
+    const search = await fetchTmdbJson(`/search/movie?query=${encodeURIComponent(term)}&include_adult=false&page=1${yearParam}`, apiKey);
+    pool = Array.isArray(search?.results) ? search.results.map(x => ({ ...x, media_type: "movie" })) : [];
+  } else if (normalized.mediaType === "tv") {
+    const yearParam = normalized.year ? `&first_air_date_year=${normalized.year}` : "";
+    const search = await fetchTmdbJson(`/search/tv?query=${encodeURIComponent(term)}&include_adult=false&page=1${yearParam}`, apiKey);
+    pool = Array.isArray(search?.results) ? search.results.map(x => ({ ...x, media_type: "tv" })) : [];
+  } else {
+    const search = await fetchTmdbJson(`/search/multi?query=${encodeURIComponent(term)}&include_adult=false&page=1`, apiKey);
+    pool = Array.isArray(search?.results)
+      ? search.results.filter(x => x && (x.media_type === "movie" || x.media_type === "tv"))
+      : [];
+    if (normalized.year) {
+      pool = pool.filter(item => {
+        const d = item.media_type === "movie" ? item.release_date : item.first_air_date;
+        const y = d ? Number(String(d).slice(0, 4)) : null;
+        return Number.isFinite(y) && y === normalized.year;
+      });
+    }
+  }
+
   const out = [];
   for (const item of pool) {
     if (out.length >= limit) break;
-    const mediaType = item.media_type;
+    const itemType = item.media_type;
     const tmdbId = Number(item.id);
     if (!Number.isFinite(tmdbId)) continue;
 
     let imdbId = "";
     try {
-      const external = await fetchTmdbJson(`/${mediaType}/${tmdbId}/external_ids`, apiKey);
+      const external = await fetchTmdbJson(`/${itemType}/${tmdbId}/external_ids`, apiKey);
       imdbId = extractImdbId(external?.imdb_id || "");
     } catch {
       imdbId = "";
     }
 
-    const title = mediaType === "movie"
+    const title = itemType === "movie"
       ? sanitizeName(item.title || item.original_title || "")
       : sanitizeName(item.name || item.original_name || "");
-    const released = mediaType === "movie" ? item.release_date : item.first_air_date;
+    const released = itemType === "movie" ? item.release_date : item.first_air_date;
     const year = released ? Number(String(released).slice(0, 4)) : null;
     out.push({
       tmdbId,
-      mediaType,
+      mediaType: itemType,
       title,
       year: Number.isFinite(year) ? year : null,
       poster: tmdbImage(item.poster_path, "w342"),
@@ -1910,6 +1945,7 @@ async function searchTmdbTitles(query, { limit = 5 } = {}) {
   }
   return out;
 }
+
 async function fetchCinemeta(kind, imdbId) {
   try {
     const j = await fetchJson(`${CINEMETA}/meta/${kind}/${imdbId}.json`);
@@ -3381,12 +3417,14 @@ app.get("/api/list-search-title", async (req, res) => {
     const lsid = String(req.query.lsid || "").trim();
     const q = String(req.query.q || "").trim();
     const limitRaw = Number(req.query.limit);
-    const limit = Math.min(10, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 5));
+    const limit = Math.min(20, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 5));
     if (lsid && !isListId(lsid)) return res.status(400).json({ ok: false, message: "Bad list" });
     if (!q) return res.status(400).json({ ok: false, message: "Missing query" });
     if (!tmdbEnabled()) return res.status(400).json({ ok: false, message: "TMDB key missing or invalid" });
 
-    const results = await searchTmdbTitles(q, { limit });
+    const typeRaw = String(req.query.type || "all").toLowerCase();
+    const type = (typeRaw === "movie" || typeRaw === "tv") ? typeRaw : "all";
+    const results = await searchTmdbTitles(q, { limit, mediaType: type });
     const existing = lsid ? new Set(listIdsWithEdits(lsid)) : new Set();
     const items = results.map(item => ({
       ...item,
@@ -3982,6 +4020,9 @@ app.get("/admin", async (req,res)=>{
   .title-search-row input{
     flex:1;
     min-width:180px;
+  }
+  .title-search-row select{
+    min-width:130px;
   }
   .title-search-clear{
     min-width:34px;
@@ -4832,11 +4873,16 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
   const label = el('label', { class: 'mini', text: 'Search TMDB by title and add item' });
   const row = el('div', { class: 'title-search-row' });
   const input = el('input', { type: 'text', placeholder: 'Type title name (e.g. Inception)', spellcheck: 'false' });
+  const typeSel = el('select');
+  typeSel.appendChild(el('option', { value: 'all', text: 'All' }));
+  typeSel.appendChild(el('option', { value: 'movie', text: 'Movies' }));
+  typeSel.appendChild(el('option', { value: 'tv', text: 'Shows' }));
   const searchBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Search' });
   const clearBtn = el('button', { class: 'btn2 title-search-clear', type: 'button', text: '✕', title: 'Clear search' });
   const status = el('span', { class: 'mini muted title-search-status' });
   const results = el('div', { class: 'title-search-results' });
   row.appendChild(input);
+  row.appendChild(typeSel);
   row.appendChild(searchBtn);
   row.appendChild(clearBtn);
   root.appendChild(label);
@@ -4920,7 +4966,7 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
     status.textContent = 'Searching…';
     results.innerHTML = '';
     try {
-      const qs = new URLSearchParams({ admin: ADMIN, q, limit: '20' });
+      const qs = new URLSearchParams({ admin: ADMIN, q, limit: '20', type: typeSel.value || 'all' });
       if (lsid) qs.set('lsid', lsid);
       const r = await fetch('/api/list-search-title?' + qs.toString());
       const data = await r.json().catch(() => ({}));
