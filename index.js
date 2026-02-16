@@ -2723,6 +2723,72 @@ app.get("/configure", (req, res) => {
   `);
 });
 
+app.get("/webapp.webmanifest", (req, res) => {
+  const base = absoluteBase(req);
+  const start = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+  res.type("application/manifest+json").send(JSON.stringify({
+    id: "/admin",
+    name: "My Lists Admin",
+    short_name: "My Lists",
+    description: "Manage list ordering, sorting, and sources for your Stremio addon.",
+    start_url: start,
+    scope: `${base}/`,
+    display: "standalone",
+    background_color: "#050415",
+    theme_color: "#2f2165",
+    icons: [
+      { src: `${base}/pwa-icon.svg`, sizes: "192x192", type: "image/svg+xml", purpose: "any" },
+      { src: `${base}/pwa-icon.svg`, sizes: "512x512", type: "image/svg+xml", purpose: "any" }
+    ]
+  }, null, 2));
+});
+
+app.get("/pwa-icon.svg", (req, res) => {
+  res.type("image/svg+xml").send(`<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2f2165"/>
+      <stop offset="100%" stop-color="#6c5ce7"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <text x="256" y="292" text-anchor="middle" font-size="188" font-weight="700" fill="#ffffff" font-family="system-ui,Segoe UI,Arial">M</text>
+</svg>`);
+});
+
+app.get("/sw.js", (req, res) => {
+  res.type("application/javascript").send(`
+const CACHE_NAME = 'my-lists-admin-v1';
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)));
+    await self.clients.claim();
+  })());
+});
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  if (url.origin !== location.origin) return;
+  if (url.pathname === '/admin') {
+    event.respondWith((async () => {
+      try {
+        const net = await fetch(event.request);
+        const cache = await caches.open(CACHE_NAME);
+        cache.put(event.request, net.clone()).catch(() => {});
+        return net;
+      } catch {
+        const cached = await caches.match(event.request);
+        return cached || Response.error();
+      }
+    })());
+  }
+});
+`);
+});
+
 // ------- Catalog -------
 function parseExtra(extraStr, qObj){
   const p = new URLSearchParams(extraStr||"");
@@ -3672,7 +3738,14 @@ app.get("/admin", async (req,res)=>{
     : "never";
 
   res.type("html").send(`<!doctype html>
-<html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
+<html><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#2f2165" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="My Lists" />
+<link rel="manifest" href="/webapp.webmanifest" />
+<link rel="apple-touch-icon" href="/pwa-icon.svg" />
 <title>My Lists – Admin</title>
 <style>
   :root{
@@ -4589,6 +4662,13 @@ const ADMIN="${ADMIN_PASSWORD}";
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 const HOST_URL = ${JSON.stringify(base)};
 const SECRET = ${JSON.stringify(SHARED_SECRET)};
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
 let discoveredCache = null;
 let discoveredLoading = false;
 let customizeDraft = null;
