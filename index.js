@@ -5471,7 +5471,9 @@ async function render() {
   if (simpleModeBtn) {
     simpleModeBtn.classList.toggle('active', isSimpleMode);
     simpleModeBtn.classList.toggle('hidden', isSimpleMode);
-    simpleModeBtn.onclick = () => {
+    simpleModeBtn.onclick = async () => {
+      if (isSimpleMode) return;
+      try { await saveAll('Saved'); } catch (e) { console.warn('Mode switch save failed:', e?.message || e); }
       localStorage.setItem('customizeMode', 'simple');
       render();
     };
@@ -5479,7 +5481,9 @@ async function render() {
   if (normalModeBtn) {
     normalModeBtn.classList.toggle('active', !isSimpleMode);
     normalModeBtn.classList.toggle('hidden', !isSimpleMode);
-    normalModeBtn.onclick = () => {
+    normalModeBtn.onclick = async () => {
+      if (!isSimpleMode) return;
+      try { await saveAll('Saved'); } catch (e) { console.warn('Mode switch save failed:', e?.message || e); }
       localStorage.setItem('customizeMode', 'normal');
       render();
     };
