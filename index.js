@@ -4102,6 +4102,7 @@ app.get("/admin", async (req,res)=>{
   .mode-toggle{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
   .mode-btn{padding:6px 12px;font-size:12px;}
   .mode-btn.active{background:var(--accent);box-shadow:0 8px 20px rgba(108,92,231,.45);}
+  .mode-btn.hidden{display:none;}
   .row-menu{position:relative;}
   .row-menu > summary{
     list-style:none;
@@ -4135,6 +4136,7 @@ app.get("/admin", async (req,res)=>{
   }
   .row-menu-list button{justify-content:flex-start;border-radius:8px;padding:8px 10px;box-shadow:none;}
   .row-menu-list button.warn{background:#622a2a;}
+  .danger-btn{background:#622a2a;box-shadow:0 6px 16px rgba(98,42,42,.45);}
   .mode-simple .normal-only{display:none !important;}
   .mode-simple th, .mode-simple td{padding-top:8px;padding-bottom:8px;}
   .mode-simple .list-row td{vertical-align:middle;}
@@ -5468,6 +5470,7 @@ async function render() {
 
   if (simpleModeBtn) {
     simpleModeBtn.classList.toggle('active', isSimpleMode);
+    simpleModeBtn.classList.toggle('hidden', isSimpleMode);
     simpleModeBtn.onclick = () => {
       localStorage.setItem('customizeMode', 'simple');
       render();
@@ -5475,6 +5478,7 @@ async function render() {
   }
   if (normalModeBtn) {
     normalModeBtn.classList.toggle('active', !isSimpleMode);
+    normalModeBtn.classList.toggle('hidden', !isSimpleMode);
     normalModeBtn.onclick = () => {
       localStorage.setItem('customizeMode', 'normal');
       render();
@@ -5602,9 +5606,9 @@ async function render() {
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
     el('th',{text:'', class:'col-drawer'}),
+    el('th',{text:'Move'}),
     el('th',{text:'Enabled'}),
     el('th',{text:'Stremlist', class:'col-streamlist'}),
-    el('th',{text:'Move'}),
     el('th',{text:isSimpleMode ? 'List' : 'List (id)'}),
     el('th',{text:'Items'}),
     el('th',{text:'Default sort', class:'col-sort'}),
@@ -5960,7 +5964,8 @@ async function render() {
       saveAll('Saved');
     });
 
-    const rmBtn = el('button',{text: isCustom ? 'Delete' : 'Remove', type:'button'});
+    const removeLabel = isCustom ? 'Delete' : 'Remove';
+    const rmBtn = el('button',{text: removeLabel, type:'button', class:'danger-btn'});
     rmBtn.onclick = ()=> {
       if (isCustom) return deleteCustomList(lsid);
       return removeList(lsid);
@@ -6102,15 +6107,8 @@ async function render() {
       const menu = el('details', { class: 'row-menu' });
       const summary = el('summary', { text: '⋯' });
       const list = el('div', { class: 'row-menu-list' });
-      const duplicateAction = el('button', { type: 'button', text: 'Duplicate' });
-      duplicateAction.onclick = async () => { menu.open = false; await dupBtn.onclick(); };
-      const freezeAction = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Freeze' });
-      freezeAction.disabled = !freezeBtn;
-      freezeAction.onclick = async () => {
-        if (!freezeBtn) return;
-        menu.open = false;
-        await freezeBtn.onclick();
-      };
+      const streamlistAction = el('button', { type: 'button', text: 'Streamlist' });
+      streamlistAction.onclick = async () => { menu.open = false; await handleMainToggle(); };
       const backupAction = el('button', { type: 'button', text: backupActive ? 'Unbackup' : 'Backup' });
       backupAction.disabled = !!cloudBtn.disabled;
       backupAction.onclick = async () => {
@@ -6118,16 +6116,23 @@ async function render() {
         menu.open = false;
         await cloudBtn.onclick();
       };
-      const deleteAction = el('button', { type: 'button', text: 'Delete', class: 'warn' });
-      deleteAction.onclick = () => { menu.open = false; rmBtn.onclick(); };
-      const streamlistAction = el('button', { type: 'button', text: 'Streamlist' });
-      streamlistAction.onclick = async () => { menu.open = false; await handleMainToggle(); };
+      const freezeAction = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Freeze' });
+      freezeAction.disabled = !freezeBtn;
+      freezeAction.onclick = async () => {
+        if (!freezeBtn) return;
+        menu.open = false;
+        await freezeBtn.onclick();
+      };
+      const duplicateAction = el('button', { type: 'button', text: 'Duplicate' });
+      duplicateAction.onclick = async () => { menu.open = false; await dupBtn.onclick(); };
+      const removeAction = el('button', { type: 'button', text: removeLabel, class: 'warn' });
+      removeAction.onclick = () => { menu.open = false; rmBtn.onclick(); };
 
-      list.appendChild(duplicateAction);
-      list.appendChild(freezeAction);
-      list.appendChild(backupAction);
-      list.appendChild(deleteAction);
       list.appendChild(streamlistAction);
+      list.appendChild(backupAction);
+      list.appendChild(freezeAction);
+      list.appendChild(duplicateAction);
+      list.appendChild(removeAction);
       menu.appendChild(summary);
       menu.appendChild(list);
       menu.addEventListener('toggle', () => {
@@ -6405,12 +6410,12 @@ async function render() {
     advancedDrawer.style.display = 'none';
 
     tr.appendChild(chevTd);
+    tr.appendChild(moveTd);
     const enabledCell = el('td');
     enabledCell.appendChild(cb);
     enabledCell.appendChild(hideBtn);
     tr.appendChild(enabledCell);
     tr.appendChild(el('td',{class:'col-streamlist'},[mainBtn]));
-    tr.appendChild(moveTd);
     tr.appendChild(nameCell);
     tr.appendChild(count);
     tr.appendChild(el('td',{class:'col-sort'},[sortWrap]));
