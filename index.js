@@ -4591,6 +4591,7 @@ const HOST_URL = ${JSON.stringify(base)};
 const SECRET = ${JSON.stringify(SHARED_SECRET)};
 let discoveredCache = null;
 let discoveredLoading = false;
+let customizeDraft = null;
 
 async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
@@ -5168,13 +5169,19 @@ async function render() {
 
   let prefs;
   let lists;
-  try {
-    [prefs, lists] = await Promise.all([getPrefs(), getLists()]);
-  } catch (e) {
-    if (snapshotListEl) snapshotListEl.textContent = 'Failed to load lists.';
-    if (container) container.innerHTML = '<div class="mini muted">Failed to load custom lists.</div>';
-    console.warn('[UI] render load failed:', e?.message || e);
-    return;
+  if (customizeDraft && customizeDraft.prefs && customizeDraft.lists) {
+    prefs = customizeDraft.prefs;
+    lists = customizeDraft.lists;
+    customizeDraft = null;
+  } else {
+    try {
+      [prefs, lists] = await Promise.all([getPrefs(), getLists()]);
+    } catch (e) {
+      if (snapshotListEl) snapshotListEl.textContent = 'Failed to load lists.';
+      if (container) container.innerHTML = '<div class="mini muted">Failed to load custom lists.</div>';
+      console.warn('[UI] render load failed:', e?.message || e);
+      return;
+    }
   }
 
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
@@ -5471,9 +5478,19 @@ async function render() {
   if (simpleModeBtn) {
     simpleModeBtn.classList.toggle('active', isSimpleMode);
     simpleModeBtn.classList.toggle('hidden', isSimpleMode);
-    simpleModeBtn.onclick = async () => {
+    simpleModeBtn.onclick = () => {
       if (isSimpleMode) return;
-      try { await saveAll('Saved'); } catch (e) { console.warn('Mode switch save failed:', e?.message || e); }
+      const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+      const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
+      const hidden = Array.from(hiddenSet);
+      const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
+      prefs.order = nextOrder;
+      prefs.hiddenLists = hidden;
+      prefs.enabled = enabled;
+      customizeDraft = {
+        prefs: JSON.parse(JSON.stringify(prefs)),
+        lists
+      };
       localStorage.setItem('customizeMode', 'simple');
       render();
     };
@@ -5481,9 +5498,19 @@ async function render() {
   if (normalModeBtn) {
     normalModeBtn.classList.toggle('active', !isSimpleMode);
     normalModeBtn.classList.toggle('hidden', !isSimpleMode);
-    normalModeBtn.onclick = async () => {
+    normalModeBtn.onclick = () => {
       if (!isSimpleMode) return;
-      try { await saveAll('Saved'); } catch (e) { console.warn('Mode switch save failed:', e?.message || e); }
+      const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+      const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
+      const hidden = Array.from(hiddenSet);
+      const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
+      prefs.order = nextOrder;
+      prefs.hiddenLists = hidden;
+      prefs.enabled = enabled;
+      customizeDraft = {
+        prefs: JSON.parse(JSON.stringify(prefs)),
+        lists
+      };
       localStorage.setItem('customizeMode', 'normal');
       render();
     };
