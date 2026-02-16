@@ -4086,6 +4086,65 @@ app.get("/admin", async (req,res)=>{
   .sort-reverse-btn.active{background:var(--accent2);color:#fff;box-shadow:0 6px 16px rgba(139,124,247,.45);}
   .move-btns{display:flex;flex-direction:column;gap:6px;align-items:center;}
   .move-btns button{padding:8px 12px;font-size:13px;}
+  .drag-handle{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width:30px;
+    height:30px;
+    border-radius:8px;
+    background:rgba(28,24,55,.6);
+    color:#d7d1ff;
+    font-size:19px;
+    cursor:grab;
+    user-select:none;
+  }
+  .mode-toggle{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .mode-btn{padding:6px 12px;font-size:12px;}
+  .mode-btn.active{background:var(--accent);box-shadow:0 8px 20px rgba(108,92,231,.45);}
+  .mode-btn.hidden{display:none;}
+  .row-menu{position:relative;}
+  .row-menu > summary{
+    list-style:none;
+    cursor:pointer;
+    width:34px;
+    height:34px;
+    border-radius:10px;
+    border:1px solid var(--border);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#181433;
+    color:#fff;
+    font-size:22px;
+    line-height:1;
+  }
+  .row-menu > summary::-webkit-details-marker{display:none;}
+  .row-menu-list{
+    position:absolute;
+    right:0;
+    top:38px;
+    min-width:170px;
+    padding:6px;
+    border-radius:12px;
+    border:1px solid #6f67d8;
+    background:rgba(18,13,43,.97);
+    display:grid;
+    gap:4px;
+    z-index:12;
+    box-shadow:0 20px 34px rgba(0,0,0,.45);
+  }
+  .row-menu-list button{justify-content:flex-start;border-radius:8px;padding:8px 10px;box-shadow:none;}
+  .row-menu-list button.warn{background:#622a2a;}
+  .danger-btn{background:#622a2a;box-shadow:0 6px 16px rgba(98,42,42,.45);}
+  .mode-simple .normal-only{display:none !important;}
+  .mode-simple th, .mode-simple td{padding-top:8px;padding-bottom:8px;}
+  .mode-simple .list-row td{vertical-align:middle;}
+  .mode-simple .list-row small{display:none;}
+  .mode-simple .col-drawer,
+  .mode-simple .col-streamlist,
+  .mode-simple .col-sort,
+  .mode-simple .col-backup{display:none;}
   .mini{font-size:12px}
   a.link{color:#b1b9ff;text-decoration:none}
   a.link:hover{text-decoration:underline}
@@ -4462,11 +4521,16 @@ app.get("/admin", async (req,res)=>{
   <section id="section-customize" class="section">
     <div class="card center-card">
       <h3>Customize Layout</h3>
-      <p class="muted">Drag rows to reorder lists or use the arrows. Click ▾ to open the drawer and tune sort options or custom order.</p>
+      <p class="muted" id="customizeLeadText">Simple mode is the default for a clean compact layout. Switch to Normal mode for full controls and list item tools.</p>
+      <div class="mode-toggle" id="layoutModeToggle">
+        <button id="simpleModeBtn" class="mode-btn" type="button">Simple mode</button>
+        <button id="normalModeBtn" class="mode-btn btn2" type="button">Normal mode</button>
+        <span class="mini muted">Simple mode hides item drawers and advanced controls.</span>
+      </div>
       <div class="rowtools">
-        <label class="pill"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
+        <label class="pill normal-only"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
         <button id="showHiddenBtn" type="button" class="btn2" style="display:none;">Show hidden lists</button>
-        <span class="mini muted">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
+        <span class="mini muted normal-only">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
         <span class="rowtools-spacer"></span>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
       </div>
@@ -4527,6 +4591,7 @@ const HOST_URL = ${JSON.stringify(base)};
 const SECRET = ${JSON.stringify(SHARED_SECRET)};
 let discoveredCache = null;
 let discoveredLoading = false;
+let customizeDraft = null;
 
 async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
@@ -4837,6 +4902,13 @@ function el(tag, attrs={}, kids=[]) {
   kids.forEach(ch => e.appendChild(ch));
   return e;
 }
+if (!window.__rowMenuOutsideClickBound) {
+  window.__rowMenuOutsideClickBound = true;
+  document.addEventListener('click', (evt) => {
+    if (evt.target && evt.target.closest && evt.target.closest('details.row-menu')) return;
+    document.querySelectorAll('details.row-menu[open]').forEach((d) => { d.open = false; });
+  });
+}
 function isCtrl(node){
   const t = (node && node.tagName || "").toLowerCase();
   return t === "input" || t === "select" || t === "button" || t === "a" || t === "label" || t === "textarea";
@@ -5097,13 +5169,19 @@ async function render() {
 
   let prefs;
   let lists;
-  try {
-    [prefs, lists] = await Promise.all([getPrefs(), getLists()]);
-  } catch (e) {
-    if (snapshotListEl) snapshotListEl.textContent = 'Failed to load lists.';
-    if (container) container.innerHTML = '<div class="mini muted">Failed to load custom lists.</div>';
-    console.warn('[UI] render load failed:', e?.message || e);
-    return;
+  if (customizeDraft && customizeDraft.prefs && customizeDraft.lists) {
+    prefs = customizeDraft.prefs;
+    lists = customizeDraft.lists;
+    customizeDraft = null;
+  } else {
+    try {
+      [prefs, lists] = await Promise.all([getPrefs(), getLists()]);
+    } catch (e) {
+      if (snapshotListEl) snapshotListEl.textContent = 'Failed to load lists.';
+      if (container) container.innerHTML = '<div class="mini muted">Failed to load custom lists.</div>';
+      console.warn('[UI] render load failed:', e?.message || e);
+      return;
+    }
   }
 
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
@@ -5380,18 +5458,78 @@ async function render() {
 
   let showHiddenOnly = localStorage.getItem('showHiddenOnly') === 'true';
   const showHiddenBtn = document.getElementById('showHiddenBtn');
+  const simpleModeBtn = document.getElementById('simpleModeBtn');
+  const normalModeBtn = document.getElementById('normalModeBtn');
+  const customizeLeadText = document.getElementById('customizeLeadText');
 
   const advancedToggle = document.getElementById('advancedToggle');
   const mergeBuilder = document.getElementById('mergeBuilder');
   const mergeSelection = new Set();
+  const layoutMode = localStorage.getItem('customizeMode') === 'normal' ? 'normal' : 'simple';
+  const isSimpleMode = layoutMode === 'simple';
+  document.body.classList.toggle('mode-simple', isSimpleMode);
+
+  if (customizeLeadText) {
+    customizeLeadText.textContent = isSimpleMode
+      ? 'Simple mode is active. Drag with ☰ and use ⋯ for quick actions. Switch to Normal mode for full controls and list item drawers.'
+      : 'Normal mode is active. You can reorder, open drawers, and manage advanced options for each list.';
+  }
+
+  if (simpleModeBtn) {
+    simpleModeBtn.classList.toggle('active', isSimpleMode);
+    simpleModeBtn.classList.toggle('hidden', isSimpleMode);
+    simpleModeBtn.onclick = () => {
+      if (isSimpleMode) return;
+      const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+      const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
+      const hidden = Array.from(hiddenSet);
+      const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
+      prefs.order = nextOrder;
+      prefs.hiddenLists = hidden;
+      prefs.enabled = enabled;
+      customizeDraft = {
+        prefs: JSON.parse(JSON.stringify(prefs)),
+        lists
+      };
+      localStorage.setItem('customizeMode', 'simple');
+      render();
+    };
+  }
+  if (normalModeBtn) {
+    normalModeBtn.classList.toggle('active', !isSimpleMode);
+    normalModeBtn.classList.toggle('hidden', !isSimpleMode);
+    normalModeBtn.onclick = () => {
+      if (!isSimpleMode) return;
+      const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+      const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
+      const hidden = Array.from(hiddenSet);
+      const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
+      prefs.order = nextOrder;
+      prefs.hiddenLists = hidden;
+      prefs.enabled = enabled;
+      customizeDraft = {
+        prefs: JSON.parse(JSON.stringify(prefs)),
+        lists
+      };
+      localStorage.setItem('customizeMode', 'normal');
+      render();
+    };
+  }
+
   if (advancedToggle) {
-    const saved = localStorage.getItem('advancedMode') === 'true';
+    const saved = !isSimpleMode && localStorage.getItem('advancedMode') === 'true';
     advancedToggle.checked = saved;
+    advancedToggle.disabled = isSimpleMode;
     advancedToggle.onchange = () => {
       localStorage.setItem('advancedMode', advancedToggle.checked ? 'true' : 'false');
       updateAdvancedPanels();
       render();
     };
+  }
+  if (isSimpleMode) {
+    showHiddenOnly = false;
+    localStorage.setItem('showHiddenOnly', 'false');
+    localStorage.setItem('advancedMode', 'false');
   }
   if (showHiddenBtn) {
     showHiddenBtn.onclick = () => {
@@ -5402,7 +5540,7 @@ async function render() {
   }
 
   function updateAdvancedPanels() {
-    const on = advancedToggle && advancedToggle.checked;
+    const on = !isSimpleMode && advancedToggle && advancedToggle.checked;
     if (showHiddenBtn) {
       if (!on && showHiddenOnly) {
         showHiddenOnly = false;
@@ -5432,7 +5570,7 @@ async function render() {
 
   function renderMergeBuilder() {
     if (!mergeBuilder) return;
-    const on = advancedToggle && advancedToggle.checked;
+    const on = !isSimpleMode && advancedToggle && advancedToggle.checked;
     mergeBuilder.style.display = on ? '' : 'none';
     if (!on) return;
     mergeBuilder.innerHTML = '';
@@ -5498,15 +5636,15 @@ async function render() {
 
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:''}),
-    el('th',{text:'Enabled'}),
-    el('th',{text:'Stremlist'}),
+    el('th',{text:'', class:'col-drawer'}),
     el('th',{text:'Move'}),
-    el('th',{text:'List (id)'}),
+    el('th',{text:'Enabled'}),
+    el('th',{text:'Stremlist', class:'col-streamlist'}),
+    el('th',{text:isSimpleMode ? 'List' : 'List (id)'}),
     el('th',{text:'Items'}),
-    el('th',{text:'Default sort'}),
-    el('th',{text:'Backup'}),
-    el('th',{text:'Remove'})
+    el('th',{text:'Default sort', class:'col-sort'}),
+    el('th',{text:'Backup', class:'col-backup'}),
+    el('th',{text:isSimpleMode ? 'Actions' : 'Remove'})
   ])]);
   table.appendChild(thead);
   const tbody = el('tbody');
@@ -5744,8 +5882,12 @@ async function render() {
     const isOfflineList = customMeta?.kind === 'offline';
     const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
 
-    const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
-    const chevTd = el('td',{class:'chev-cell'},[chev]);
+    const chev = el('span',{
+      class: isSimpleMode ? 'drag-handle' : 'chev',
+      text: isSimpleMode ? '☰' : '▾',
+      title: isSimpleMode ? 'Drag to reorder' : 'Open custom order & sort options'
+    });
+    const chevTd = el('td',{class:'chev-cell col-drawer'},[chev]);
 
     const isHidden = hiddenSet.has(lsid);
     const cb = el('input', {type:'checkbox'}); cb.checked = !isHidden && enabledSet.has(lsid);
@@ -5769,16 +5911,22 @@ async function render() {
     }
 
     const moveWrap = el('div',{class:'move-btns'});
-    const upBtn = el('button',{type:'button',text:'↑'});
-    const downBtn = el('button',{type:'button',text:'↓'});
-    moveWrap.appendChild(upBtn); moveWrap.appendChild(downBtn);
-    upBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,-1); };
-    downBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,1); };
+    if (isSimpleMode) {
+      moveWrap.appendChild(el('span', { class:'drag-handle', text:'☰', title:'Drag to reorder' }));
+    } else {
+      const upBtn = el('button',{type:'button',text:'↑'});
+      const downBtn = el('button',{type:'button',text:'↓'});
+      moveWrap.appendChild(upBtn); moveWrap.appendChild(downBtn);
+      upBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,-1); };
+      downBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,1); };
+    }
     const moveTd = el('td',{},[moveWrap]);
 
-    const nameCell = el('td',{}); 
-    nameCell.appendChild(el('div',{text:(isFrozen ? '⭐ ' : '') + displayName(lsid)}));
-    nameCell.appendChild(el('small',{text:lsid}));
+    const nameCell = el('td',{});
+    const rowTitle = (isFrozen ? '⭐ ' : '') + displayName(lsid);
+    const nameLabel = el('div',{text:rowTitle, title:lsid});
+    nameCell.appendChild(nameLabel);
+    if (!isSimpleMode) nameCell.appendChild(el('small',{text:lsid}));
     if (customMeta?.kind === 'merged') {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
@@ -5847,7 +5995,8 @@ async function render() {
       saveAll('Saved');
     });
 
-    const rmBtn = el('button',{text: isCustom ? 'Delete' : 'Remove', type:'button'});
+    const removeLabel = isCustom ? 'Delete' : 'Remove';
+    const rmBtn = el('button',{text: removeLabel, type:'button', class:'danger-btn'});
     rmBtn.onclick = ()=> {
       if (isCustom) return deleteCustomList(lsid);
       return removeList(lsid);
@@ -5922,8 +6071,9 @@ async function render() {
     const actionRow = el('div', { class: 'advanced-row' });
     const dupBtn = el('button', { type: 'button', text: 'Duplicate' });
     const status = el('span', { class: 'mini muted' });
+    let freezeBtn = null;
     if (!isOfflineList) {
-      const freezeBtn = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Star / Freeze' });
+      freezeBtn = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Star / Freeze' });
       const syncBtn = el('button', { type: 'button', text: 'Sync/Update now' });
       freezeBtn.onclick = async () => {
         freezeBtn.disabled = true;
@@ -5983,6 +6133,46 @@ async function render() {
       }
     };
     actionRow.appendChild(dupBtn);
+
+    function makeSimpleActionsMenu() {
+      const menu = el('details', { class: 'row-menu' });
+      const summary = el('summary', { text: '⋯' });
+      const list = el('div', { class: 'row-menu-list' });
+      const streamlistAction = el('button', { type: 'button', text: 'Streamlist' });
+      streamlistAction.onclick = async () => { menu.open = false; await handleMainToggle(); };
+      const backupAction = el('button', { type: 'button', text: backupActive ? 'Unbackup' : 'Backup' });
+      backupAction.disabled = !!cloudBtn.disabled;
+      backupAction.onclick = async () => {
+        if (cloudBtn.disabled || !cloudBtn.onclick) return;
+        menu.open = false;
+        await cloudBtn.onclick();
+      };
+      const freezeAction = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Freeze' });
+      freezeAction.disabled = !freezeBtn;
+      freezeAction.onclick = async () => {
+        if (!freezeBtn) return;
+        menu.open = false;
+        await freezeBtn.onclick();
+      };
+      const duplicateAction = el('button', { type: 'button', text: 'Duplicate' });
+      duplicateAction.onclick = async () => { menu.open = false; await dupBtn.onclick(); };
+      const removeAction = el('button', { type: 'button', text: removeLabel, class: 'warn' });
+      removeAction.onclick = () => { menu.open = false; rmBtn.onclick(); };
+
+      list.appendChild(streamlistAction);
+      list.appendChild(backupAction);
+      list.appendChild(freezeAction);
+      list.appendChild(duplicateAction);
+      list.appendChild(removeAction);
+      menu.appendChild(summary);
+      menu.appendChild(list);
+      menu.addEventListener('toggle', () => {
+        if (!menu.open) return;
+        document.querySelectorAll('details.row-menu').forEach((d) => { if (d !== menu) d.open = false; });
+      });
+      return menu;
+    }
+
     if (isOfflineList) {
       const csvBox = el('div', { class: 'csv-inline-box' });
       const csvTitle = el('span', { class: 'mini', text: 'Add CSV from IMDb (drag/drop or choose file)' });
@@ -6251,17 +6441,20 @@ async function render() {
     advancedDrawer.style.display = 'none';
 
     tr.appendChild(chevTd);
+    tr.appendChild(moveTd);
     const enabledCell = el('td');
     enabledCell.appendChild(cb);
     enabledCell.appendChild(hideBtn);
     tr.appendChild(enabledCell);
-    tr.appendChild(el('td',{},[mainBtn]));
-    tr.appendChild(moveTd);
+    tr.appendChild(el('td',{class:'col-streamlist'},[mainBtn]));
     tr.appendChild(nameCell);
     tr.appendChild(count);
-    tr.appendChild(el('td',{},[sortWrap]));
-    tr.appendChild(el('td',{},[cloudBtn]));
-    tr.appendChild(el('td',{},[rmBtn]));
+    tr.appendChild(el('td',{class:'col-sort'},[sortWrap]));
+    tr.appendChild(el('td',{class:'col-backup'},[cloudBtn]));
+    const actionsTd = el('td');
+    if (isSimpleMode) actionsTd.appendChild(makeSimpleActionsMenu());
+    else actionsTd.appendChild(rmBtn);
+    tr.appendChild(actionsTd);
 
     let drawer = null; let open = false;
     let advOpen = false;
@@ -6285,7 +6478,7 @@ async function render() {
       }
     }
     advInlineBtn.onclick = () => {
-      if (!(advancedToggle && advancedToggle.checked)) return;
+      if (isSimpleMode || !(advancedToggle && advancedToggle.checked)) return;
       advOpen = !advOpen;
       advInlineBtn.textContent = advOpen ? 'Hide advanced options' : 'Show advanced options';
       advInlineBtn.setAttribute('aria-expanded', advOpen ? 'true' : 'false');
@@ -6294,6 +6487,7 @@ async function render() {
     };
 
     chev.onclick = ()=>{
+      if (isSimpleMode) return;
       open = !open;
       if (open) {
         chev.textContent = "▴";
