@@ -5862,6 +5862,7 @@ async function render() {
 
       const isReversed = () => !!(prefs.sortReverse && prefs.sortReverse[lsid]);
       const applyReverse = (arr) => isReversed() ? arr.slice().reverse() : arr;
+      let forceResortAfterSortChange = false;
 
       function renderList(arr){
         ul.innerHTML = '';
@@ -5882,9 +5883,15 @@ async function render() {
           return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
         } else if (sortKey === 'date_asc' && imdbDateAsc.length){
           const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
+          if (forceResortAfterSortChange && items.some(it => !pos.has(it.id))) {
+            return stableSortClient(items, 'date_asc');
+          }
           return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
         } else if (sortKey === 'date_desc' && imdbDateDesc.length){
           const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
+          if (forceResortAfterSortChange && items.some(it => !pos.has(it.id))) {
+            return stableSortClient(items, 'date_desc');
+          }
           return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
         } else {
           return stableSortClient(items, sortKey);
@@ -5913,9 +5920,12 @@ async function render() {
       };
 
       resetBtn.onclick = ()=>{
+        forceResortAfterSortChange = tr.dataset.forceResort === '1';
         const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
         const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
         renderList(orderFor(chosen));
+        forceResortAfterSortChange = false;
+        tr.dataset.forceResort = '0';
       };
 
       resetAllBtn.onclick = async ()=>{
@@ -6069,6 +6079,7 @@ async function render() {
       prefs.perListSort[lsid] = sortSel.value;
       const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
       if (drawer && drawer.style.display !== "none") {
+        drawer.dataset.forceResort = '1';
         const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
       }
