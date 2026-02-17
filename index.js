@@ -5219,8 +5219,13 @@ function moveRowByButtons(tr, dir){
   const tentative = idx + dir;
   const nextIdx = tentative < 0 ? rows.length - 1 : (tentative >= rows.length ? 0 : tentative);
   const ref = rows[nextIdx];
-  if (dir < 0) tbody.insertBefore(tr, ref);
-  else tbody.insertBefore(tr, ref.nextSibling);
+  if (dir < 0) {
+    if (nextIdx === rows.length - 1) tbody.insertBefore(tr, ref.nextSibling);
+    else tbody.insertBefore(tr, ref);
+  } else {
+    if (nextIdx === 0) tbody.insertBefore(tr, ref);
+    else tbody.insertBefore(tr, ref.nextSibling);
+  }
 }
 
 // Thumb drag (ul.thumbs)
@@ -5273,9 +5278,11 @@ async function render() {
 
   let prefs;
   let lists;
+  let draftItemOrders = {};
   if (customizeDraft && customizeDraft.prefs && customizeDraft.lists) {
     prefs = customizeDraft.prefs;
     lists = customizeDraft.lists;
+    draftItemOrders = (customizeDraft.itemOrders && typeof customizeDraft.itemOrders === 'object') ? customizeDraft.itemOrders : {};
     customizeDraft = null;
   } else {
     try {
@@ -5611,12 +5618,20 @@ async function render() {
     const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
     const hidden = Array.from(hiddenSet);
     const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
+    const itemOrders = {};
+    document.querySelectorAll('tr.drawer[data-drawer-for]').forEach((drawer) => {
+      const drawerLsid = drawer.getAttribute('data-drawer-for');
+      if (!drawerLsid) return;
+      const ids = Array.from(drawer.querySelectorAll('ul.thumbs li.thumb[data-id]')).map(li => li.getAttribute('data-id')).filter(Boolean);
+      if (ids.length) itemOrders[drawerLsid] = ids;
+    });
     prefs.order = nextOrder;
     prefs.hiddenLists = hidden;
     prefs.enabled = enabled;
     customizeDraft = {
       prefs: JSON.parse(JSON.stringify(prefs)),
-      lists
+      lists,
+      itemOrders
     };
   }
 
@@ -5956,11 +5971,18 @@ async function render() {
         const parent = li.parentNode;
         const items = Array.from(parent.querySelectorAll('li.thumb:not([data-add])'));
         const idx = items.indexOf(li);
-        const nextIdx = Math.min(Math.max(idx + dir, 0), items.length - 1);
+        if (idx < 0 || items.length < 2) return;
+        const tentative = idx + dir;
+        const nextIdx = tentative < 0 ? items.length - 1 : (tentative >= items.length ? 0 : tentative);
         if (nextIdx === idx) return;
         const ref = items[nextIdx];
-        if (dir < 0) parent.insertBefore(li, ref);
-        else parent.insertBefore(li, ref.nextSibling);
+        if (dir < 0) {
+          if (nextIdx === items.length - 1) parent.insertBefore(li, ref.nextSibling);
+          else parent.insertBefore(li, ref);
+        } else {
+          if (nextIdx === 0) parent.insertBefore(li, ref);
+          else parent.insertBefore(li, ref.nextSibling);
+        }
       }
 
       const isReversed = () => !!(prefs.sortReverse && prefs.sortReverse[lsid]);
@@ -5975,6 +5997,14 @@ async function render() {
       }
 
       function orderFor(sortKey){
+        if (sortKey === 'custom' && Array.isArray(draftItemOrders[lsid]) && draftItemOrders[lsid].length) {
+          const pos = new Map(draftItemOrders[lsid].map((id, i) => [id, i]));
+          return items.slice().sort((a,b)=>{
+            const pa = pos.has(a.id)?pos.get(a.id):1e9;
+            const pb = pos.has(b.id)?pos.get(b.id):1e9;
+            return pa-pb;
+          });
+        }
         if (sortKey === 'custom' && prefs.customOrder && Array.isArray(prefs.customOrder[lsid]) && prefs.customOrder[lsid].length){
           const pos = new Map(prefs.customOrder[lsid].map((id,i)=>[id,i]));
           return items.slice().sort((a,b)=>{
