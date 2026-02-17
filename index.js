@@ -6057,20 +6057,16 @@ async function render() {
           setTvMoveRow(null);
           return;
         }
-        if (tvMoveRow !== tr) {
-          if (key === 'ArrowUp' || key === 'ArrowDown') {
-            e.preventDefault();
-            setTvMoveRow(tr);
-          }
-          return;
-        }
+        if (tvMoveRow !== tr) return;
         if (key === 'ArrowUp') {
           e.preventDefault();
           moveRowByButtons(tr, -1);
+          moveHandle.focus();
           tr.scrollIntoView({ block: 'nearest' });
         } else if (key === 'ArrowDown') {
           e.preventDefault();
           moveRowByButtons(tr, 1);
+          moveHandle.focus();
           tr.scrollIntoView({ block: 'nearest' });
         }
       });
