@@ -2723,6 +2723,72 @@ app.get("/configure", (req, res) => {
   `);
 });
 
+app.get("/webapp.webmanifest", (req, res) => {
+  const base = absoluteBase(req);
+  const start = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+  res.type("application/manifest+json").send(JSON.stringify({
+    id: "/admin",
+    name: "My Lists Admin",
+    short_name: "My Lists",
+    description: "Manage list ordering, sorting, and sources for your Stremio addon.",
+    start_url: start,
+    scope: `${base}/`,
+    display: "standalone",
+    background_color: "#050415",
+    theme_color: "#2f2165",
+    icons: [
+      { src: `${base}/pwa-icon.svg`, sizes: "192x192", type: "image/svg+xml", purpose: "any" },
+      { src: `${base}/pwa-icon.svg`, sizes: "512x512", type: "image/svg+xml", purpose: "any" }
+    ]
+  }, null, 2));
+});
+
+app.get("/pwa-icon.svg", (req, res) => {
+  res.type("image/svg+xml").send(`<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2f2165"/>
+      <stop offset="100%" stop-color="#6c5ce7"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <text x="256" y="292" text-anchor="middle" font-size="188" font-weight="700" fill="#ffffff" font-family="system-ui,Segoe UI,Arial">M</text>
+</svg>`);
+});
+
+app.get("/sw.js", (req, res) => {
+  res.type("application/javascript").send(`
+const CACHE_NAME = 'my-lists-admin-v1';
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)));
+    await self.clients.claim();
+  })());
+});
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  if (url.origin !== location.origin) return;
+  if (url.pathname === '/admin') {
+    event.respondWith((async () => {
+      try {
+        const net = await fetch(event.request);
+        const cache = await caches.open(CACHE_NAME);
+        cache.put(event.request, net.clone()).catch(() => {});
+        return net;
+      } catch {
+        const cached = await caches.match(event.request);
+        return cached || Response.error();
+      }
+    })());
+  }
+});
+`);
+});
+
 // ------- Catalog -------
 function parseExtra(extraStr, qObj){
   const p = new URLSearchParams(extraStr||"");
@@ -3672,7 +3738,14 @@ app.get("/admin", async (req,res)=>{
     : "never";
 
   res.type("html").send(`<!doctype html>
-<html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
+<html><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#2f2165" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="My Lists" />
+<link rel="manifest" href="/webapp.webmanifest" />
+<link rel="apple-touch-icon" href="/pwa-icon.svg" />
 <title>My Lists – Admin</title>
 <style>
   :root{
@@ -3814,7 +3887,10 @@ app.get("/admin", async (req,res)=>{
     margin:0 auto;
   }
   .tile-move{margin-left:auto;display:flex;flex-direction:column;gap:4px;align-items:flex-end;}
-  .tile-move button{padding:4px 6px;font-size:12px;}
+  .thumb.tv-move-active{
+    outline:2px dashed rgba(139,124,247,.95);
+    outline-offset:-2px;
+  }
   .addbox{width:100%;text-align:center}
   .addbox input{
     margin-top:6px;
@@ -4085,7 +4161,73 @@ app.get("/admin", async (req,res)=>{
   }
   .sort-reverse-btn.active{background:var(--accent2);color:#fff;box-shadow:0 6px 16px rgba(139,124,247,.45);}
   .move-btns{display:flex;flex-direction:column;gap:6px;align-items:center;}
-  .move-btns button{padding:8px 12px;font-size:13px;}
+  .drag-handle{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width:30px;
+    height:30px;
+    border-radius:8px;
+    background:rgba(28,24,55,.6);
+    color:#d7d1ff;
+    font-size:19px;
+    cursor:grab;
+    user-select:none;
+  }
+  .move-handle-btn{outline:none;}
+  .move-handle-btn:focus-visible{
+    box-shadow:0 0 0 2px rgba(139,124,247,.85), 0 0 0 5px rgba(108,92,231,.25);
+  }
+  tr.list-row.tv-move-active{
+    outline:2px dashed rgba(139,124,247,.95);
+    outline-offset:-2px;
+  }
+  .mode-toggle{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .mode-btn{padding:6px 12px;font-size:12px;}
+  .mode-btn.active{background:var(--accent);box-shadow:0 8px 20px rgba(108,92,231,.45);}
+  .mode-btn.hidden{display:none;}
+  .row-menu{position:relative;}
+  .row-menu > summary{
+    list-style:none;
+    cursor:pointer;
+    width:34px;
+    height:34px;
+    border-radius:10px;
+    border:1px solid var(--border);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#181433;
+    color:#fff;
+    font-size:22px;
+    line-height:1;
+  }
+  .row-menu > summary::-webkit-details-marker{display:none;}
+  .row-menu-list{
+    position:absolute;
+    right:0;
+    top:38px;
+    min-width:170px;
+    padding:6px;
+    border-radius:12px;
+    border:1px solid #6f67d8;
+    background:rgba(18,13,43,.97);
+    display:grid;
+    gap:4px;
+    z-index:12;
+    box-shadow:0 20px 34px rgba(0,0,0,.45);
+  }
+  .row-menu-list button{justify-content:flex-start;border-radius:8px;padding:8px 10px;box-shadow:none;}
+  .row-menu-list button.warn{background:#622a2a;}
+  .danger-btn{background:#622a2a;box-shadow:0 6px 16px rgba(98,42,42,.45);}
+  .mode-simple .normal-only{display:none !important;}
+  .mode-simple th, .mode-simple td{padding-top:8px;padding-bottom:8px;}
+  .mode-simple .list-row td{vertical-align:middle;}
+  .mode-simple .list-row small{display:none;}
+  .mode-simple .col-drawer,
+  .mode-simple .col-streamlist,
+  .mode-simple .col-sort,
+  .mode-simple .col-backup{display:none;}
   .mini{font-size:12px}
   a.link{color:#b1b9ff;text-decoration:none}
   a.link:hover{text-decoration:underline}
@@ -4462,11 +4604,16 @@ app.get("/admin", async (req,res)=>{
   <section id="section-customize" class="section">
     <div class="card center-card">
       <h3>Customize Layout</h3>
-      <p class="muted">Drag rows to reorder lists or use the arrows. Click ▾ to open the drawer and tune sort options or custom order.</p>
+      <p class="muted" id="customizeLeadText">Simple mode is the default for a clean compact layout. Switch to Normal mode for full controls and list item tools.</p>
+      <div class="mode-toggle" id="layoutModeToggle">
+        <button id="simpleModeBtn" class="mode-btn" type="button">Simple mode</button>
+        <button id="normalModeBtn" class="mode-btn btn2" type="button">Normal mode</button>
+        <span class="mini muted">Simple mode hides item drawers and advanced controls.</span>
+      </div>
       <div class="rowtools">
-        <label class="pill"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
+        <label class="pill normal-only"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
         <button id="showHiddenBtn" type="button" class="btn2" style="display:none;">Show hidden lists</button>
-        <span class="mini muted">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
+        <span class="mini muted normal-only">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
         <span class="rowtools-spacer"></span>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
       </div>
@@ -4525,8 +4672,16 @@ const ADMIN="${ADMIN_PASSWORD}";
 const SORT_OPTIONS = ${JSON.stringify(SORT_OPTIONS)};
 const HOST_URL = ${JSON.stringify(base)};
 const SECRET = ${JSON.stringify(SHARED_SECRET)};
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
 let discoveredCache = null;
 let discoveredLoading = false;
+let customizeDraft = null;
 
 async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); return r.json(); }
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
@@ -4837,6 +4992,13 @@ function el(tag, attrs={}, kids=[]) {
   kids.forEach(ch => e.appendChild(ch));
   return e;
 }
+if (!window.__rowMenuOutsideClickBound) {
+  window.__rowMenuOutsideClickBound = true;
+  document.addEventListener('click', (evt) => {
+    if (evt.target && evt.target.closest && evt.target.closest('details.row-menu')) return;
+    document.querySelectorAll('details.row-menu[open]').forEach((d) => { d.open = false; });
+  });
+}
 function isCtrl(node){
   const t = (node && node.tagName || "").toLowerCase();
   return t === "input" || t === "select" || t === "button" || t === "a" || t === "label" || t === "textarea";
@@ -5097,13 +5259,19 @@ async function render() {
 
   let prefs;
   let lists;
-  try {
-    [prefs, lists] = await Promise.all([getPrefs(), getLists()]);
-  } catch (e) {
-    if (snapshotListEl) snapshotListEl.textContent = 'Failed to load lists.';
-    if (container) container.innerHTML = '<div class="mini muted">Failed to load custom lists.</div>';
-    console.warn('[UI] render load failed:', e?.message || e);
-    return;
+  if (customizeDraft && customizeDraft.prefs && customizeDraft.lists) {
+    prefs = customizeDraft.prefs;
+    lists = customizeDraft.lists;
+    customizeDraft = null;
+  } else {
+    try {
+      [prefs, lists] = await Promise.all([getPrefs(), getLists()]);
+    } catch (e) {
+      if (snapshotListEl) snapshotListEl.textContent = 'Failed to load lists.';
+      if (container) container.innerHTML = '<div class="mini muted">Failed to load custom lists.</div>';
+      console.warn('[UI] render load failed:', e?.message || e);
+      return;
+    }
   }
 
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
@@ -5380,29 +5548,84 @@ async function render() {
 
   let showHiddenOnly = localStorage.getItem('showHiddenOnly') === 'true';
   const showHiddenBtn = document.getElementById('showHiddenBtn');
+  const simpleModeBtn = document.getElementById('simpleModeBtn');
+  const normalModeBtn = document.getElementById('normalModeBtn');
+  const customizeLeadText = document.getElementById('customizeLeadText');
 
   const advancedToggle = document.getElementById('advancedToggle');
   const mergeBuilder = document.getElementById('mergeBuilder');
   const mergeSelection = new Set();
-  if (advancedToggle) {
-    const saved = localStorage.getItem('advancedMode') === 'true';
-    advancedToggle.checked = saved;
-    advancedToggle.onchange = () => {
-      localStorage.setItem('advancedMode', advancedToggle.checked ? 'true' : 'false');
-      updateAdvancedPanels();
+  const layoutMode = localStorage.getItem('customizeMode') === 'normal' ? 'normal' : 'simple';
+  const isSimpleMode = layoutMode === 'simple';
+  document.body.classList.toggle('mode-simple', isSimpleMode);
+
+  if (customizeLeadText) {
+    customizeLeadText.textContent = isSimpleMode
+      ? 'Simple mode is active. Drag with ☰ and use ⋯ for quick actions. Switch to Normal mode for full controls and list item drawers.'
+      : 'Normal mode is active. You can reorder, open drawers, and manage advanced options for each list.';
+  }
+
+  function stashCustomizeDraftFromUi() {
+    const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+    const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
+    const hidden = Array.from(hiddenSet);
+    const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
+    prefs.order = nextOrder;
+    prefs.hiddenLists = hidden;
+    prefs.enabled = enabled;
+    customizeDraft = {
+      prefs: JSON.parse(JSON.stringify(prefs)),
+      lists
+    };
+  }
+
+  if (simpleModeBtn) {
+    simpleModeBtn.classList.toggle('active', isSimpleMode);
+    simpleModeBtn.classList.toggle('hidden', isSimpleMode);
+    simpleModeBtn.onclick = () => {
+      if (isSimpleMode) return;
+      stashCustomizeDraftFromUi();
+      localStorage.setItem('customizeMode', 'simple');
       render();
     };
+  }
+  if (normalModeBtn) {
+    normalModeBtn.classList.toggle('active', !isSimpleMode);
+    normalModeBtn.classList.toggle('hidden', !isSimpleMode);
+    normalModeBtn.onclick = () => {
+      if (!isSimpleMode) return;
+      stashCustomizeDraftFromUi();
+      localStorage.setItem('customizeMode', 'normal');
+      render();
+    };
+  }
+
+  if (advancedToggle) {
+    const saved = !isSimpleMode && localStorage.getItem('advancedMode') === 'true';
+    advancedToggle.checked = saved;
+    advancedToggle.disabled = isSimpleMode;
+    advancedToggle.onchange = () => {
+      localStorage.setItem('advancedMode', advancedToggle.checked ? 'true' : 'false');
+      stashCustomizeDraftFromUi();
+      render();
+    };
+  }
+  if (isSimpleMode) {
+    showHiddenOnly = false;
+    localStorage.setItem('showHiddenOnly', 'false');
+    localStorage.setItem('advancedMode', 'false');
   }
   if (showHiddenBtn) {
     showHiddenBtn.onclick = () => {
       showHiddenOnly = !showHiddenOnly;
       localStorage.setItem('showHiddenOnly', showHiddenOnly ? 'true' : 'false');
+      stashCustomizeDraftFromUi();
       render();
     };
   }
 
   function updateAdvancedPanels() {
-    const on = advancedToggle && advancedToggle.checked;
+    const on = !isSimpleMode && advancedToggle && advancedToggle.checked;
     if (showHiddenBtn) {
       if (!on && showHiddenOnly) {
         showHiddenOnly = false;
@@ -5432,7 +5655,7 @@ async function render() {
 
   function renderMergeBuilder() {
     if (!mergeBuilder) return;
-    const on = advancedToggle && advancedToggle.checked;
+    const on = !isSimpleMode && advancedToggle && advancedToggle.checked;
     mergeBuilder.style.display = on ? '' : 'none';
     if (!on) return;
     mergeBuilder.innerHTML = '';
@@ -5498,15 +5721,15 @@ async function render() {
 
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:''}),
-    el('th',{text:'Enabled'}),
-    el('th',{text:'Stremlist'}),
+    el('th',{text:'', class:'col-drawer'}),
     el('th',{text:'Move'}),
-    el('th',{text:'List (id)'}),
+    el('th',{text:'Enabled'}),
+    el('th',{text:'Stremlist', class:'col-streamlist'}),
+    el('th',{text:isSimpleMode ? 'List' : 'List (id)'}),
     el('th',{text:'Items'}),
-    el('th',{text:'Default sort'}),
-    el('th',{text:'Backup'}),
-    el('th',{text:'Remove'})
+    el('th',{text:'Default sort', class:'col-sort'}),
+    el('th',{text:'Backup', class:'col-backup'}),
+    el('th',{text:isSimpleMode ? 'Actions' : 'Remove'})
   ])]);
   table.appendChild(thead);
   const tbody = el('tbody');
@@ -5567,6 +5790,21 @@ async function render() {
 
       const ul = el('ul',{class:'thumbs'});
       td.appendChild(ul);
+      let tvMoveTile = null;
+      function setTvMoveTile(nextLi) {
+        if (tvMoveTile === nextLi) return;
+        if (tvMoveTile) {
+          tvMoveTile.classList.remove('tv-move-active');
+          const prevHandle = tvMoveTile.querySelector('.move-handle-btn');
+          if (prevHandle) prevHandle.setAttribute('aria-pressed', 'false');
+        }
+        tvMoveTile = nextLi || null;
+        if (tvMoveTile) {
+          tvMoveTile.classList.add('tv-move-active');
+          const nextHandle = tvMoveTile.querySelector('.move-handle-btn');
+          if (nextHandle) nextHandle.setAttribute('aria-pressed', 'true');
+        }
+      }
 
       function liFor(it){
         const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
@@ -5575,6 +5813,7 @@ async function render() {
           e.stopPropagation();
           if (!confirm('Remove this item from the list?')) return;
           await fetch('/api/list-remove?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, id: it.id })});
+          if (tvMoveTile === li) setTvMoveTile(null);
           await refresh();
         };
 
@@ -5585,11 +5824,43 @@ async function render() {
           el('div',{class:'id',text: it.id})
         ]);
         const moveBox = el('div',{class:'tile-move'});
-        const upBtn = el('button',{type:'button',text:'↑'});
-        const downBtn = el('button',{type:'button',text:'↓'});
-        moveBox.appendChild(upBtn); moveBox.appendChild(downBtn);
-        upBtn.onclick = (e)=>{ e.preventDefault(); moveThumb(li,-1); };
-        downBtn.onclick = (e)=>{ e.preventDefault(); moveThumb(li,1); };
+        const moveHandle = el('span', {
+          class:'drag-handle move-handle-btn',
+          text:'☰',
+          title:'Select item to move',
+          tabindex:'0',
+          role:'button',
+          'aria-pressed':'false',
+          'aria-label':'Select item and use arrows to move'
+        });
+        const toggleTvMoveTile = (e) => {
+          if (e) e.preventDefault();
+          if (tvMoveTile === li) setTvMoveTile(null);
+          else setTvMoveTile(li);
+        };
+        moveHandle.addEventListener('click', toggleTvMoveTile);
+        moveHandle.addEventListener('keydown', (e) => {
+          const key = e.key;
+          const isConfirm = key === 'Enter' || key === ' ' || key === 'Spacebar' || key === 'Select';
+          if (isConfirm) {
+            e.preventDefault();
+            toggleTvMoveTile(e);
+            return;
+          }
+          if (key === 'Escape') {
+            e.preventDefault();
+            setTvMoveTile(null);
+            return;
+          }
+          if (tvMoveTile !== li) return;
+          const moveDir = (key === 'ArrowUp' || key === 'ArrowLeft') ? -1 : ((key === 'ArrowDown' || key === 'ArrowRight') ? 1 : 0);
+          if (!moveDir) return;
+          e.preventDefault();
+          moveThumb(li, moveDir);
+          moveHandle.focus();
+          li.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        });
+        moveBox.appendChild(moveHandle);
         li.appendChild(img); li.appendChild(wrap); li.appendChild(moveBox);
         return li;
       }
@@ -5644,6 +5915,7 @@ async function render() {
 
       const isReversed = () => !!(prefs.sortReverse && prefs.sortReverse[lsid]);
       const applyReverse = (arr) => isReversed() ? arr.slice().reverse() : arr;
+      let forceResortAfterSortChange = false;
 
       function renderList(arr){
         ul.innerHTML = '';
@@ -5664,9 +5936,15 @@ async function render() {
           return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
         } else if (sortKey === 'date_asc' && imdbDateAsc.length){
           const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
+          if (forceResortAfterSortChange && items.some(it => !pos.has(it.id))) {
+            return stableSortClient(items, 'date_asc');
+          }
           return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
         } else if (sortKey === 'date_desc' && imdbDateDesc.length){
           const pos = new Map(imdbDateDesc.map((id,i)=>[id,i]));
+          if (forceResortAfterSortChange && items.some(it => !pos.has(it.id))) {
+            return stableSortClient(items, 'date_desc');
+          }
           return items.slice().sort((a,b)=> (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
         } else {
           return stableSortClient(items, sortKey);
@@ -5695,9 +5973,12 @@ async function render() {
       };
 
       resetBtn.onclick = ()=>{
+        forceResortAfterSortChange = tr.dataset.forceResort === '1';
         const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
         const chosen = rowSel ? rowSel.value : (prefs.perListSort?.[lsid] || 'name_asc');
         renderList(orderFor(chosen));
+        forceResortAfterSortChange = false;
+        tr.dataset.forceResort = '0';
       };
 
       resetAllBtn.onclick = async ()=>{
@@ -5736,6 +6017,22 @@ async function render() {
       .catch(()=> alert('Delete failed'));
   }
 
+  let tvMoveRow = null;
+  function setTvMoveRow(nextRow) {
+    if (tvMoveRow === nextRow) return;
+    if (tvMoveRow) {
+      tvMoveRow.classList.remove('tv-move-active');
+      const prevHandle = tvMoveRow.querySelector('.move-handle-btn');
+      if (prevHandle) prevHandle.setAttribute('aria-pressed', 'false');
+    }
+    tvMoveRow = nextRow || null;
+    if (tvMoveRow) {
+      tvMoveRow.classList.add('tv-move-active');
+      const nextHandle = tvMoveRow.querySelector('.move-handle-btn');
+      if (nextHandle) nextHandle.setAttribute('aria-pressed', 'true');
+    }
+  }
+
   function makeRow(lsid) {
     const L = lists[lsid];
     const customMeta = customMap[lsid];
@@ -5744,8 +6041,12 @@ async function render() {
     const isOfflineList = customMeta?.kind === 'offline';
     const tr = el('tr', {'data-lsid': lsid, draggable:'true', class:'list-row'});
 
-    const chev = el('span',{class:'chev',text:'▾', title:'Open custom order & sort options'});
-    const chevTd = el('td',{class:'chev-cell'},[chev]);
+    const chev = el('span',{
+      class: isSimpleMode ? 'drag-handle' : 'chev',
+      text: isSimpleMode ? '☰' : '▾',
+      title: isSimpleMode ? 'Drag to reorder' : 'Open custom order & sort options'
+    });
+    const chevTd = el('td',{class:'chev-cell col-drawer'},[chev]);
 
     const isHidden = hiddenSet.has(lsid);
     const cb = el('input', {type:'checkbox'}); cb.checked = !isHidden && enabledSet.has(lsid);
@@ -5769,16 +6070,50 @@ async function render() {
     }
 
     const moveWrap = el('div',{class:'move-btns'});
-    const upBtn = el('button',{type:'button',text:'↑'});
-    const downBtn = el('button',{type:'button',text:'↓'});
-    moveWrap.appendChild(upBtn); moveWrap.appendChild(downBtn);
-    upBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,-1); };
-    downBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,1); };
+    const moveHandle = el('span', {
+      class:'drag-handle move-handle-btn',
+      text:'☰',
+      title:'Select row to move',
+      tabindex:'0',
+      role:'button',
+      'aria-pressed':'false',
+      'aria-label':'Select row and use arrows to move'
+    });
+    const toggleTvMove = (e) => {
+      if (e) e.preventDefault();
+      if (tvMoveRow === tr) setTvMoveRow(null);
+      else setTvMoveRow(tr);
+    };
+    moveHandle.addEventListener('click', toggleTvMove);
+    moveHandle.addEventListener('keydown', (e) => {
+      const key = e.key;
+      const isConfirm = key === 'Enter' || key === ' ' || key === 'Spacebar' || key === 'Select';
+      if (isConfirm) {
+        e.preventDefault();
+        toggleTvMove(e);
+        return;
+      }
+      if (key === 'Escape') {
+        e.preventDefault();
+        setTvMoveRow(null);
+        return;
+      }
+      if (tvMoveRow !== tr) return;
+      const moveDir = (key === 'ArrowUp' || key === 'ArrowLeft') ? -1 : ((key === 'ArrowDown' || key === 'ArrowRight') ? 1 : 0);
+      if (!moveDir) return;
+      e.preventDefault();
+      moveRowByButtons(tr, moveDir);
+      moveHandle.focus();
+      tr.scrollIntoView({ block: 'nearest' });
+    });
+    moveWrap.appendChild(moveHandle);
     const moveTd = el('td',{},[moveWrap]);
 
-    const nameCell = el('td',{}); 
-    nameCell.appendChild(el('div',{text:(isFrozen ? '⭐ ' : '') + displayName(lsid)}));
-    nameCell.appendChild(el('small',{text:lsid}));
+    const nameCell = el('td',{});
+    const rowTitle = (isFrozen ? '⭐ ' : '') + displayName(lsid);
+    const nameLabel = el('div',{text:rowTitle, title:lsid});
+    nameCell.appendChild(nameLabel);
+    if (!isSimpleMode) nameCell.appendChild(el('small',{text:lsid}));
     if (customMeta?.kind === 'merged') {
       nameCell.appendChild(el('div', { class: 'mini muted', text: 'Merged from: ' + (customMeta.sources || []).map(id => displayName(id)).join(', ') }));
     }
@@ -5841,13 +6176,15 @@ async function render() {
       prefs.perListSort[lsid] = sortSel.value;
       const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
       if (drawer && drawer.style.display !== "none") {
+        drawer.dataset.forceResort = '1';
         const resetBtn = drawer.querySelector('.order-reset-btn');
         if (resetBtn) resetBtn.click();
       }
       saveAll('Saved');
     });
 
-    const rmBtn = el('button',{text: isCustom ? 'Delete' : 'Remove', type:'button'});
+    const removeLabel = isCustom ? 'Delete' : 'Remove';
+    const rmBtn = el('button',{text: removeLabel, type:'button', class:'danger-btn'});
     rmBtn.onclick = ()=> {
       if (isCustom) return deleteCustomList(lsid);
       return removeList(lsid);
@@ -5922,8 +6259,9 @@ async function render() {
     const actionRow = el('div', { class: 'advanced-row' });
     const dupBtn = el('button', { type: 'button', text: 'Duplicate' });
     const status = el('span', { class: 'mini muted' });
+    let freezeBtn = null;
     if (!isOfflineList) {
-      const freezeBtn = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Star / Freeze' });
+      freezeBtn = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Star / Freeze' });
       const syncBtn = el('button', { type: 'button', text: 'Sync/Update now' });
       freezeBtn.onclick = async () => {
         freezeBtn.disabled = true;
@@ -5983,6 +6321,46 @@ async function render() {
       }
     };
     actionRow.appendChild(dupBtn);
+
+    function makeSimpleActionsMenu() {
+      const menu = el('details', { class: 'row-menu' });
+      const summary = el('summary', { text: '⋯' });
+      const list = el('div', { class: 'row-menu-list' });
+      const streamlistAction = el('button', { type: 'button', text: 'Streamlist' });
+      streamlistAction.onclick = async () => { menu.open = false; await handleMainToggle(); };
+      const backupAction = el('button', { type: 'button', text: backupActive ? 'Unbackup' : 'Backup' });
+      backupAction.disabled = !!cloudBtn.disabled;
+      backupAction.onclick = async () => {
+        if (cloudBtn.disabled || !cloudBtn.onclick) return;
+        menu.open = false;
+        await cloudBtn.onclick();
+      };
+      const freezeAction = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Freeze' });
+      freezeAction.disabled = !freezeBtn;
+      freezeAction.onclick = async () => {
+        if (!freezeBtn) return;
+        menu.open = false;
+        await freezeBtn.onclick();
+      };
+      const duplicateAction = el('button', { type: 'button', text: 'Duplicate' });
+      duplicateAction.onclick = async () => { menu.open = false; await dupBtn.onclick(); };
+      const removeAction = el('button', { type: 'button', text: removeLabel, class: 'warn' });
+      removeAction.onclick = () => { menu.open = false; rmBtn.onclick(); };
+
+      list.appendChild(streamlistAction);
+      list.appendChild(backupAction);
+      list.appendChild(freezeAction);
+      list.appendChild(duplicateAction);
+      list.appendChild(removeAction);
+      menu.appendChild(summary);
+      menu.appendChild(list);
+      menu.addEventListener('toggle', () => {
+        if (!menu.open) return;
+        document.querySelectorAll('details.row-menu').forEach((d) => { if (d !== menu) d.open = false; });
+      });
+      return menu;
+    }
+
     if (isOfflineList) {
       const csvBox = el('div', { class: 'csv-inline-box' });
       const csvTitle = el('span', { class: 'mini', text: 'Add CSV from IMDb (drag/drop or choose file)' });
@@ -6251,17 +6629,20 @@ async function render() {
     advancedDrawer.style.display = 'none';
 
     tr.appendChild(chevTd);
+    tr.appendChild(moveTd);
     const enabledCell = el('td');
     enabledCell.appendChild(cb);
     enabledCell.appendChild(hideBtn);
     tr.appendChild(enabledCell);
-    tr.appendChild(el('td',{},[mainBtn]));
-    tr.appendChild(moveTd);
+    tr.appendChild(el('td',{class:'col-streamlist'},[mainBtn]));
     tr.appendChild(nameCell);
     tr.appendChild(count);
-    tr.appendChild(el('td',{},[sortWrap]));
-    tr.appendChild(el('td',{},[cloudBtn]));
-    tr.appendChild(el('td',{},[rmBtn]));
+    tr.appendChild(el('td',{class:'col-sort'},[sortWrap]));
+    tr.appendChild(el('td',{class:'col-backup'},[cloudBtn]));
+    const actionsTd = el('td');
+    if (isSimpleMode) actionsTd.appendChild(makeSimpleActionsMenu());
+    else actionsTd.appendChild(rmBtn);
+    tr.appendChild(actionsTd);
 
     let drawer = null; let open = false;
     let advOpen = false;
@@ -6285,7 +6666,7 @@ async function render() {
       }
     }
     advInlineBtn.onclick = () => {
-      if (!(advancedToggle && advancedToggle.checked)) return;
+      if (isSimpleMode || !(advancedToggle && advancedToggle.checked)) return;
       advOpen = !advOpen;
       advInlineBtn.textContent = advOpen ? 'Hide advanced options' : 'Show advanced options';
       advInlineBtn.setAttribute('aria-expanded', advOpen ? 'true' : 'false');
@@ -6294,6 +6675,7 @@ async function render() {
     };
 
     chev.onclick = ()=>{
+      if (isSimpleMode) return;
       open = !open;
       if (open) {
         chev.textContent = "▴";
