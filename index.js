@@ -3887,6 +3887,7 @@ app.get("/admin", async (req,res)=>{
     margin:0 auto;
   }
   .tile-move{margin-left:auto;display:flex;flex-direction:column;gap:4px;align-items:flex-end;}
+  .tile-move button{padding:4px 6px;font-size:12px;line-height:1;}
   .thumb.tv-move-active{
     outline:2px dashed rgba(139,124,247,.95);
     outline-offset:-2px;
@@ -3930,6 +3931,10 @@ app.get("/admin", async (req,res)=>{
     margin-top:4px;
   }
   .rowtools-spacer{flex:1}
+  .move-style-toggle{display:flex;align-items:center;gap:8px;}
+  .move-style-toggle .seg{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#181433;}
+  .move-style-toggle button{padding:6px 10px;border:0;background:transparent;color:var(--muted);box-shadow:none;border-radius:0;}
+  .move-style-toggle button.active{background:var(--accent2);color:#fff;}
   .create-panel{
     display:none;
     margin-top:12px;
@@ -4161,6 +4166,7 @@ app.get("/admin", async (req,res)=>{
   }
   .sort-reverse-btn.active{background:var(--accent2);color:#fff;box-shadow:0 6px 16px rgba(139,124,247,.45);}
   .move-btns{display:flex;flex-direction:column;gap:6px;align-items:center;}
+  .move-btns button{padding:6px 10px;font-size:13px;line-height:1;}
   .drag-handle{
     display:inline-flex;
     align-items:center;
@@ -4615,6 +4621,13 @@ app.get("/admin", async (req,res)=>{
         <button id="showHiddenBtn" type="button" class="btn2" style="display:none;">Show hidden lists</button>
         <span class="mini muted normal-only">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
         <span class="rowtools-spacer"></span>
+        <div id="moveStyleToggle" class="move-style-toggle normal-only" aria-label="Normal mode move controls">
+          <span class="mini muted">Move controls</span>
+          <div class="seg" role="group" aria-label="Move control style">
+            <button type="button" id="moveStyleHandleBtn">☰</button>
+            <button type="button" id="moveStyleArrowsBtn">↑↓</button>
+          </div>
+        </div>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
       </div>
       <div id="createOfflinePanel" class="create-panel">
@@ -5202,8 +5215,9 @@ function moveRowByButtons(tr, dir){
   const tbody = tr.parentNode;
   const rows = Array.from(tbody.querySelectorAll('tr[data-lsid]'));
   const idx = rows.indexOf(tr);
-  const nextIdx = Math.min(Math.max(idx + dir, 0), rows.length - 1);
-  if (nextIdx === idx) return;
+  if (idx < 0 || rows.length < 2) return;
+  const tentative = idx + dir;
+  const nextIdx = tentative < 0 ? rows.length - 1 : (tentative >= rows.length ? 0 : tentative);
   const ref = rows[nextIdx];
   if (dir < 0) tbody.insertBefore(tr, ref);
   else tbody.insertBefore(tr, ref.nextSibling);
@@ -5551,18 +5565,45 @@ async function render() {
   const simpleModeBtn = document.getElementById('simpleModeBtn');
   const normalModeBtn = document.getElementById('normalModeBtn');
   const customizeLeadText = document.getElementById('customizeLeadText');
+  const moveStyleToggle = document.getElementById('moveStyleToggle');
+  const moveStyleHandleBtn = document.getElementById('moveStyleHandleBtn');
+  const moveStyleArrowsBtn = document.getElementById('moveStyleArrowsBtn');
 
   const advancedToggle = document.getElementById('advancedToggle');
   const mergeBuilder = document.getElementById('mergeBuilder');
   const mergeSelection = new Set();
   const layoutMode = localStorage.getItem('customizeMode') === 'normal' ? 'normal' : 'simple';
   const isSimpleMode = layoutMode === 'simple';
+  const normalMoveStyle = localStorage.getItem('normalMoveStyle') === 'arrows' ? 'arrows' : 'handle';
+  const useArrowMove = !isSimpleMode && normalMoveStyle === 'arrows';
   document.body.classList.toggle('mode-simple', isSimpleMode);
 
   if (customizeLeadText) {
     customizeLeadText.textContent = isSimpleMode
       ? 'Simple mode is active. Drag with ☰ and use ⋯ for quick actions. Switch to Normal mode for full controls and list item drawers.'
       : 'Normal mode is active. You can reorder, open drawers, and manage advanced options for each list.';
+  }
+
+  if (moveStyleToggle) {
+    moveStyleToggle.style.display = isSimpleMode ? 'none' : '';
+    if (moveStyleHandleBtn) {
+      moveStyleHandleBtn.classList.toggle('active', !useArrowMove);
+      moveStyleHandleBtn.onclick = () => {
+        if (isSimpleMode || !useArrowMove) return;
+        stashCustomizeDraftFromUi();
+        localStorage.setItem('normalMoveStyle', 'handle');
+        render();
+      };
+    }
+    if (moveStyleArrowsBtn) {
+      moveStyleArrowsBtn.classList.toggle('active', useArrowMove);
+      moveStyleArrowsBtn.onclick = () => {
+        if (isSimpleMode || useArrowMove) return;
+        stashCustomizeDraftFromUi();
+        localStorage.setItem('normalMoveStyle', 'arrows');
+        render();
+      };
+    }
   }
 
   function stashCustomizeDraftFromUi() {
@@ -5824,43 +5865,52 @@ async function render() {
           el('div',{class:'id',text: it.id})
         ]);
         const moveBox = el('div',{class:'tile-move'});
-        const moveHandle = el('span', {
-          class:'drag-handle move-handle-btn',
-          text:'☰',
-          title:'Select item to move',
-          tabindex:'0',
-          role:'button',
-          'aria-pressed':'false',
-          'aria-label':'Select item and use arrows to move'
-        });
-        const toggleTvMoveTile = (e) => {
-          if (e) e.preventDefault();
-          if (tvMoveTile === li) setTvMoveTile(null);
-          else setTvMoveTile(li);
-        };
-        moveHandle.addEventListener('click', toggleTvMoveTile);
-        moveHandle.addEventListener('keydown', (e) => {
-          const key = e.key;
-          const isConfirm = key === 'Enter' || key === ' ' || key === 'Spacebar' || key === 'Select';
-          if (isConfirm) {
+        if (useArrowMove) {
+          const upBtn = el('button',{type:'button',text:'↑'});
+          const downBtn = el('button',{type:'button',text:'↓'});
+          moveBox.appendChild(upBtn);
+          moveBox.appendChild(downBtn);
+          upBtn.onclick = (e)=>{ e.preventDefault(); moveThumb(li,-1); };
+          downBtn.onclick = (e)=>{ e.preventDefault(); moveThumb(li,1); };
+        } else {
+          const moveHandle = el('span', {
+            class:'drag-handle move-handle-btn',
+            text:'☰',
+            title:'Select item to move',
+            tabindex:'0',
+            role:'button',
+            'aria-pressed':'false',
+            'aria-label':'Select item and use arrows to move'
+          });
+          const toggleTvMoveTile = (e) => {
+            if (e) e.preventDefault();
+            if (tvMoveTile === li) setTvMoveTile(null);
+            else setTvMoveTile(li);
+          };
+          moveHandle.addEventListener('click', toggleTvMoveTile);
+          moveHandle.addEventListener('keydown', (e) => {
+            const key = e.key;
+            const isConfirm = key === 'Enter' || key === ' ' || key === 'Spacebar' || key === 'Select';
+            if (isConfirm) {
+              e.preventDefault();
+              toggleTvMoveTile(e);
+              return;
+            }
+            if (key === 'Escape') {
+              e.preventDefault();
+              setTvMoveTile(null);
+              return;
+            }
+            if (tvMoveTile !== li) return;
+            const moveDir = (key === 'ArrowUp' || key === 'ArrowLeft') ? -1 : ((key === 'ArrowDown' || key === 'ArrowRight') ? 1 : 0);
+            if (!moveDir) return;
             e.preventDefault();
-            toggleTvMoveTile(e);
-            return;
-          }
-          if (key === 'Escape') {
-            e.preventDefault();
-            setTvMoveTile(null);
-            return;
-          }
-          if (tvMoveTile !== li) return;
-          const moveDir = (key === 'ArrowUp' || key === 'ArrowLeft') ? -1 : ((key === 'ArrowDown' || key === 'ArrowRight') ? 1 : 0);
-          if (!moveDir) return;
-          e.preventDefault();
-          moveThumb(li, moveDir);
-          moveHandle.focus();
-          li.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-        });
-        moveBox.appendChild(moveHandle);
+            moveThumb(li, moveDir);
+            moveHandle.focus();
+            li.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          });
+          moveBox.appendChild(moveHandle);
+        }
         li.appendChild(img); li.appendChild(wrap); li.appendChild(moveBox);
         return li;
       }
@@ -6070,43 +6120,52 @@ async function render() {
     }
 
     const moveWrap = el('div',{class:'move-btns'});
-    const moveHandle = el('span', {
-      class:'drag-handle move-handle-btn',
-      text:'☰',
-      title:'Select row to move',
-      tabindex:'0',
-      role:'button',
-      'aria-pressed':'false',
-      'aria-label':'Select row and use arrows to move'
-    });
-    const toggleTvMove = (e) => {
-      if (e) e.preventDefault();
-      if (tvMoveRow === tr) setTvMoveRow(null);
-      else setTvMoveRow(tr);
-    };
-    moveHandle.addEventListener('click', toggleTvMove);
-    moveHandle.addEventListener('keydown', (e) => {
-      const key = e.key;
-      const isConfirm = key === 'Enter' || key === ' ' || key === 'Spacebar' || key === 'Select';
-      if (isConfirm) {
+    if (useArrowMove) {
+      const upBtn = el('button',{type:'button',text:'↑'});
+      const downBtn = el('button',{type:'button',text:'↓'});
+      moveWrap.appendChild(upBtn);
+      moveWrap.appendChild(downBtn);
+      upBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,-1); };
+      downBtn.onclick = (e)=>{ e.preventDefault(); moveRowByButtons(tr,1); };
+    } else {
+      const moveHandle = el('span', {
+        class:'drag-handle move-handle-btn',
+        text:'☰',
+        title:'Select row to move',
+        tabindex:'0',
+        role:'button',
+        'aria-pressed':'false',
+        'aria-label':'Select row and use arrows to move'
+      });
+      const toggleTvMove = (e) => {
+        if (e) e.preventDefault();
+        if (tvMoveRow === tr) setTvMoveRow(null);
+        else setTvMoveRow(tr);
+      };
+      moveHandle.addEventListener('click', toggleTvMove);
+      moveHandle.addEventListener('keydown', (e) => {
+        const key = e.key;
+        const isConfirm = key === 'Enter' || key === ' ' || key === 'Spacebar' || key === 'Select';
+        if (isConfirm) {
+          e.preventDefault();
+          toggleTvMove(e);
+          return;
+        }
+        if (key === 'Escape') {
+          e.preventDefault();
+          setTvMoveRow(null);
+          return;
+        }
+        if (tvMoveRow !== tr) return;
+        const moveDir = (key === 'ArrowUp' || key === 'ArrowLeft') ? -1 : ((key === 'ArrowDown' || key === 'ArrowRight') ? 1 : 0);
+        if (!moveDir) return;
         e.preventDefault();
-        toggleTvMove(e);
-        return;
-      }
-      if (key === 'Escape') {
-        e.preventDefault();
-        setTvMoveRow(null);
-        return;
-      }
-      if (tvMoveRow !== tr) return;
-      const moveDir = (key === 'ArrowUp' || key === 'ArrowLeft') ? -1 : ((key === 'ArrowDown' || key === 'ArrowRight') ? 1 : 0);
-      if (!moveDir) return;
-      e.preventDefault();
-      moveRowByButtons(tr, moveDir);
-      moveHandle.focus();
-      tr.scrollIntoView({ block: 'nearest' });
-    });
-    moveWrap.appendChild(moveHandle);
+        moveRowByButtons(tr, moveDir);
+        moveHandle.focus();
+        tr.scrollIntoView({ block: 'nearest' });
+      });
+      moveWrap.appendChild(moveHandle);
+    }
     const moveTd = el('td',{},[moveWrap]);
 
     const nameCell = el('td',{});
