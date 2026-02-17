@@ -5566,22 +5566,26 @@ async function render() {
       : 'Normal mode is active. You can reorder, open drawers, and manage advanced options for each list.';
   }
 
+  function stashCustomizeDraftFromUi() {
+    const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
+    const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
+    const hidden = Array.from(hiddenSet);
+    const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
+    prefs.order = nextOrder;
+    prefs.hiddenLists = hidden;
+    prefs.enabled = enabled;
+    customizeDraft = {
+      prefs: JSON.parse(JSON.stringify(prefs)),
+      lists
+    };
+  }
+
   if (simpleModeBtn) {
     simpleModeBtn.classList.toggle('active', isSimpleMode);
     simpleModeBtn.classList.toggle('hidden', isSimpleMode);
     simpleModeBtn.onclick = () => {
       if (isSimpleMode) return;
-      const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
-      const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
-      const hidden = Array.from(hiddenSet);
-      const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
-      prefs.order = nextOrder;
-      prefs.hiddenLists = hidden;
-      prefs.enabled = enabled;
-      customizeDraft = {
-        prefs: JSON.parse(JSON.stringify(prefs)),
-        lists
-      };
+      stashCustomizeDraftFromUi();
       localStorage.setItem('customizeMode', 'simple');
       render();
     };
@@ -5591,17 +5595,7 @@ async function render() {
     normalModeBtn.classList.toggle('hidden', !isSimpleMode);
     normalModeBtn.onclick = () => {
       if (!isSimpleMode) return;
-      const visibleOrderNow = Array.from(tbody.querySelectorAll('tr[data-lsid]')).map(tr => tr.getAttribute('data-lsid'));
-      const nextOrder = mergeVisibleOrderIntoFull(visibleOrderNow);
-      const hidden = Array.from(hiddenSet);
-      const enabled = nextOrder.filter(id => enabledSet.has(id) && !hiddenSet.has(id));
-      prefs.order = nextOrder;
-      prefs.hiddenLists = hidden;
-      prefs.enabled = enabled;
-      customizeDraft = {
-        prefs: JSON.parse(JSON.stringify(prefs)),
-        lists
-      };
+      stashCustomizeDraftFromUi();
       localStorage.setItem('customizeMode', 'normal');
       render();
     };
@@ -5613,7 +5607,7 @@ async function render() {
     advancedToggle.disabled = isSimpleMode;
     advancedToggle.onchange = () => {
       localStorage.setItem('advancedMode', advancedToggle.checked ? 'true' : 'false');
-      updateAdvancedPanels();
+      stashCustomizeDraftFromUi();
       render();
     };
   }
@@ -5626,6 +5620,7 @@ async function render() {
     showHiddenBtn.onclick = () => {
       showHiddenOnly = !showHiddenOnly;
       localStorage.setItem('showHiddenOnly', showHiddenOnly ? 'true' : 'false');
+      stashCustomizeDraftFromUi();
       render();
     };
   }
