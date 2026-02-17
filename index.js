@@ -5622,8 +5622,11 @@ async function render() {
     document.querySelectorAll('tr.drawer[data-drawer-for]').forEach((drawer) => {
       const drawerLsid = drawer.getAttribute('data-drawer-for');
       if (!drawerLsid) return;
-      const ids = Array.from(drawer.querySelectorAll('ul.thumbs li.thumb[data-id]')).map(li => li.getAttribute('data-id')).filter(Boolean);
-      if (ids.length) itemOrders[drawerLsid] = ids;
+      let ids = Array.from(drawer.querySelectorAll('ul.thumbs li.thumb[data-id]')).map(li => li.getAttribute('data-id')).filter(Boolean);
+      if (!ids.length) return;
+      const reversed = !!(prefs.sortReverse && prefs.sortReverse[drawerLsid]);
+      if (reversed) ids = ids.slice().reverse();
+      itemOrders[drawerLsid] = ids;
     });
     prefs.order = nextOrder;
     prefs.hiddenLists = hidden;
@@ -6040,6 +6043,9 @@ async function render() {
         saveBtn.disabled = true; resetBtn.disabled = true; resetAllBtn.disabled = true;
         try {
           await saveCustomOrder(lsid, ids);
+          prefs.customOrder = prefs.customOrder || {};
+          prefs.customOrder[lsid] = ids.slice();
+          draftItemOrders[lsid] = ids.slice();
           const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
           if (rowSel) rowSel.value = 'custom';
           prefs.perListSort = prefs.perListSort || {}; prefs.perListSort[lsid] = 'custom';
