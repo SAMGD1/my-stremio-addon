@@ -4172,6 +4172,17 @@ app.get("/admin", async (req,res)=>{
     cursor:grab;
     user-select:none;
   }
+  .move-handle-btn{outline:none;}
+  .move-handle-btn:focus-visible{
+    box-shadow:0 0 0 2px rgba(139,124,247,.85), 0 0 0 5px rgba(108,92,231,.25);
+  }
+  tr.list-row.tv-move-active td{
+    box-shadow:inset 0 0 0 1px rgba(139,124,247,.85);
+    border-top-color:rgba(139,124,247,.85);
+    border-bottom-color:rgba(139,124,247,.85);
+  }
+  tr.list-row.tv-move-active td:first-child{border-left-color:rgba(139,124,247,.95);}
+  tr.list-row.tv-move-active td:last-child{border-right-color:rgba(139,124,247,.95);}
   .mode-toggle{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
   .mode-btn{padding:6px 12px;font-size:12px;}
   .mode-btn.active{background:var(--accent);box-shadow:0 8px 20px rgba(108,92,231,.45);}
@@ -5964,6 +5975,22 @@ async function render() {
       .catch(()=> alert('Delete failed'));
   }
 
+  let tvMoveRow = null;
+  function setTvMoveRow(nextRow) {
+    if (tvMoveRow === nextRow) return;
+    if (tvMoveRow) {
+      tvMoveRow.classList.remove('tv-move-active');
+      const prevHandle = tvMoveRow.querySelector('.move-handle-btn');
+      if (prevHandle) prevHandle.setAttribute('aria-pressed', 'false');
+    }
+    tvMoveRow = nextRow || null;
+    if (tvMoveRow) {
+      tvMoveRow.classList.add('tv-move-active');
+      const nextHandle = tvMoveRow.querySelector('.move-handle-btn');
+      if (nextHandle) nextHandle.setAttribute('aria-pressed', 'true');
+    }
+  }
+
   function makeRow(lsid) {
     const L = lists[lsid];
     const customMeta = customMap[lsid];
@@ -6002,7 +6029,52 @@ async function render() {
 
     const moveWrap = el('div',{class:'move-btns'});
     if (isSimpleMode) {
-      moveWrap.appendChild(el('span', { class:'drag-handle', text:'☰', title:'Drag to reorder' }));
+      const moveHandle = el('span', {
+        class:'drag-handle move-handle-btn',
+        text:'☰',
+        title:'Select row for TV remote move',
+        tabindex:'0',
+        role:'button',
+        'aria-pressed':'false',
+        'aria-label':'Select row and use up/down to move'
+      });
+      const toggleTvMove = (e) => {
+        if (e) e.preventDefault();
+        if (tvMoveRow === tr) setTvMoveRow(null);
+        else setTvMoveRow(tr);
+      };
+      moveHandle.addEventListener('click', toggleTvMove);
+      moveHandle.addEventListener('keydown', (e) => {
+        const key = e.key;
+        const isConfirm = key === 'Enter' || key === ' ' || key === 'Spacebar' || key === 'Select';
+        if (isConfirm) {
+          e.preventDefault();
+          toggleTvMove(e);
+          return;
+        }
+        if (key === 'Escape') {
+          e.preventDefault();
+          setTvMoveRow(null);
+          return;
+        }
+        if (tvMoveRow !== tr) {
+          if (key === 'ArrowUp' || key === 'ArrowDown') {
+            e.preventDefault();
+            setTvMoveRow(tr);
+          }
+          return;
+        }
+        if (key === 'ArrowUp') {
+          e.preventDefault();
+          moveRowByButtons(tr, -1);
+          tr.scrollIntoView({ block: 'nearest' });
+        } else if (key === 'ArrowDown') {
+          e.preventDefault();
+          moveRowByButtons(tr, 1);
+          tr.scrollIntoView({ block: 'nearest' });
+        }
+      });
+      moveWrap.appendChild(moveHandle);
     } else {
       const upBtn = el('button',{type:'button',text:'↑'});
       const downBtn = el('button',{type:'button',text:'↓'});
