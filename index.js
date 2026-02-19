@@ -2641,6 +2641,7 @@ const absoluteBase = req => {
   const host = req.headers["x-forwarded-host"] || req.get("host");
   return `${proto}://${host}`;
 };
+const adminCustomizeUrl = (req) => `${absoluteBase(req)}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}&view=customize&mode=normal`;
 
 app.get("/health", (_,res)=>res.status(200).send("ok"));
 
@@ -2708,7 +2709,7 @@ app.get("/manifest.json", (req,res)=>{
 
 app.get("/configure", (req, res) => {
   const base = absoluteBase(req);
-  const dest = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+  const dest = adminCustomizeUrl(req);
 
   res.type("html").send(`
     <!doctype html><meta charset="utf-8">
@@ -2927,6 +2928,9 @@ app.get("/stream/:type/:id.json", async (req, res) => {
         streams: [{
           title: "You have not selected any Stremlist.",
           externalUrl: `stremio://detail/${encodeURIComponent(req.params.type)}/${imdbId}`
+        }, {
+          title: "🌐 Streamlist a list (open Customize Layout)",
+          externalUrl: adminCustomizeUrl(req)
         }]
       });
     }
@@ -2942,6 +2946,10 @@ app.get("/stream/:type/:id.json", async (req, res) => {
       const url = `${absoluteBase(req)}/${path}/${encodeURIComponent(req.params.type)}/${imdbId}?list=${encodeURIComponent(lsid)}${SHARED_SECRET ? `&key=${encodeURIComponent(SHARED_SECRET)}` : ""}`;
       streams.push({ title: `${symbol} ${action} this title ${inList ? "from" : "to"} ${listName}`, url });
     }
+    streams.push({
+      title: "🌐 Streamlist a list (open Customize Layout)",
+      externalUrl: adminCustomizeUrl(req)
+    });
     return res.json({ streams });
   } catch (e) {
     console.error("stream:", e);
@@ -4728,6 +4736,15 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
   });
+
+  const params = new URLSearchParams(window.location.search || '');
+  const openView = (params.get('view') || '').toLowerCase();
+  const forceMode = (params.get('mode') || '').toLowerCase();
+  if (forceMode === 'normal') localStorage.setItem('customizeMode', 'normal');
+  if (openView === 'customize') {
+    const targetBtn = document.querySelector('.nav-btn[data-target="customize"]');
+    if (targetBtn) targetBtn.click();
+  }
 
   document.querySelectorAll('.collapse-toggle').forEach(btn => {
     const target = document.getElementById(btn.dataset.target || '');
