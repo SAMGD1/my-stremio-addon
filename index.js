@@ -33,7 +33,6 @@ const IMDB_USER_URL     = process.env.IMDB_USER_URL || ""; // https://www.imdb.c
 const IMDB_SYNC_MINUTES = Math.max(0, Number(process.env.IMDB_SYNC_MINUTES || 60));
 const UPGRADE_EPISODES  = String(process.env.UPGRADE_EPISODES || "true").toLowerCase() !== "false";
 const PRELOAD_CARDS = String(process.env.PRELOAD_CARDS || "true").toLowerCase() !== "false";
-const PRELOAD_CONCURRENCY = Math.max(1, Number(process.env.PRELOAD_CONCURRENCY || 8));
 // fetch IMDb’s own release-date page order so our date sort matches IMDb exactly
 const IMDB_FETCH_RELEASE_ORDERS = String(process.env.IMDB_FETCH_RELEASE_ORDERS || "true").toLowerCase() !== "false";
 
@@ -519,52 +518,9 @@ async function saveSnapshot(obj) {
   // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
-    await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj), "utf8");
+    await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
   scheduleSave(obj);
-}
-
-function packCard(card) {
-  if (!card || typeof card !== "object") return card;
-  return [
-    card.type,
-    card.name,
-    card.poster,
-    card.background,
-    card.imdbRating,
-    card.runtime,
-    card.year,
-    card.releaseDate,
-    card.description
-  ];
-}
-
-function unpackCard(raw, id) {
-  if (Array.isArray(raw)) {
-    const [type, name, poster, background, imdbRating, runtime, year, releaseDate, description] = raw;
-    return { id, type, name, poster, background, imdbRating, runtime, year, releaseDate, description };
-  }
-  return raw;
-}
-
-function packCardsMap(mapObj) {
-  const out = {};
-  for (const [id, card] of Object.entries(mapObj || {})) out[id] = packCard(card);
-  return out;
-}
-
-async function forEachWithConcurrency(items, limit, worker) {
-  if (!Array.isArray(items) || !items.length) return;
-  const size = Math.max(1, Number(limit) || 1);
-  let idx = 0;
-  const runners = Array.from({ length: Math.min(size, items.length) }, async () => {
-    for (;;) {
-      const i = idx++;
-      if (i >= items.length) break;
-      await worker(items[i], i);
-    }
-  });
-  await Promise.all(runners);
 }
 async function loadSnapshot() {
   // try Supabase first
@@ -786,7 +742,7 @@ async function persistSnapshot() {
     lists: LISTS,
     prefs: PREFS,
     fallback: Object.fromEntries(FALLBK),
-    cards: packCardsMap(Object.fromEntries(CARD)),
+    cards: Object.fromEntries(CARD),
     ep2ser: Object.fromEntries(EP2SER)
   });
   await persistFrozenBackups();
@@ -1815,7 +1771,7 @@ async function fetchTmdbJson(path, apiKey) {
       lists: LISTS,
       prefs: PREFS,
       fallback: Object.fromEntries(FALLBK),
-      cards: packCardsMap(Object.fromEntries(CARD)),
+      cards: Object.fromEntries(CARD),
       ep2ser: Object.fromEntries(EP2SER)
     }).catch(() => {});
     throw new Error(`TMDB unauthorized (${r.status})`);
@@ -2518,10 +2474,10 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
     // preload cards
     if (PRELOAD_CARDS) {
-      await forEachWithConcurrency(idsToPreload, PRELOAD_CONCURRENCY, async (tt) => {
+      for (const tt of idsToPreload) {
         await getBestMeta(tt);
         CARD.set(tt, cardFor(tt));
-      });
+      }
     } else {
       console.log("[SYNC] card preload skipped (PRELOAD_CARDS=false)");
     }
@@ -2652,10 +2608,10 @@ async function syncSingleList(lsid, { manual = false } = {}) {
   }
 
   if (PRELOAD_CARDS) {
-    await forEachWithConcurrency(idsToUse, PRELOAD_CONCURRENCY, async (tt) => {
+    for (const tt of idsToUse) {
       await getBestMeta(tt);
       CARD.set(tt, cardFor(tt));
-    });
+    }
   }
 
   LAST_MANIFEST_KEY = "";
@@ -2871,10 +2827,10 @@ async function rebuildAllCards() {
   BEST.clear();
   FALLBK.clear();
   CARD.clear();
-  await forEachWithConcurrency(Array.from(unique), PRELOAD_CONCURRENCY, async (tt) => {
+  for (const tt of unique) {
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
-  });
+  }
 }
 app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
   try{
@@ -6915,7 +6871,7 @@ render();
       if (PREFS.mainList) delete PREFS.mainList;
       PREFS.hiddenLists = Array.isArray(PREFS.hiddenLists) ? PREFS.hiddenLists.filter(isListId) : [];
       FALLBK.clear(); if (snap.fallback) for (const [k,v] of Object.entries(snap.fallback)) FALLBK.set(k, v);
-      CARD.clear();   if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, unpackCard(v, k));
+      CARD.clear();   if (snap.cards)    for (const [k,v] of Object.entries(snap.cards))    CARD.set(k, v);
       EP2SER.clear(); if (snap.ep2ser)   for (const [k,v] of Object.entries(snap.ep2ser))   EP2SER.set(k, v);
       MANIFEST_REV = snap.manifestRev || MANIFEST_REV;
       LAST_SYNC_AT = snap.lastSyncAt || 0;
