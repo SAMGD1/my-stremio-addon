@@ -2641,6 +2641,7 @@ const absoluteBase = req => {
   const host = req.headers["x-forwarded-host"] || req.get("host");
   return `${proto}://${host}`;
 };
+const adminHomeUrl = (req) => `${absoluteBase(req)}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
 const adminCustomizeUrl = (req) => `${absoluteBase(req)}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}&view=customize&mode=normal`;
 
 app.get("/health", (_,res)=>res.status(200).send("ok"));
@@ -2708,8 +2709,7 @@ app.get("/manifest.json", (req,res)=>{
 });
 
 app.get("/configure", (req, res) => {
-  const base = absoluteBase(req);
-  const dest = adminCustomizeUrl(req);
+  const dest = adminHomeUrl(req);
 
   res.type("html").send(`
     <!doctype html><meta charset="utf-8">
@@ -2726,7 +2726,7 @@ app.get("/configure", (req, res) => {
 
 app.get("/webapp.webmanifest", (req, res) => {
   const base = absoluteBase(req);
-  const start = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+  const start = adminHomeUrl(req);
   res.type("application/manifest+json").send(JSON.stringify({
     id: "/admin",
     name: "My Lists Admin",
