@@ -2374,11 +2374,15 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       seen.add(d.id);
     }
     const blocked = new Set(PREFS.blocked || []);
+    const frozenSet = new Set(Object.keys(PREFS.frozenLists || {}));
     for (const id of Object.keys(LISTS)) {
       const isCustom = isCustomListId(id);
       const hasCustomMeta = !!(PREFS.customLists && PREFS.customLists[id]);
+      const isFrozen = frozenSet.has(id);
       if (isCustom && !hasCustomMeta) continue;
-      if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
+      // if a source was removed, drop regular discovered lists on next sync;
+      // keep only explicitly managed custom/frozen lists.
+      if (!seen.has(id) && !blocked.has(id) && (hasCustomMeta || isFrozen)) next[id] = LISTS[id];
     }
 
     const customIds = Object.keys(PREFS.customLists || {});
