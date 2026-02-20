@@ -4143,6 +4143,21 @@ app.get("/admin", async (req,res)=>{
   .pill input{margin-right:4px}
   .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
   .pill .pill-text{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .manager-pill{
+    width:100%;
+    max-width:100%;
+    border-radius:12px;
+    padding:6px 8px;
+    gap:8px;
+    justify-content:space-between;
+    box-sizing:border-box;
+    margin:4px 0;
+  }
+  .manager-pill .pill-text{flex:1 1 auto;max-width:none;white-space:normal;line-height:1.25;word-break:break-word;}
+  .pill-actions{display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;}
+  .pill-action-btn{height:26px;min-width:26px;border-radius:999px;border:1px solid var(--border);background:#231e47;color:#eceaff;cursor:pointer;padding:0 8px;font-size:12px;}
+  .pill-action-btn.warn{color:#ffb4b4;border-color:#6f3450;background:rgba(111,52,80,.25);}
+  .pill-action-btn:hover{filter:brightness(1.07);}
   .user-backup-btn{
     display:inline-flex;
     align-items:center;
@@ -4729,7 +4744,7 @@ app.get("/admin", async (req,res)=>{
                 <div id="backupConfigsImdb"></div>
                 <div class="manager-subtitle">Trakt backups</div>
                 <div id="backupConfigsTrakt"></div>
-                <div class="manager-subtitle">Custom/Other backups</div>
+                <div class="manager-subtitle">Manual/Custom backups</div>
                 <div id="backupConfigsOther"></div>
               </div>
             </details>
@@ -5461,16 +5476,17 @@ async function render() {
   const listCount = (lsid) => (lists[lsid]?.ids || []).length;
 
   prefs.userBackups = prefs.userBackups || { users: [], traktUsers: [] };
-  function renderPills(id, arr, onRemove){
+  function renderPills(id, arr, onRemove, opts = {}){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
+    const cls = opts.compact ? 'pill' : 'pill manager-pill';
     (arr||[]).forEach((txt, idx)=>{
-      const pill = el('span', {class:'pill'}, [
-        el('span',{text:txt}),
-        el('span',{class:'x',text:'✕'})
+      const removeBtn = el('button',{type:'button', class:'pill-action-btn warn', text:'✕'});
+      const pill = el('span', {class:cls}, [
+        el('span',{class:'pill-text', text:txt}),
+        el('span',{class:'pill-actions'}, [removeBtn])
       ]);
-      pill.querySelector('.x').onclick = ()=> onRemove(idx);
+      removeBtn.onclick = ()=> onRemove(idx);
       wrap.appendChild(pill);
-      wrap.appendChild(document.createTextNode(' '));
     });
     if (!arr || !arr.length) wrap.textContent = '(none)';
   }
@@ -5479,10 +5495,10 @@ async function render() {
     (arr||[]).forEach((txt, idx)=>{
       const backed = ((kind === 'trakt' ? prefs.userBackups?.traktUsers : prefs.userBackups?.users) || []).includes(txt);
       const backupBtn = el('button',{type:'button', class:'user-backup-btn' + (backed ? ' active' : ''), text:'☁'});
-      const pill = el('span', {class:'pill'}, [
+      const removeBtn = el('button',{type:'button', class:'pill-action-btn warn', text:'✕'});
+      const pill = el('span', {class:'pill manager-pill'}, [
         el('span',{class:'pill-text', text:txt}),
-        backupBtn,
-        el('span',{class:'x',text:'✕'})
+        el('span',{class:'pill-actions'}, [backupBtn, removeBtn])
       ]);
       backupBtn.title = backed ? 'Unbackup user source' : 'Backup user source';
       backupBtn.onclick = async ()=>{
@@ -5492,9 +5508,8 @@ async function render() {
         });
         await render();
       };
-      pill.querySelector('.x').onclick = ()=> onRemove(idx);
+      removeBtn.onclick = ()=> onRemove(idx);
       wrap.appendChild(pill);
-      wrap.appendChild(document.createTextNode(' '));
     });
     if (!arr || !arr.length) wrap.textContent = '(none)';
   }
@@ -5542,11 +5557,12 @@ async function render() {
       const sortLabel = cfg.sortKey || 'name_asc';
       const sortNote = sortLabel + (cfg.sortReverse ? ' (reversed)' : '');
       const title = (cfg.name || cfg.id) + ' (' + cfg.id + ')';
-      const pill = el('span', {class:'pill'}, [
-        el('span',{text: title + ' — ' + sortNote}),
-        el('span',{class:'x',text:'✕'})
+      const removeBtn = el('button',{type:'button', class:'pill-action-btn warn', text:'✕'});
+      const pill = el('span', {class:'pill manager-pill'}, [
+        el('span',{class:'pill-text', text: title + ' — ' + sortNote}),
+        el('span',{class:'pill-actions'}, [removeBtn])
       ]);
-      pill.querySelector('.x').onclick = async ()=>{
+      removeBtn.onclick = async ()=>{
         await fetch('/api/link-backup?admin='+ADMIN, {
           method:'POST',
           headers:{'Content-Type':'application/json'},
@@ -5555,13 +5571,12 @@ async function render() {
         await render();
       };
       wrap.appendChild(pill);
-      wrap.appendChild(document.createTextNode(' '));
     };
 
     const configs = prefs.backupConfigs || {};
     const entries = Object.values(configs).sort((a,b)=>String(a.name||a.id).localeCompare(String(b.name||b.id)));
     entries.forEach(cfg => {
-      const id = String(cfg.id || '');
+      const id = String(cfg.id || '').trim();
       const isTrakt = /^trakt:/i.test(id);
       const isImdb = /^ls\d{6,}$/i.test(id) || /^imdb:/i.test(id);
       if (isTrakt) appendBackupPill(backupWrapTrakt, cfg);
@@ -5586,11 +5601,12 @@ async function render() {
     if (blockedCount) blockedCount.textContent = String(blocked.length);
     if (!blocked.length) blockedWrap.textContent = '(none)';
     blocked.forEach(lsid=>{
-      const pill = el('span',{class:'pill'},[
-        el('span',{text:lsid}),
-        el('span',{class:'x',text:'Unblock'})
+      const unblockBtn = el('button',{type:'button', class:'pill-action-btn', text:'Unblock'});
+      const pill = el('span',{class:'pill manager-pill'},[
+        el('span',{class:'pill-text', text:lsid}),
+        el('span',{class:'pill-actions'}, [unblockBtn])
       ]);
-      pill.querySelector('.x').onclick = async ()=>{
+      unblockBtn.onclick = async ()=>{
         await fetch('/api/unblock-list?admin='+ADMIN, {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ lsid })
