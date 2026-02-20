@@ -2255,9 +2255,9 @@ async function harvestSources() {
     }
   }
 
-  // 2) extra IMDb user /lists URLs from prefs
+  // 2) extra IMDb user /lists URLs from prefs + backed-up users
   const users = Array.from(
-    new Set((PREFS.sources?.users || []).map(s => String(s).trim()).filter(Boolean))
+    new Set([...(PREFS.sources?.users || []), ...(PREFS.userBackups?.users || [])].map(s => String(s).trim()).filter(Boolean))
   );
   for (const u of users) {
     try {
@@ -2326,8 +2326,8 @@ async function harvestSources() {
     await sleep(60);
   }
 
-  // 4) Trakt user discovery
-  const traktUsers = Array.from(new Set((PREFS.sources?.traktUsers || []).map(s=>String(s).trim()).filter(Boolean)));
+  // 4) Trakt user discovery (sources + backed-up users)
+  const traktUsers = Array.from(new Set([...(PREFS.sources?.traktUsers || []), ...(PREFS.userBackups?.traktUsers || [])].map(s=>String(s).trim()).filter(Boolean)));
   for (const u of traktUsers) {
     const uname = (u.match(/trakt\.tv\/users\/([^/]+)/i)?.[1]) || u;
     if (!uname) continue;
