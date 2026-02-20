@@ -120,7 +120,11 @@ let PREFS = {
   frozenLists: {},        // { listId: { ids:[], orders:{}, name, url, frozenAt, sortKey, sortReverse, customOrder } }
   customLists: {},        // { listId: { kind, sources, createdAt } }
   linkBackups: [],        // array of list URLs/IDs to keep as backup links
-  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, main, savedAt } }
+  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, main, hidden, savedAt } }
+  userBackups: {          // explicit backed-up user sources
+    users: [],
+    traktUsers: []
+  },
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
@@ -417,6 +421,7 @@ const MANUAL_INDEX_PATH = "manual/index.json";
 const CUSTOM_INDEX_PATH = "custom/index.json";
 const FROZEN_INDEX_PATH = "frozen/index.json";
 const BACKUP_INDEX_PATH = "backup/index.json";
+const USER_BACKUP_PATH = "backup/users.json";
 
 function offlineSafeName(lsid) {
   return String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
@@ -454,6 +459,9 @@ function frozenSupabaseLegacyPath(lsid) {
 }
 function linkBackupSupabaseLegacyPath(lsid) {
   return `backup/${base64Url(lsid)}.json`;
+}
+function userBackupLocalPath() {
+  return `${BACKUP_DIR}/users.json`;
 }
 
 function scheduleSave(snapshot) {
@@ -748,6 +756,7 @@ async function persistSnapshot() {
   await persistFrozenBackups();
   await reconcileFrozenBackups();
   await persistLinkBackupConfigs();
+  await saveUserBackups();
 }
 
 async function saveCustomListBackup(lsid) {
@@ -923,6 +932,7 @@ async function saveLinkBackupConfig(lsid, config) {
     sortReverse: !!config?.sortReverse,
     customOrder: Array.isArray(config?.customOrder) ? config.customOrder : [],
     main: !!config?.main,
+    hidden: !!config?.hidden,
     savedAt: config?.savedAt || Date.now()
   };
   const path = linkBackupPath(lsid);
@@ -956,6 +966,7 @@ async function persistLinkBackupConfigs() {
     entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
     entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : (entry.customOrder || []);
     entry.main = Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid);
+    entry.hidden = Array.isArray(PREFS.hiddenLists) && PREFS.hiddenLists.includes(lsid);
     entry.savedAt = Date.now();
     await saveLinkBackupConfig(lsid, entry);
   }
@@ -1009,6 +1020,7 @@ function restoreLinkBackupConfigEntry(lsid, data) {
     sortReverse: !!data?.sortReverse,
     customOrder: Array.isArray(data?.customOrder) ? data.customOrder.slice() : [],
     main: !!data?.main,
+    hidden: !!data?.hidden,
     savedAt: data?.savedAt || Date.now()
   };
   PREFS.linkBackups = Array.isArray(PREFS.linkBackups) ? PREFS.linkBackups : [];
@@ -1032,7 +1044,58 @@ function restoreLinkBackupConfigEntry(lsid, data) {
     PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
     if (!PREFS.mainLists.includes(lsid)) PREFS.mainLists.push(lsid);
   }
+  if (data?.hidden) {
+    PREFS.hiddenLists = Array.isArray(PREFS.hiddenLists) ? PREFS.hiddenLists : [];
+    if (!PREFS.hiddenLists.includes(lsid)) PREFS.hiddenLists.push(lsid);
+  }
 }
+
+function normalizeUserBackupState(state) {
+  const users = Array.from(new Set((state?.users || []).map(v => String(v || "").trim()).filter(Boolean)));
+  const traktUsers = Array.from(new Set((state?.traktUsers || []).map(v => String(v || "").trim()).filter(Boolean)));
+  return { users, traktUsers };
+}
+
+async function saveUserBackups() {
+  const payload = {
+    ...normalizeUserBackupState(PREFS.userBackups || {}),
+    savedAt: Date.now()
+  };
+  try {
+    await fs.mkdir(BACKUP_DIR, { recursive: true });
+    await fs.writeFile(userBackupLocalPath(), JSON.stringify(payload, null, 2), "utf8");
+  } catch {/* ignore */}
+  try {
+    const { putJSON } = await getSupabaseApi();
+    await putJSON(USER_BACKUP_PATH, payload);
+  } catch (e) {
+    if (SUPABASE_ENABLED) console.warn("[SUPABASE] user backup save failed:", e?.message || e);
+  }
+}
+
+async function loadUserBackups() {
+  try {
+    const { getJSON } = await getSupabaseApi();
+    const data = await getJSON(USER_BACKUP_PATH);
+    if (data) return normalizeUserBackupState(data);
+  } catch {/* ignore */}
+  try {
+    const txt = await fs.readFile(userBackupLocalPath(), "utf8");
+    return normalizeUserBackupState(JSON.parse(txt));
+  } catch {/* ignore */}
+  return { users: [], traktUsers: [] };
+}
+
+function mergeUserBackupsIntoSources() {
+  PREFS.sources = PREFS.sources || { users: [], lists: [], traktUsers: [] };
+  PREFS.userBackups = normalizeUserBackupState(PREFS.userBackups || {});
+  const beforeUsers = PREFS.sources.users.length;
+  const beforeTrakt = PREFS.sources.traktUsers.length;
+  PREFS.sources.users = Array.from(new Set([...(PREFS.sources.users || []), ...PREFS.userBackups.users]));
+  PREFS.sources.traktUsers = Array.from(new Set([...(PREFS.sources.traktUsers || []), ...PREFS.userBackups.traktUsers]));
+  return beforeUsers !== PREFS.sources.users.length || beforeTrakt !== PREFS.sources.traktUsers.length;
+}
+
 async function loadFrozenBackups() {
   const backups = new Map();
   try {
@@ -2641,6 +2704,7 @@ const absoluteBase = req => {
   const host = req.headers["x-forwarded-host"] || req.get("host");
   return `${proto}://${host}`;
 };
+const adminHomeUrl = (req) => `${absoluteBase(req)}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
 const adminCustomizeUrl = (req) => `${absoluteBase(req)}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}&view=customize&mode=normal`;
 
 app.get("/health", (_,res)=>res.status(200).send("ok"));
@@ -2708,8 +2772,7 @@ app.get("/manifest.json", (req,res)=>{
 });
 
 app.get("/configure", (req, res) => {
-  const base = absoluteBase(req);
-  const dest = adminCustomizeUrl(req);
+  const dest = adminHomeUrl(req);
 
   res.type("html").send(`
     <!doctype html><meta charset="utf-8">
@@ -2726,7 +2789,7 @@ app.get("/configure", (req, res) => {
 
 app.get("/webapp.webmanifest", (req, res) => {
   const base = absoluteBase(req);
-  const start = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+  const start = adminHomeUrl(req);
   res.type("application/manifest+json").send(JSON.stringify({
     id: "/admin",
     name: "My Lists Admin",
@@ -3029,6 +3092,7 @@ app.post("/api/prefs", async (req,res) => {
       lists: Array.isArray(src.lists) ? src.lists.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.lists || []),
       traktUsers: Array.isArray(src.traktUsers) ? src.traktUsers.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.traktUsers || [])
     };
+    PREFS.userBackups = normalizeUserBackupState(body.userBackups || PREFS.userBackups || {});
 
     PREFS.blocked = Array.isArray(body.blocked) ? body.blocked.filter(isListId) : (PREFS.blocked || []);
     if (!Array.isArray(body.mainLists) && isListId(body.mainList)) {
@@ -3607,6 +3671,30 @@ app.post("/api/add-sources", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
+
+app.post("/api/user-backup", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const kind = String(req.body.kind || "").trim().toLowerCase();
+    const value = String(req.body.value || "").trim();
+    const enabled = req.body.enabled !== false;
+    if (!value) return res.status(400).send("Missing user value");
+    if (kind !== "imdb" && kind !== "trakt") return res.status(400).send("Invalid user kind");
+    PREFS.userBackups = normalizeUserBackupState(PREFS.userBackups || {});
+    const key = kind === "trakt" ? "traktUsers" : "users";
+    if (enabled) {
+      if (!PREFS.userBackups[key].includes(value)) PREFS.userBackups[key].push(value);
+    } else {
+      PREFS.userBackups[key] = PREFS.userBackups[key].filter(v => v !== value);
+    }
+    await persistSnapshot();
+    res.json({ ok: true, enabled, kind, value });
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Failed to update user backup");
+  }
+});
+
 // backup or remove a list link for recovery
 app.post("/api/link-backup", async (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -3629,7 +3717,7 @@ app.post("/api/link-backup", async (req,res) => {
       const sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
       const customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
       const name = listDisplayName(lsid);
-      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid), savedAt: Date.now() };
+      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid), hidden: Array.isArray(PREFS.hiddenLists) && PREFS.hiddenLists.includes(lsid), savedAt: Date.now() };
       PREFS.backupConfigs[lsid] = config;
       await saveLinkBackupConfig(lsid, config);
     } else {
@@ -4580,10 +4668,14 @@ app.get("/admin", async (req,res)=>{
           <div style="margin-top:10px">
             <div class="mini muted">Your IMDb users:</div>
             <div id="userPills"></div>
+            <div class="mini muted" style="margin-top:6px">Backed up IMDb users:</div>
+            <div id="userBackupPills"></div>
           </div>
           <div style="margin-top:8px">
             <div class="mini muted">Trakt users to scan:</div>
             <div id="traktUserPills"></div>
+            <div class="mini muted" style="margin-top:6px">Backed up Trakt users:</div>
+            <div id="traktUserBackupPills"></div>
           </div>
           <div style="margin-top:8px">
             <div class="mini muted">Your extra lists:</div>
@@ -5316,6 +5408,7 @@ async function render() {
   const refresh = async () => { await render(); };
   const listCount = (lsid) => (lists[lsid]?.ids || []).length;
 
+  prefs.userBackups = prefs.userBackups || { users: [], traktUsers: [] };
   function renderPills(id, arr, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
     (arr||[]).forEach((txt, idx)=>{
@@ -5329,13 +5422,53 @@ async function render() {
     });
     if (!arr || !arr.length) wrap.textContent = '(none)';
   }
-  renderPills('userPills', prefs.sources?.users || [], (i)=>{
+  function renderSourcePills(id, arr, kind, onRemove){
+    const wrap = document.getElementById(id); wrap.innerHTML = '';
+    (arr||[]).forEach((txt, idx)=>{
+      const backed = ((kind === 'trakt' ? prefs.userBackups?.traktUsers : prefs.userBackups?.users) || []).includes(txt);
+      const pill = el('span', {class:'pill'}, [
+        el('span',{text:txt}),
+        el('span',{class:'x',text: backed ? '☁' : '☁︎'}) ,
+        el('span',{class:'x',text:'✕'})
+      ]);
+      const actions = pill.querySelectorAll('.x');
+      actions[0].title = backed ? 'Unbackup user source' : 'Backup user source';
+      actions[0].onclick = async ()=>{
+        await fetch('/api/user-backup?admin='+ADMIN, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ kind, value: txt, enabled: !backed })
+        });
+        await render();
+      };
+      actions[1].onclick = ()=> onRemove(idx);
+      wrap.appendChild(pill);
+      wrap.appendChild(document.createTextNode(' '));
+    });
+    if (!arr || !arr.length) wrap.textContent = '(none)';
+  }
+  renderSourcePills('userPills', prefs.sources?.users || [], 'imdb', (i)=>{
     prefs.sources.users.splice(i,1);
     saveAll('Saved');
   });
-  renderPills('traktUserPills', prefs.sources?.traktUsers || [], (i)=>{
+  renderSourcePills('traktUserPills', prefs.sources?.traktUsers || [], 'trakt', (i)=>{
     prefs.sources.traktUsers.splice(i,1);
     saveAll('Saved');
+  });
+  renderPills('userBackupPills', prefs.userBackups?.users || [], async (i)=>{
+    const value = (prefs.userBackups?.users || [])[i];
+    await fetch('/api/user-backup?admin='+ADMIN, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ kind: 'imdb', value, enabled: false })
+    });
+    await render();
+  });
+  renderPills('traktUserBackupPills', prefs.userBackups?.traktUsers || [], async (i)=>{
+    const value = (prefs.userBackups?.traktUsers || [])[i];
+    await fetch('/api/user-backup?admin='+ADMIN, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ kind: 'trakt', value, enabled: false })
+    });
+    await render();
   });
   renderPills('listPills', prefs.sources?.lists || [], (i)=>{
     prefs.sources.lists.splice(i,1);
@@ -6833,6 +6966,7 @@ async function render() {
       sortOptions: prefs.sortOptions || {},
       upgradeEpisodes: prefs.upgradeEpisodes || false,
       sources: prefs.sources || {},
+      userBackups: prefs.userBackups || {},
       blocked: prefs.blocked || [],
       reconcileFrozenState: true
     };
@@ -6902,6 +7036,16 @@ render();
         await persistSnapshot();
         console.log("[BOOT] restored frozen lists from backup");
       }
+    }
+
+    const userBackups = await loadUserBackups();
+    PREFS.userBackups = normalizeUserBackupState({ ...(PREFS.userBackups || {}), ...userBackups });
+    const mergedUserSources = mergeUserBackupsIntoSources();
+    if (mergedUserSources) {
+      LAST_MANIFEST_KEY = "";
+      MANIFEST_REV++;
+      await persistSnapshot();
+      console.log("[BOOT] restored user sources from backup");
     }
 
     const linkBackupConfigs = await loadLinkBackupConfigs();
