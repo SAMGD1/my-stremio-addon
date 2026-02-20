@@ -4142,6 +4142,24 @@ app.get("/admin", async (req,res)=>{
   }
   .pill input{margin-right:4px}
   .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
+  .pill .pill-text{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .user-backup-btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    min-width:28px;
+    height:28px;
+    border-radius:999px;
+    border:1px solid var(--border);
+    background:rgba(108,92,231,.10);
+    color:#c8c5ff;
+    font-size:15px;
+    line-height:1;
+    cursor:pointer;
+    padding:0 8px;
+  }
+  .user-backup-btn.active{background:rgba(108,92,231,.24);border-color:#7f78ff;color:#eceaff;}
+  .user-backup-btn:hover{filter:brightness(1.08);}
   input[type="text"]{
     background:#1c1837;
     color:var(--text);
@@ -4536,6 +4554,13 @@ app.get("/admin", async (req,res)=>{
   .collapse-body.open{display:block;}
   .link-tools{margin-top:8px;}
   .link-pills{margin-top:6px;}
+  .manager-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-top:10px;}
+  .manager-group{border:1px solid rgba(68,58,122,.7);background:rgba(17,13,40,.7);border-radius:12px;padding:8px 10px;}
+  .manager-group > summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;font-weight:600;color:#ddd7ff;}
+  .manager-group > summary::-webkit-details-marker{display:none;}
+  .manager-group > summary .mini{font-weight:500;}
+  .manager-group .group-body{margin-top:8px;}
+  .manager-subtitle{font-size:12px;color:var(--muted);margin:8px 0 4px;}
   .icon-btn{
     display:inline-flex;
     align-items:center;
@@ -4669,29 +4694,52 @@ app.get("/admin", async (req,res)=>{
           <span>Show</span>
         </button>
         <div id="linkManagers" class="collapse-body">
-          <div style="margin-top:10px">
-            <div class="mini muted">Your IMDb users:</div>
-            <div id="userPills"></div>
-            <div class="mini muted" style="margin-top:6px">Backed up IMDb users:</div>
-            <div id="userBackupPills"></div>
-          </div>
-          <div style="margin-top:8px">
-            <div class="mini muted">Trakt users to scan:</div>
-            <div id="traktUserPills"></div>
-            <div class="mini muted" style="margin-top:6px">Backed up Trakt users:</div>
-            <div id="traktUserBackupPills"></div>
-          </div>
-          <div style="margin-top:8px">
-            <div class="mini muted">Your extra lists:</div>
-            <div id="listPills"></div>
-          </div>
-          <div style="margin-top:8px">
-            <div class="mini muted">Backups:</div>
-            <div id="backupConfigs"></div>
-          </div>
-          <div style="margin-top:12px">
-            <div class="mini muted">Blocked lists (won't re-add on sync):</div>
-            <div id="blockedPills"></div>
+          <div class="manager-grid">
+            <details class="manager-group" open>
+              <summary><span>IMDb Users</span><span class="mini" id="imdbUsersCount"></span></summary>
+              <div class="group-body">
+                <div class="manager-subtitle">Sources</div>
+                <div id="userPills"></div>
+                <div class="manager-subtitle">Backed up</div>
+                <div id="userBackupPills"></div>
+              </div>
+            </details>
+
+            <details class="manager-group" open>
+              <summary><span>Trakt Users</span><span class="mini" id="traktUsersCount"></span></summary>
+              <div class="group-body">
+                <div class="manager-subtitle">Sources</div>
+                <div id="traktUserPills"></div>
+                <div class="manager-subtitle">Backed up</div>
+                <div id="traktUserBackupPills"></div>
+              </div>
+            </details>
+
+            <details class="manager-group" open>
+              <summary><span>Extra Lists</span><span class="mini" id="extraListsCount"></span></summary>
+              <div class="group-body">
+                <div id="listPills"></div>
+              </div>
+            </details>
+
+            <details class="manager-group" open>
+              <summary><span>Backed-up Lists</span><span class="mini" id="backupListsCount"></span></summary>
+              <div class="group-body">
+                <div class="manager-subtitle">IMDb backups</div>
+                <div id="backupConfigsImdb"></div>
+                <div class="manager-subtitle">Trakt backups</div>
+                <div id="backupConfigsTrakt"></div>
+                <div class="manager-subtitle">Custom/Other backups</div>
+                <div id="backupConfigsOther"></div>
+              </div>
+            </details>
+
+            <details class="manager-group" open>
+              <summary><span>Blocked Lists</span><span class="mini" id="blockedListsCount"></span></summary>
+              <div class="group-body">
+                <div id="blockedPills"></div>
+              </div>
+            </details>
           </div>
         </div>
       </div>
@@ -5430,21 +5478,21 @@ async function render() {
     const wrap = document.getElementById(id); wrap.innerHTML = '';
     (arr||[]).forEach((txt, idx)=>{
       const backed = ((kind === 'trakt' ? prefs.userBackups?.traktUsers : prefs.userBackups?.users) || []).includes(txt);
+      const backupBtn = el('button',{type:'button', class:'user-backup-btn' + (backed ? ' active' : ''), text:'☁'});
       const pill = el('span', {class:'pill'}, [
-        el('span',{text:txt}),
-        el('span',{class:'x',text: backed ? '☁' : '☁︎'}) ,
+        el('span',{class:'pill-text', text:txt}),
+        backupBtn,
         el('span',{class:'x',text:'✕'})
       ]);
-      const actions = pill.querySelectorAll('.x');
-      actions[0].title = backed ? 'Unbackup user source' : 'Backup user source';
-      actions[0].onclick = async ()=>{
+      backupBtn.title = backed ? 'Unbackup user source' : 'Backup user source';
+      backupBtn.onclick = async ()=>{
         await fetch('/api/user-backup?admin='+ADMIN, {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ kind, value: txt, enabled: !backed })
         });
         await render();
       };
-      actions[1].onclick = ()=> onRemove(idx);
+      pill.querySelector('.x').onclick = ()=> onRemove(idx);
       wrap.appendChild(pill);
       wrap.appendChild(document.createTextNode(' '));
     });
@@ -5478,36 +5526,55 @@ async function render() {
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
   });
+  const setCount = (id, value) => { const n = document.getElementById(id); if (n) n.textContent = String(value); };
+  setCount('imdbUsersCount', (prefs.sources?.users || []).length);
+  setCount('traktUsersCount', (prefs.sources?.traktUsers || []).length);
+  setCount('extraListsCount', (prefs.sources?.lists || []).length);
   {
-    const backupWrap = document.getElementById('backupConfigs');
-    if (backupWrap) {
-      backupWrap.innerHTML = '';
-      const configs = prefs.backupConfigs || {};
-      const entries = Object.values(configs);
-      if (!entries.length) {
-        backupWrap.textContent = '(none)';
-      } else {
-        entries.sort((a,b)=>String(a.name||a.id).localeCompare(String(b.name||b.id))).forEach(cfg=>{
-          const sortLabel = cfg.sortKey || 'name_asc';
-          const sortNote = sortLabel + (cfg.sortReverse ? ' (reversed)' : '');
-          const title = (cfg.name || cfg.id) + ' (' + cfg.id + ')';
-          const pill = el('span', {class:'pill'}, [
-            el('span',{text: title + ' — ' + sortNote}),
-            el('span',{class:'x',text:'✕'})
-          ]);
-          pill.querySelector('.x').onclick = async ()=>{
-            await fetch('/api/link-backup?admin='+ADMIN, {
-              method:'POST',
-              headers:{'Content-Type':'application/json'},
-              body: JSON.stringify({ lsid: cfg.id, enabled: false })
-            });
-            await render();
-          };
-          backupWrap.appendChild(pill);
-          backupWrap.appendChild(document.createTextNode(' '));
+    const backupWrapImdb = document.getElementById('backupConfigsImdb');
+    const backupWrapTrakt = document.getElementById('backupConfigsTrakt');
+    const backupWrapOther = document.getElementById('backupConfigsOther');
+    const clearWrap = (el) => { if (el) el.innerHTML = ''; };
+    clearWrap(backupWrapImdb); clearWrap(backupWrapTrakt); clearWrap(backupWrapOther);
+
+    const appendBackupPill = (wrap, cfg) => {
+      if (!wrap) return;
+      const sortLabel = cfg.sortKey || 'name_asc';
+      const sortNote = sortLabel + (cfg.sortReverse ? ' (reversed)' : '');
+      const title = (cfg.name || cfg.id) + ' (' + cfg.id + ')';
+      const pill = el('span', {class:'pill'}, [
+        el('span',{text: title + ' — ' + sortNote}),
+        el('span',{class:'x',text:'✕'})
+      ]);
+      pill.querySelector('.x').onclick = async ()=>{
+        await fetch('/api/link-backup?admin='+ADMIN, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lsid: cfg.id, enabled: false })
         });
-      }
-    }
+        await render();
+      };
+      wrap.appendChild(pill);
+      wrap.appendChild(document.createTextNode(' '));
+    };
+
+    const configs = prefs.backupConfigs || {};
+    const entries = Object.values(configs).sort((a,b)=>String(a.name||a.id).localeCompare(String(b.name||b.id)));
+    entries.forEach(cfg => {
+      const id = String(cfg.id || '');
+      const isTrakt = /^trakt:/i.test(id);
+      const isImdb = /^ls\d{6,}$/i.test(id) || /^imdb:/i.test(id);
+      if (isTrakt) appendBackupPill(backupWrapTrakt, cfg);
+      else if (isImdb) appendBackupPill(backupWrapImdb, cfg);
+      else appendBackupPill(backupWrapOther, cfg);
+    });
+
+    if (backupWrapImdb && !backupWrapImdb.childElementCount) backupWrapImdb.textContent = '(none)';
+    if (backupWrapTrakt && !backupWrapTrakt.childElementCount) backupWrapTrakt.textContent = '(none)';
+    if (backupWrapOther && !backupWrapOther.childElementCount) backupWrapOther.textContent = '(none)';
+
+    const backupCount = document.getElementById('backupListsCount');
+    if (backupCount) backupCount.textContent = String(entries.length);
   }
 
   // Blocked pills with Unblock action
@@ -5515,6 +5582,8 @@ async function render() {
     const blockedWrap = document.getElementById('blockedPills');
     blockedWrap.innerHTML = '';
     const blocked = prefs.blocked || [];
+    const blockedCount = document.getElementById('blockedListsCount');
+    if (blockedCount) blockedCount.textContent = String(blocked.length);
     if (!blocked.length) blockedWrap.textContent = '(none)';
     blocked.forEach(lsid=>{
       const pill = el('span',{class:'pill'},[
