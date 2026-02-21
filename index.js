@@ -2744,9 +2744,9 @@ function catalogs(){
     type: "my lists",
     id: `list:${lsid}`,
     name: `${isFrozenList(lsid) ? "⭐" : "🗂"} ${listDisplayName(lsid)}`,
-    extraSupported: ["search","skip","limit","sort","genre"],
+    extraSupported: ["skip","limit","sort","genre"],
     extra: [
-      { name:"search" }, { name:"skip" }, { name:"limit" },
+      { name:"skip" }, { name:"limit" },
       {
         name:"sort",
         options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS,
