@@ -7139,14 +7139,21 @@ render();
 
     const linkBackupConfigs = await loadLinkBackupConfigs();
     if (linkBackupConfigs.size) {
-      let restoredLinks = false;
+      const beforeConfigCount = Object.keys(PREFS.backupConfigs || {}).length;
+      const beforeHiddenCount = (PREFS.hiddenLists || []).length;
+      const beforeMainCount = (PREFS.mainLists || []).length;
       for (const [lsid, data] of linkBackupConfigs.entries()) {
-        const hasConfig = PREFS.backupConfigs && PREFS.backupConfigs[lsid];
-        if (!hasConfig) {
-          restoreLinkBackupConfigEntry(lsid, data);
-          restoredLinks = true;
-        }
+        // Always reconcile from backup payload so hidden/main states survive restarts
+        // even when backupConfigs already exist in snapshot.
+        restoreLinkBackupConfigEntry(lsid, data);
       }
+      const afterConfigCount = Object.keys(PREFS.backupConfigs || {}).length;
+      const afterHiddenCount = (PREFS.hiddenLists || []).length;
+      const afterMainCount = (PREFS.mainLists || []).length;
+      const restoredLinks =
+        afterConfigCount !== beforeConfigCount ||
+        afterHiddenCount !== beforeHiddenCount ||
+        afterMainCount !== beforeMainCount;
       if (restoredLinks) {
         LAST_MANIFEST_KEY = "";
         MANIFEST_REV++;
