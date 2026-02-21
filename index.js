@@ -120,13 +120,18 @@ let PREFS = {
   frozenLists: {},        // { listId: { ids:[], orders:{}, name, url, frozenAt, sortKey, sortReverse, customOrder } }
   customLists: {},        // { listId: { kind, sources, createdAt } }
   linkBackups: [],        // array of list URLs/IDs to keep as backup links
-  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, main, savedAt } }
+  backupConfigs: {},      // { listId: { id, name, url, sortKey, sortReverse, customOrder, main, hidden, savedAt } }
+  userBackups: {          // explicit backed-up user sources
+    users: [],
+    traktUsers: []
+  },
   sources: {              // extra sources you add in the UI
     users: [],            // array of IMDb user /lists URLs
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
     traktUsers: []        // array of Trakt user URLs or usernames
   },
-  blocked: []             // listIds you removed/blocked (IMDb or Trakt)
+  blocked: [],            // listIds you removed/blocked (IMDb or Trakt)
+  catalogSearchEnabled: false // include search extra in manifest catalogs
 };
 
 const BEST   = new Map(); // Map<tt, { kind, meta }>
@@ -417,6 +422,7 @@ const MANUAL_INDEX_PATH = "manual/index.json";
 const CUSTOM_INDEX_PATH = "custom/index.json";
 const FROZEN_INDEX_PATH = "frozen/index.json";
 const BACKUP_INDEX_PATH = "backup/index.json";
+const USER_BACKUP_PATH = "backup/users.json";
 
 function offlineSafeName(lsid) {
   return String(lsid || "").replace(/[^a-z0-9._:-]+/gi, "_");
@@ -454,6 +460,9 @@ function frozenSupabaseLegacyPath(lsid) {
 }
 function linkBackupSupabaseLegacyPath(lsid) {
   return `backup/${base64Url(lsid)}.json`;
+}
+function userBackupLocalPath() {
+  return `${BACKUP_DIR}/users.json`;
 }
 
 function scheduleSave(snapshot) {
@@ -748,6 +757,7 @@ async function persistSnapshot() {
   await persistFrozenBackups();
   await reconcileFrozenBackups();
   await persistLinkBackupConfigs();
+  await saveUserBackups();
 }
 
 async function saveCustomListBackup(lsid) {
@@ -923,6 +933,7 @@ async function saveLinkBackupConfig(lsid, config) {
     sortReverse: !!config?.sortReverse,
     customOrder: Array.isArray(config?.customOrder) ? config.customOrder : [],
     main: !!config?.main,
+    hidden: !!config?.hidden,
     savedAt: config?.savedAt || Date.now()
   };
   const path = linkBackupPath(lsid);
@@ -956,6 +967,7 @@ async function persistLinkBackupConfigs() {
     entry.sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
     entry.customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : (entry.customOrder || []);
     entry.main = Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid);
+    entry.hidden = Array.isArray(PREFS.hiddenLists) && PREFS.hiddenLists.includes(lsid);
     entry.savedAt = Date.now();
     await saveLinkBackupConfig(lsid, entry);
   }
@@ -1009,6 +1021,7 @@ function restoreLinkBackupConfigEntry(lsid, data) {
     sortReverse: !!data?.sortReverse,
     customOrder: Array.isArray(data?.customOrder) ? data.customOrder.slice() : [],
     main: !!data?.main,
+    hidden: !!data?.hidden,
     savedAt: data?.savedAt || Date.now()
   };
   PREFS.linkBackups = Array.isArray(PREFS.linkBackups) ? PREFS.linkBackups : [];
@@ -1032,7 +1045,58 @@ function restoreLinkBackupConfigEntry(lsid, data) {
     PREFS.mainLists = Array.isArray(PREFS.mainLists) ? PREFS.mainLists : [];
     if (!PREFS.mainLists.includes(lsid)) PREFS.mainLists.push(lsid);
   }
+  if (data?.hidden) {
+    PREFS.hiddenLists = Array.isArray(PREFS.hiddenLists) ? PREFS.hiddenLists : [];
+    if (!PREFS.hiddenLists.includes(lsid)) PREFS.hiddenLists.push(lsid);
+  }
 }
+
+function normalizeUserBackupState(state) {
+  const users = Array.from(new Set((state?.users || []).map(v => String(v || "").trim()).filter(Boolean)));
+  const traktUsers = Array.from(new Set((state?.traktUsers || []).map(v => String(v || "").trim()).filter(Boolean)));
+  return { users, traktUsers };
+}
+
+async function saveUserBackups() {
+  const payload = {
+    ...normalizeUserBackupState(PREFS.userBackups || {}),
+    savedAt: Date.now()
+  };
+  try {
+    await fs.mkdir(BACKUP_DIR, { recursive: true });
+    await fs.writeFile(userBackupLocalPath(), JSON.stringify(payload, null, 2), "utf8");
+  } catch {/* ignore */}
+  try {
+    const { putJSON } = await getSupabaseApi();
+    await putJSON(USER_BACKUP_PATH, payload);
+  } catch (e) {
+    if (SUPABASE_ENABLED) console.warn("[SUPABASE] user backup save failed:", e?.message || e);
+  }
+}
+
+async function loadUserBackups() {
+  try {
+    const { getJSON } = await getSupabaseApi();
+    const data = await getJSON(USER_BACKUP_PATH);
+    if (data) return normalizeUserBackupState(data);
+  } catch {/* ignore */}
+  try {
+    const txt = await fs.readFile(userBackupLocalPath(), "utf8");
+    return normalizeUserBackupState(JSON.parse(txt));
+  } catch {/* ignore */}
+  return { users: [], traktUsers: [] };
+}
+
+function mergeUserBackupsIntoSources() {
+  PREFS.sources = PREFS.sources || { users: [], lists: [], traktUsers: [] };
+  PREFS.userBackups = normalizeUserBackupState(PREFS.userBackups || {});
+  const beforeUsers = PREFS.sources.users.length;
+  const beforeTrakt = PREFS.sources.traktUsers.length;
+  PREFS.sources.users = Array.from(new Set([...(PREFS.sources.users || []), ...PREFS.userBackups.users]));
+  PREFS.sources.traktUsers = Array.from(new Set([...(PREFS.sources.traktUsers || []), ...PREFS.userBackups.traktUsers]));
+  return beforeUsers !== PREFS.sources.users.length || beforeTrakt !== PREFS.sources.traktUsers.length;
+}
+
 async function loadFrozenBackups() {
   const backups = new Map();
   try {
@@ -2192,9 +2256,9 @@ async function harvestSources() {
     }
   }
 
-  // 2) extra IMDb user /lists URLs from prefs
+  // 2) extra IMDb user /lists URLs from prefs + backed-up users
   const users = Array.from(
-    new Set((PREFS.sources?.users || []).map(s => String(s).trim()).filter(Boolean))
+    new Set([...(PREFS.sources?.users || []), ...(PREFS.userBackups?.users || [])].map(s => String(s).trim()).filter(Boolean))
   );
   for (const u of users) {
     try {
@@ -2263,8 +2327,8 @@ async function harvestSources() {
     await sleep(60);
   }
 
-  // 4) Trakt user discovery
-  const traktUsers = Array.from(new Set((PREFS.sources?.traktUsers || []).map(s=>String(s).trim()).filter(Boolean)));
+  // 4) Trakt user discovery (sources + backed-up users)
+  const traktUsers = Array.from(new Set([...(PREFS.sources?.traktUsers || []), ...(PREFS.userBackups?.traktUsers || [])].map(s=>String(s).trim()).filter(Boolean)));
   for (const u of traktUsers) {
     const uname = (u.match(/trakt\.tv\/users\/([^/]+)/i)?.[1]) || u;
     if (!uname) continue;
@@ -2311,11 +2375,15 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       seen.add(d.id);
     }
     const blocked = new Set(PREFS.blocked || []);
+    const frozenSet = new Set(Object.keys(PREFS.frozenLists || {}));
     for (const id of Object.keys(LISTS)) {
       const isCustom = isCustomListId(id);
       const hasCustomMeta = !!(PREFS.customLists && PREFS.customLists[id]);
+      const isFrozen = frozenSet.has(id);
       if (isCustom && !hasCustomMeta) continue;
-      if (!seen.has(id) && !blocked.has(id)) next[id] = LISTS[id];
+      // if a source was removed, drop regular discovered lists on next sync;
+      // keep only explicitly managed custom/frozen lists.
+      if (!seen.has(id) && !blocked.has(id) && (hasCustomMeta || isFrozen)) next[id] = LISTS[id];
     }
 
     const customIds = Object.keys(PREFS.customLists || {});
@@ -2641,6 +2709,7 @@ const absoluteBase = req => {
   const host = req.headers["x-forwarded-host"] || req.get("host");
   return `${proto}://${host}`;
 };
+const adminHomeUrl = (req) => `${absoluteBase(req)}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
 const adminCustomizeUrl = (req) => `${absoluteBase(req)}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}&view=customize&mode=normal`;
 
 app.get("/health", (_,res)=>res.status(200).send("ok"));
@@ -2672,13 +2741,15 @@ function getEnabledOrderedIds() {
 }
 function catalogs(){
   const ids = getEnabledOrderedIds();
+  const searchEnabled = !!PREFS.catalogSearchEnabled;
   return ids.map(lsid => ({
     type: "my lists",
     id: `list:${lsid}`,
     name: `${isFrozenList(lsid) ? "⭐" : "🗂"} ${listDisplayName(lsid)}`,
-    extraSupported: ["search","skip","limit","sort","genre"],
+    extraSupported: searchEnabled ? ["search","skip","limit","sort","genre"] : ["skip","limit","sort","genre"],
     extra: [
-      { name:"search" }, { name:"skip" }, { name:"limit" },
+      ...(searchEnabled ? [{ name:"search" }] : []),
+      { name:"skip" }, { name:"limit" },
       {
         name:"sort",
         options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS,
@@ -2708,8 +2779,7 @@ app.get("/manifest.json", (req,res)=>{
 });
 
 app.get("/configure", (req, res) => {
-  const base = absoluteBase(req);
-  const dest = adminCustomizeUrl(req);
+  const dest = adminHomeUrl(req);
 
   res.type("html").send(`
     <!doctype html><meta charset="utf-8">
@@ -2726,7 +2796,7 @@ app.get("/configure", (req, res) => {
 
 app.get("/webapp.webmanifest", (req, res) => {
   const base = absoluteBase(req);
-  const start = `${base}/admin?admin=${encodeURIComponent(ADMIN_PASSWORD)}`;
+  const start = adminHomeUrl(req);
   res.type("application/manifest+json").send(JSON.stringify({
     id: "/admin",
     name: "My Lists Admin",
@@ -3029,6 +3099,8 @@ app.post("/api/prefs", async (req,res) => {
       lists: Array.isArray(src.lists) ? src.lists.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.lists || []),
       traktUsers: Array.isArray(src.traktUsers) ? src.traktUsers.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.traktUsers || [])
     };
+    PREFS.userBackups = normalizeUserBackupState(body.userBackups || PREFS.userBackups || {});
+    if (typeof body.catalogSearchEnabled === "boolean") PREFS.catalogSearchEnabled = body.catalogSearchEnabled;
 
     PREFS.blocked = Array.isArray(body.blocked) ? body.blocked.filter(isListId) : (PREFS.blocked || []);
     if (!Array.isArray(body.mainLists) && isListId(body.mainList)) {
@@ -3050,6 +3122,21 @@ app.post("/api/prefs", async (req,res) => {
 
     res.status(200).send("Saved. Manifest rev " + MANIFEST_REV);
   }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
+});
+
+app.post("/api/search-visibility", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const enabled = req.body?.enabled !== false;
+    PREFS.catalogSearchEnabled = !!enabled;
+    LAST_MANIFEST_KEY = "";
+    MANIFEST_REV++;
+    await persistSnapshot();
+    res.json({ ok: true, enabled: !!PREFS.catalogSearchEnabled, manifestRev: MANIFEST_REV });
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Failed");
+  }
 });
 
 app.post("/api/tmdb-verify", async (req, res) => {
@@ -3607,6 +3694,30 @@ app.post("/api/add-sources", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
+
+app.post("/api/user-backup", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const kind = String(req.body.kind || "").trim().toLowerCase();
+    const value = String(req.body.value || "").trim();
+    const enabled = req.body.enabled !== false;
+    if (!value) return res.status(400).send("Missing user value");
+    if (kind !== "imdb" && kind !== "trakt") return res.status(400).send("Invalid user kind");
+    PREFS.userBackups = normalizeUserBackupState(PREFS.userBackups || {});
+    const key = kind === "trakt" ? "traktUsers" : "users";
+    if (enabled) {
+      if (!PREFS.userBackups[key].includes(value)) PREFS.userBackups[key].push(value);
+    } else {
+      PREFS.userBackups[key] = PREFS.userBackups[key].filter(v => v !== value);
+    }
+    await persistSnapshot();
+    res.json({ ok: true, enabled, kind, value });
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Failed to update user backup");
+  }
+});
+
 // backup or remove a list link for recovery
 app.post("/api/link-backup", async (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
@@ -3629,7 +3740,7 @@ app.post("/api/link-backup", async (req,res) => {
       const sortReverse = !!(PREFS.sortReverse && PREFS.sortReverse[lsid]);
       const customOrder = Array.isArray(PREFS.customOrder?.[lsid]) ? PREFS.customOrder[lsid].slice() : [];
       const name = listDisplayName(lsid);
-      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid), savedAt: Date.now() };
+      const config = { id: lsid, name, url: value, sortKey, sortReverse, customOrder, main: Array.isArray(PREFS.mainLists) && PREFS.mainLists.includes(lsid), hidden: Array.isArray(PREFS.hiddenLists) && PREFS.hiddenLists.includes(lsid), savedAt: Date.now() };
       PREFS.backupConfigs[lsid] = config;
       await saveLinkBackupConfig(lsid, config);
     } else {
@@ -4050,6 +4161,39 @@ app.get("/admin", async (req,res)=>{
   }
   .pill input{margin-right:4px}
   .pill .x{cursor:pointer;color:#ffb4b4;font-size:11px}
+  .pill .pill-text{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .manager-pill{
+    width:100%;
+    max-width:100%;
+    border-radius:12px;
+    padding:6px 8px;
+    gap:8px;
+    justify-content:space-between;
+    box-sizing:border-box;
+    margin:4px 0;
+  }
+  .manager-pill .pill-text{flex:1 1 auto;max-width:none;white-space:normal;line-height:1.25;word-break:break-word;}
+  .pill-actions{display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;}
+  .pill-action-btn{height:26px;min-width:26px;border-radius:999px;border:1px solid var(--border);background:#231e47;color:#eceaff;cursor:pointer;padding:0 8px;font-size:12px;}
+  .pill-action-btn.warn{color:#ffb4b4;border-color:#6f3450;background:rgba(111,52,80,.25);}
+  .pill-action-btn:hover{filter:brightness(1.07);}
+  .user-backup-btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    min-width:28px;
+    height:28px;
+    border-radius:999px;
+    border:1px solid var(--border);
+    background:rgba(108,92,231,.10);
+    color:#c8c5ff;
+    font-size:15px;
+    line-height:1;
+    cursor:pointer;
+    padding:0 8px;
+  }
+  .user-backup-btn.active{background:rgba(108,92,231,.24);border-color:#7f78ff;color:#eceaff;}
+  .user-backup-btn:hover{filter:brightness(1.08);}
   input[type="text"]{
     background:#1c1837;
     color:var(--text);
@@ -4444,6 +4588,13 @@ app.get("/admin", async (req,res)=>{
   .collapse-body.open{display:block;}
   .link-tools{margin-top:8px;}
   .link-pills{margin-top:6px;}
+  .manager-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-top:10px;}
+  .manager-group{border:1px solid rgba(68,58,122,.7);background:rgba(17,13,40,.7);border-radius:12px;padding:8px 10px;}
+  .manager-group > summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;font-weight:600;color:#ddd7ff;}
+  .manager-group > summary::-webkit-details-marker{display:none;}
+  .manager-group > summary .mini{font-weight:500;}
+  .manager-group .group-body{margin-top:8px;}
+  .manager-subtitle{font-size:12px;color:var(--muted);margin:8px 0 4px;}
   .icon-btn{
     display:inline-flex;
     align-items:center;
@@ -4499,6 +4650,11 @@ app.get("/admin", async (req,res)=>{
             <span class="mini muted">If the button doesn’t work, copy the manifest URL into Stremio manually.</span>
           </div>
           <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, or ordering change.</p>
+          <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span class="mini muted">Show this addon in Stremio search</span>
+            <button type="button" class="btn2" id="searchVisibilityToggle">Loading…</button>
+            <span class="mini muted" id="searchVisibilityNote"></span>
+          </div>
         </div>
         <div class="snapshot-actions">
           <h4>Sync Controls</h4>
@@ -4577,25 +4733,52 @@ app.get("/admin", async (req,res)=>{
           <span>Show</span>
         </button>
         <div id="linkManagers" class="collapse-body">
-          <div style="margin-top:10px">
-            <div class="mini muted">Your IMDb users:</div>
-            <div id="userPills"></div>
-          </div>
-          <div style="margin-top:8px">
-            <div class="mini muted">Trakt users to scan:</div>
-            <div id="traktUserPills"></div>
-          </div>
-          <div style="margin-top:8px">
-            <div class="mini muted">Your extra lists:</div>
-            <div id="listPills"></div>
-          </div>
-          <div style="margin-top:8px">
-            <div class="mini muted">Backups:</div>
-            <div id="backupConfigs"></div>
-          </div>
-          <div style="margin-top:12px">
-            <div class="mini muted">Blocked lists (won't re-add on sync):</div>
-            <div id="blockedPills"></div>
+          <div class="manager-grid">
+            <details class="manager-group">
+              <summary><span>IMDb Users</span><span class="mini" id="imdbUsersCount"></span></summary>
+              <div class="group-body">
+                <div class="manager-subtitle">Sources</div>
+                <div id="userPills"></div>
+                <div class="manager-subtitle">Backed up</div>
+                <div id="userBackupPills"></div>
+              </div>
+            </details>
+
+            <details class="manager-group">
+              <summary><span>Trakt Users</span><span class="mini" id="traktUsersCount"></span></summary>
+              <div class="group-body">
+                <div class="manager-subtitle">Sources</div>
+                <div id="traktUserPills"></div>
+                <div class="manager-subtitle">Backed up</div>
+                <div id="traktUserBackupPills"></div>
+              </div>
+            </details>
+
+            <details class="manager-group">
+              <summary><span>Extra Lists</span><span class="mini" id="extraListsCount"></span></summary>
+              <div class="group-body">
+                <div id="listPills"></div>
+              </div>
+            </details>
+
+            <details class="manager-group">
+              <summary><span>Backed-up Lists</span><span class="mini" id="backupListsCount"></span></summary>
+              <div class="group-body">
+                <div class="manager-subtitle">IMDb backups</div>
+                <div id="backupConfigsImdb"></div>
+                <div class="manager-subtitle">Trakt backups</div>
+                <div id="backupConfigsTrakt"></div>
+                <div class="manager-subtitle">Manual/Custom backups</div>
+                <div id="backupConfigsOther"></div>
+              </div>
+            </details>
+
+            <details class="manager-group">
+              <summary><span>Blocked Lists</span><span class="mini" id="blockedListsCount"></span></summary>
+              <div class="group-body">
+                <div id="blockedPills"></div>
+              </div>
+            </details>
           </div>
         </div>
       </div>
@@ -4724,6 +4907,45 @@ document.addEventListener('DOMContentLoaded', () => {
       if (SECRET) url += '?key=' + SECRET;
       window.location.href = url;
     };
+  }
+
+
+  const searchToggleBtn = document.getElementById('searchVisibilityToggle');
+  const searchToggleNote = document.getElementById('searchVisibilityNote');
+  async function loadSearchVisibility(){
+    if (!searchToggleBtn) return;
+    try {
+      const prefs = await getPrefs();
+      const enabled = !!prefs.catalogSearchEnabled;
+      searchToggleBtn.textContent = enabled ? 'ON' : 'OFF';
+      searchToggleBtn.style.background = enabled ? '#1f6f4a' : '#3f4458';
+      searchToggleBtn.style.borderColor = enabled ? '#3abf7a' : '#6b7280';
+      searchToggleBtn.style.color = '#fff';
+      searchToggleBtn.title = enabled ? 'Click to disable search visibility' : 'Click to enable search visibility';
+      if (searchToggleNote) searchToggleNote.textContent = enabled ? 'Enabled: addon appears in search.' : 'Disabled: addon hidden from search.';
+    } catch (e) {
+      searchToggleBtn.textContent = 'Unavailable';
+    }
+  }
+  if (searchToggleBtn) {
+    searchToggleBtn.onclick = async () => {
+      const turningOn = searchToggleBtn.textContent !== 'ON';
+      searchToggleBtn.disabled = true;
+      try {
+        const r = await fetch('/api/search-visibility?admin=' + ADMIN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: turningOn })
+        });
+        if (!r.ok) throw new Error(await r.text());
+      } catch (e) {
+        if (searchToggleNote) searchToggleNote.textContent = e.message || 'Failed to save';
+      } finally {
+        searchToggleBtn.disabled = false;
+        await loadSearchVisibility();
+      }
+    };
+    loadSearchVisibility();
   }
 
   document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -5316,61 +5538,121 @@ async function render() {
   const refresh = async () => { await render(); };
   const listCount = (lsid) => (lists[lsid]?.ids || []).length;
 
-  function renderPills(id, arr, onRemove){
+  prefs.userBackups = prefs.userBackups || { users: [], traktUsers: [] };
+  function renderPills(id, arr, onRemove, opts = {}){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
+    const cls = opts.compact ? 'pill' : 'pill manager-pill';
     (arr||[]).forEach((txt, idx)=>{
-      const pill = el('span', {class:'pill'}, [
-        el('span',{text:txt}),
-        el('span',{class:'x',text:'✕'})
+      const removeBtn = el('button',{type:'button', class:'pill-action-btn warn', text:'✕'});
+      const pill = el('span', {class:cls}, [
+        el('span',{class:'pill-text', text:txt}),
+        el('span',{class:'pill-actions'}, [removeBtn])
       ]);
-      pill.querySelector('.x').onclick = ()=> onRemove(idx);
+      removeBtn.onclick = ()=> onRemove(idx);
       wrap.appendChild(pill);
-      wrap.appendChild(document.createTextNode(' '));
     });
     if (!arr || !arr.length) wrap.textContent = '(none)';
   }
-  renderPills('userPills', prefs.sources?.users || [], (i)=>{
+  function renderSourcePills(id, arr, kind, onRemove){
+    const wrap = document.getElementById(id); wrap.innerHTML = '';
+    (arr||[]).forEach((txt, idx)=>{
+      const backed = ((kind === 'trakt' ? prefs.userBackups?.traktUsers : prefs.userBackups?.users) || []).includes(txt);
+      const backupBtn = el('button',{type:'button', class:'user-backup-btn' + (backed ? ' active' : ''), text:'☁'});
+      const removeBtn = el('button',{type:'button', class:'pill-action-btn warn', text:'✕'});
+      const pill = el('span', {class:'pill manager-pill'}, [
+        el('span',{class:'pill-text', text:txt}),
+        el('span',{class:'pill-actions'}, [backupBtn, removeBtn])
+      ]);
+      backupBtn.title = backed ? 'Unbackup user source' : 'Backup user source';
+      backupBtn.onclick = async ()=>{
+        await fetch('/api/user-backup?admin='+ADMIN, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ kind, value: txt, enabled: !backed })
+        });
+        await render();
+      };
+      removeBtn.onclick = ()=> onRemove(idx);
+      wrap.appendChild(pill);
+    });
+    if (!arr || !arr.length) wrap.textContent = '(none)';
+  }
+  renderSourcePills('userPills', prefs.sources?.users || [], 'imdb', (i)=>{
     prefs.sources.users.splice(i,1);
     saveAll('Saved');
   });
-  renderPills('traktUserPills', prefs.sources?.traktUsers || [], (i)=>{
+  renderSourcePills('traktUserPills', prefs.sources?.traktUsers || [], 'trakt', (i)=>{
     prefs.sources.traktUsers.splice(i,1);
     saveAll('Saved');
+  });
+  renderPills('userBackupPills', prefs.userBackups?.users || [], async (i)=>{
+    const value = (prefs.userBackups?.users || [])[i];
+    await fetch('/api/user-backup?admin='+ADMIN, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ kind: 'imdb', value, enabled: false })
+    });
+    await render();
+  });
+  renderPills('traktUserBackupPills', prefs.userBackups?.traktUsers || [], async (i)=>{
+    const value = (prefs.userBackups?.traktUsers || [])[i];
+    await fetch('/api/user-backup?admin='+ADMIN, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ kind: 'trakt', value, enabled: false })
+    });
+    await render();
   });
   renderPills('listPills', prefs.sources?.lists || [], (i)=>{
     prefs.sources.lists.splice(i,1);
     saveAll('Saved');
   });
+  const setCount = (id, value) => { const n = document.getElementById(id); if (n) n.textContent = String(value); };
+  setCount('imdbUsersCount', (prefs.sources?.users || []).length);
+  setCount('traktUsersCount', (prefs.sources?.traktUsers || []).length);
+  setCount('extraListsCount', (prefs.sources?.lists || []).length);
   {
-    const backupWrap = document.getElementById('backupConfigs');
-    if (backupWrap) {
-      backupWrap.innerHTML = '';
-      const configs = prefs.backupConfigs || {};
-      const entries = Object.values(configs);
-      if (!entries.length) {
-        backupWrap.textContent = '(none)';
-      } else {
-        entries.sort((a,b)=>String(a.name||a.id).localeCompare(String(b.name||b.id))).forEach(cfg=>{
-          const sortLabel = cfg.sortKey || 'name_asc';
-          const sortNote = sortLabel + (cfg.sortReverse ? ' (reversed)' : '');
-          const title = (cfg.name || cfg.id) + ' (' + cfg.id + ')';
-          const pill = el('span', {class:'pill'}, [
-            el('span',{text: title + ' — ' + sortNote}),
-            el('span',{class:'x',text:'✕'})
-          ]);
-          pill.querySelector('.x').onclick = async ()=>{
-            await fetch('/api/link-backup?admin='+ADMIN, {
-              method:'POST',
-              headers:{'Content-Type':'application/json'},
-              body: JSON.stringify({ lsid: cfg.id, enabled: false })
-            });
-            await render();
-          };
-          backupWrap.appendChild(pill);
-          backupWrap.appendChild(document.createTextNode(' '));
+    const backupWrapImdb = document.getElementById('backupConfigsImdb');
+    const backupWrapTrakt = document.getElementById('backupConfigsTrakt');
+    const backupWrapOther = document.getElementById('backupConfigsOther');
+    const clearWrap = (el) => { if (el) el.innerHTML = ''; };
+    clearWrap(backupWrapImdb); clearWrap(backupWrapTrakt); clearWrap(backupWrapOther);
+
+    const appendBackupPill = (wrap, cfg) => {
+      if (!wrap) return;
+      const sortLabel = cfg.sortKey || 'name_asc';
+      const sortNote = sortLabel + (cfg.sortReverse ? ' (reversed)' : '');
+      const title = (cfg.name || cfg.id) + ' (' + cfg.id + ')';
+      const removeBtn = el('button',{type:'button', class:'pill-action-btn warn', text:'✕'});
+      const pill = el('span', {class:'pill manager-pill'}, [
+        el('span',{class:'pill-text', text: title + ' — ' + sortNote}),
+        el('span',{class:'pill-actions'}, [removeBtn])
+      ]);
+      removeBtn.onclick = async ()=>{
+        await fetch('/api/link-backup?admin='+ADMIN, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lsid: cfg.id, enabled: false })
         });
-      }
-    }
+        await render();
+      };
+      wrap.appendChild(pill);
+    };
+
+    const configs = prefs.backupConfigs || {};
+    const entries = Object.values(configs).sort((a,b)=>String(a.name||a.id).localeCompare(String(b.name||b.id)));
+    entries.forEach(cfg => {
+      const id = String(cfg.id || '').trim();
+      const isTrakt = /^trakt:/i.test(id);
+      const isImdb = /^ls\d{6,}$/i.test(id) || /^imdb:/i.test(id);
+      if (isTrakt) appendBackupPill(backupWrapTrakt, cfg);
+      else if (isImdb) appendBackupPill(backupWrapImdb, cfg);
+      else appendBackupPill(backupWrapOther, cfg);
+    });
+
+    if (backupWrapImdb && !backupWrapImdb.childElementCount) backupWrapImdb.textContent = '(none)';
+    if (backupWrapTrakt && !backupWrapTrakt.childElementCount) backupWrapTrakt.textContent = '(none)';
+    if (backupWrapOther && !backupWrapOther.childElementCount) backupWrapOther.textContent = '(none)';
+
+    const backupCount = document.getElementById('backupListsCount');
+    if (backupCount) backupCount.textContent = String(entries.length);
   }
 
   // Blocked pills with Unblock action
@@ -5378,13 +5660,16 @@ async function render() {
     const blockedWrap = document.getElementById('blockedPills');
     blockedWrap.innerHTML = '';
     const blocked = prefs.blocked || [];
+    const blockedCount = document.getElementById('blockedListsCount');
+    if (blockedCount) blockedCount.textContent = String(blocked.length);
     if (!blocked.length) blockedWrap.textContent = '(none)';
     blocked.forEach(lsid=>{
-      const pill = el('span',{class:'pill'},[
-        el('span',{text:lsid}),
-        el('span',{class:'x',text:'Unblock'})
+      const unblockBtn = el('button',{type:'button', class:'pill-action-btn', text:'Unblock'});
+      const pill = el('span',{class:'pill manager-pill'},[
+        el('span',{class:'pill-text', text:lsid}),
+        el('span',{class:'pill-actions'}, [unblockBtn])
       ]);
-      pill.querySelector('.x').onclick = async ()=>{
+      unblockBtn.onclick = async ()=>{
         await fetch('/api/unblock-list?admin='+ADMIN, {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ lsid })
@@ -5797,7 +6082,7 @@ async function render() {
 
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:'', class:'col-drawer'}),
+    el('th',{text:isSimpleMode ? '' : 'Open items', class:'col-drawer'}),
     el('th',{text:'Move'}),
     el('th',{text:'Enabled'}),
     el('th',{text:'Stremlist', class:'col-streamlist'}),
@@ -6833,6 +7118,7 @@ async function render() {
       sortOptions: prefs.sortOptions || {},
       upgradeEpisodes: prefs.upgradeEpisodes || false,
       sources: prefs.sources || {},
+      userBackups: prefs.userBackups || {},
       blocked: prefs.blocked || [],
       reconcileFrozenState: true
     };
@@ -6904,16 +7190,33 @@ render();
       }
     }
 
+    const userBackups = await loadUserBackups();
+    PREFS.userBackups = normalizeUserBackupState({ ...(PREFS.userBackups || {}), ...userBackups });
+    const mergedUserSources = mergeUserBackupsIntoSources();
+    if (mergedUserSources) {
+      LAST_MANIFEST_KEY = "";
+      MANIFEST_REV++;
+      await persistSnapshot();
+      console.log("[BOOT] restored user sources from backup");
+    }
+
     const linkBackupConfigs = await loadLinkBackupConfigs();
     if (linkBackupConfigs.size) {
-      let restoredLinks = false;
+      const beforeConfigCount = Object.keys(PREFS.backupConfigs || {}).length;
+      const beforeHiddenCount = (PREFS.hiddenLists || []).length;
+      const beforeMainCount = (PREFS.mainLists || []).length;
       for (const [lsid, data] of linkBackupConfigs.entries()) {
-        const hasConfig = PREFS.backupConfigs && PREFS.backupConfigs[lsid];
-        if (!hasConfig) {
-          restoreLinkBackupConfigEntry(lsid, data);
-          restoredLinks = true;
-        }
+        // Always reconcile from backup payload so hidden/main states survive restarts
+        // even when backupConfigs already exist in snapshot.
+        restoreLinkBackupConfigEntry(lsid, data);
       }
+      const afterConfigCount = Object.keys(PREFS.backupConfigs || {}).length;
+      const afterHiddenCount = (PREFS.hiddenLists || []).length;
+      const afterMainCount = (PREFS.mainLists || []).length;
+      const restoredLinks =
+        afterConfigCount !== beforeConfigCount ||
+        afterHiddenCount !== beforeHiddenCount ||
+        afterMainCount !== beforeMainCount;
       if (restoredLinks) {
         LAST_MANIFEST_KEY = "";
         MANIFEST_REV++;
