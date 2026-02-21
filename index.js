@@ -5555,6 +5555,7 @@ async function render() {
   }
   function renderSourcePills(id, arr, kind, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
+    const cls = opts.compact ? 'pill' : 'pill manager-pill';
     (arr||[]).forEach((txt, idx)=>{
       const backed = ((kind === 'trakt' ? prefs.userBackups?.traktUsers : prefs.userBackups?.users) || []).includes(txt);
       const backupBtn = el('button',{type:'button', class:'user-backup-btn' + (backed ? ' active' : ''), text:'☁'});
