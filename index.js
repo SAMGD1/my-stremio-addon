@@ -2746,9 +2746,8 @@ function catalogs(){
     type: "my lists",
     id: `list:${lsid}`,
     name: `${isFrozenList(lsid) ? "⭐" : "🗂"} ${listDisplayName(lsid)}`,
-    extraSupported: searchEnabled ? ["search","skip","limit","sort","genre"] : ["skip","limit","sort","genre"],
+    extraSupported: ["skip","limit","sort","genre"],
     extra: [
-      ...(searchEnabled ? [{ name:"search" }] : []),
       { name:"skip" }, { name:"limit" },
       {
         name:"sort",
@@ -3100,7 +3099,6 @@ app.post("/api/prefs", async (req,res) => {
       traktUsers: Array.isArray(src.traktUsers) ? src.traktUsers.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.traktUsers || [])
     };
     PREFS.userBackups = normalizeUserBackupState(body.userBackups || PREFS.userBackups || {});
-    if (typeof body.catalogSearchEnabled === "boolean") PREFS.catalogSearchEnabled = body.catalogSearchEnabled;
 
     PREFS.blocked = Array.isArray(body.blocked) ? body.blocked.filter(isListId) : (PREFS.blocked || []);
     if (!Array.isArray(body.mainLists) && isListId(body.mainList)) {
@@ -5555,7 +5553,6 @@ async function render() {
   }
   function renderSourcePills(id, arr, kind, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
-    const cls = opts.compact ? 'pill' : 'pill manager-pill';
     (arr||[]).forEach((txt, idx)=>{
       const backed = ((kind === 'trakt' ? prefs.userBackups?.traktUsers : prefs.userBackups?.users) || []).includes(txt);
       const backupBtn = el('button',{type:'button', class:'user-backup-btn' + (backed ? ' active' : ''), text:'☁'});
