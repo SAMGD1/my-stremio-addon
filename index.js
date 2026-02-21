@@ -130,7 +130,8 @@ let PREFS = {
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
     traktUsers: []        // array of Trakt user URLs or usernames
   },
-  blocked: []             // listIds you removed/blocked (IMDb or Trakt)
+  blocked: [],            // listIds you removed/blocked (IMDb or Trakt)
+  catalogSearchEnabled: false // include search extra in manifest catalogs
 };
 
 const BEST   = new Map(); // Map<tt, { kind, meta }>
@@ -2740,12 +2741,14 @@ function getEnabledOrderedIds() {
 }
 function catalogs(){
   const ids = getEnabledOrderedIds();
+  const searchEnabled = !!PREFS.catalogSearchEnabled;
   return ids.map(lsid => ({
     type: "my lists",
     id: `list:${lsid}`,
     name: `${isFrozenList(lsid) ? "⭐" : "🗂"} ${listDisplayName(lsid)}`,
-    extraSupported: ["skip","limit","sort","genre"],
+    extraSupported: searchEnabled ? ["search","skip","limit","sort","genre"] : ["skip","limit","sort","genre"],
     extra: [
+      ...(searchEnabled ? [{ name:"search" }] : []),
       { name:"skip" }, { name:"limit" },
       {
         name:"sort",
@@ -3097,6 +3100,7 @@ app.post("/api/prefs", async (req,res) => {
       traktUsers: Array.isArray(src.traktUsers) ? src.traktUsers.map(s=>String(s).trim()).filter(Boolean) : (PREFS.sources.traktUsers || [])
     };
     PREFS.userBackups = normalizeUserBackupState(body.userBackups || PREFS.userBackups || {});
+    if (typeof body.catalogSearchEnabled === "boolean") PREFS.catalogSearchEnabled = body.catalogSearchEnabled;
 
     PREFS.blocked = Array.isArray(body.blocked) ? body.blocked.filter(isListId) : (PREFS.blocked || []);
     if (!Array.isArray(body.mainLists) && isListId(body.mainList)) {
@@ -3118,6 +3122,21 @@ app.post("/api/prefs", async (req,res) => {
 
     res.status(200).send("Saved. Manifest rev " + MANIFEST_REV);
   }catch(e){ console.error("prefs save error:", e); res.status(500).send("Failed to save"); }
+});
+
+app.post("/api/search-visibility", async (req,res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const enabled = req.body?.enabled !== false;
+    PREFS.catalogSearchEnabled = !!enabled;
+    LAST_MANIFEST_KEY = "";
+    MANIFEST_REV++;
+    await persistSnapshot();
+    res.json({ ok: true, enabled: !!PREFS.catalogSearchEnabled, manifestRev: MANIFEST_REV });
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Failed");
+  }
 });
 
 app.post("/api/tmdb-verify", async (req, res) => {
@@ -4631,6 +4650,11 @@ app.get("/admin", async (req,res)=>{
             <span class="mini muted">If the button doesn’t work, copy the manifest URL into Stremio manually.</span>
           </div>
           <p class="mini muted" style="margin-top:8px;">Manifest version automatically bumps when catalogs, sorting, or ordering change.</p>
+          <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span class="mini muted">Show this addon in Stremio search</span>
+            <button type="button" class="btn2" id="searchVisibilityToggle">Loading…</button>
+            <span class="mini muted" id="searchVisibilityNote"></span>
+          </div>
         </div>
         <div class="snapshot-actions">
           <h4>Sync Controls</h4>
@@ -4710,7 +4734,7 @@ app.get("/admin", async (req,res)=>{
         </button>
         <div id="linkManagers" class="collapse-body">
           <div class="manager-grid">
-            <details class="manager-group" open>
+            <details class="manager-group">
               <summary><span>IMDb Users</span><span class="mini" id="imdbUsersCount"></span></summary>
               <div class="group-body">
                 <div class="manager-subtitle">Sources</div>
@@ -4720,7 +4744,7 @@ app.get("/admin", async (req,res)=>{
               </div>
             </details>
 
-            <details class="manager-group" open>
+            <details class="manager-group">
               <summary><span>Trakt Users</span><span class="mini" id="traktUsersCount"></span></summary>
               <div class="group-body">
                 <div class="manager-subtitle">Sources</div>
@@ -4730,14 +4754,14 @@ app.get("/admin", async (req,res)=>{
               </div>
             </details>
 
-            <details class="manager-group" open>
+            <details class="manager-group">
               <summary><span>Extra Lists</span><span class="mini" id="extraListsCount"></span></summary>
               <div class="group-body">
                 <div id="listPills"></div>
               </div>
             </details>
 
-            <details class="manager-group" open>
+            <details class="manager-group">
               <summary><span>Backed-up Lists</span><span class="mini" id="backupListsCount"></span></summary>
               <div class="group-body">
                 <div class="manager-subtitle">IMDb backups</div>
@@ -4749,7 +4773,7 @@ app.get("/admin", async (req,res)=>{
               </div>
             </details>
 
-            <details class="manager-group" open>
+            <details class="manager-group">
               <summary><span>Blocked Lists</span><span class="mini" id="blockedListsCount"></span></summary>
               <div class="group-body">
                 <div id="blockedPills"></div>
@@ -4883,6 +4907,45 @@ document.addEventListener('DOMContentLoaded', () => {
       if (SECRET) url += '?key=' + SECRET;
       window.location.href = url;
     };
+  }
+
+
+  const searchToggleBtn = document.getElementById('searchVisibilityToggle');
+  const searchToggleNote = document.getElementById('searchVisibilityNote');
+  async function loadSearchVisibility(){
+    if (!searchToggleBtn) return;
+    try {
+      const prefs = await getPrefs();
+      const enabled = !!prefs.catalogSearchEnabled;
+      searchToggleBtn.textContent = enabled ? 'ON' : 'OFF';
+      searchToggleBtn.style.background = enabled ? '#1f6f4a' : '#3f4458';
+      searchToggleBtn.style.borderColor = enabled ? '#3abf7a' : '#6b7280';
+      searchToggleBtn.style.color = '#fff';
+      searchToggleBtn.title = enabled ? 'Click to disable search visibility' : 'Click to enable search visibility';
+      if (searchToggleNote) searchToggleNote.textContent = enabled ? 'Enabled: addon appears in search.' : 'Disabled: addon hidden from search.';
+    } catch (e) {
+      searchToggleBtn.textContent = 'Unavailable';
+    }
+  }
+  if (searchToggleBtn) {
+    searchToggleBtn.onclick = async () => {
+      const turningOn = searchToggleBtn.textContent !== 'ON';
+      searchToggleBtn.disabled = true;
+      try {
+        const r = await fetch('/api/search-visibility?admin=' + ADMIN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: turningOn })
+        });
+        if (!r.ok) throw new Error(await r.text());
+      } catch (e) {
+        if (searchToggleNote) searchToggleNote.textContent = e.message || 'Failed to save';
+      } finally {
+        searchToggleBtn.disabled = false;
+        await loadSearchVisibility();
+      }
+    };
+    loadSearchVisibility();
   }
 
   document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -5492,6 +5555,7 @@ async function render() {
   }
   function renderSourcePills(id, arr, kind, onRemove){
     const wrap = document.getElementById(id); wrap.innerHTML = '';
+    const cls = opts.compact ? 'pill' : 'pill manager-pill';
     (arr||[]).forEach((txt, idx)=>{
       const backed = ((kind === 'trakt' ? prefs.userBackups?.traktUsers : prefs.userBackups?.users) || []).includes(txt);
       const backupBtn = el('button',{type:'button', class:'user-backup-btn' + (backed ? ' active' : ''), text:'☁'});
@@ -6019,7 +6083,7 @@ async function render() {
 
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:'', class:'col-drawer'}),
+    el('th',{text:isSimpleMode ? '' : 'Open items', class:'col-drawer'}),
     el('th',{text:'Move'}),
     el('th',{text:'Enabled'}),
     el('th',{text:'Stremlist', class:'col-streamlist'}),
