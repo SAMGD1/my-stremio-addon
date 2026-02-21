@@ -2744,9 +2744,9 @@ function catalogs(){
     type: "my lists",
     id: `list:${lsid}`,
     name: `${isFrozenList(lsid) ? "⭐" : "🗂"} ${listDisplayName(lsid)}`,
-    extraSupported: ["skip","limit","sort","genre"],
+    extraSupported: ["search","skip","limit","sort","genre"],
     extra: [
-      { name:"skip" }, { name:"limit" },
+      { name:"search" }, { name:"skip" }, { name:"limit" },
       {
         name:"sort",
         options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS,
@@ -4710,7 +4710,7 @@ app.get("/admin", async (req,res)=>{
         </button>
         <div id="linkManagers" class="collapse-body">
           <div class="manager-grid">
-            <details class="manager-group">
+            <details class="manager-group" open>
               <summary><span>IMDb Users</span><span class="mini" id="imdbUsersCount"></span></summary>
               <div class="group-body">
                 <div class="manager-subtitle">Sources</div>
@@ -4720,7 +4720,7 @@ app.get("/admin", async (req,res)=>{
               </div>
             </details>
 
-            <details class="manager-group">
+            <details class="manager-group" open>
               <summary><span>Trakt Users</span><span class="mini" id="traktUsersCount"></span></summary>
               <div class="group-body">
                 <div class="manager-subtitle">Sources</div>
@@ -4730,14 +4730,14 @@ app.get("/admin", async (req,res)=>{
               </div>
             </details>
 
-            <details class="manager-group">
+            <details class="manager-group" open>
               <summary><span>Extra Lists</span><span class="mini" id="extraListsCount"></span></summary>
               <div class="group-body">
                 <div id="listPills"></div>
               </div>
             </details>
 
-            <details class="manager-group">
+            <details class="manager-group" open>
               <summary><span>Backed-up Lists</span><span class="mini" id="backupListsCount"></span></summary>
               <div class="group-body">
                 <div class="manager-subtitle">IMDb backups</div>
@@ -4749,7 +4749,7 @@ app.get("/admin", async (req,res)=>{
               </div>
             </details>
 
-            <details class="manager-group">
+            <details class="manager-group" open>
               <summary><span>Blocked Lists</span><span class="mini" id="blockedListsCount"></span></summary>
               <div class="group-body">
                 <div id="blockedPills"></div>
@@ -6019,7 +6019,7 @@ async function render() {
 
   const table = el('table');
   const thead = el('thead', {}, [el('tr',{},[
-    el('th',{text:isSimpleMode ? '' : 'Open list', class:'col-drawer'}),
+    el('th',{text:'', class:'col-drawer'}),
     el('th',{text:'Move'}),
     el('th',{text:'Enabled'}),
     el('th',{text:'Stremlist', class:'col-streamlist'}),
