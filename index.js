@@ -4460,7 +4460,7 @@ app.get("/admin", async (req,res)=>{
     place-items:center;
   }
   .api-eye-btn:hover{background:rgba(255,255,255,.08);}
-  .api-eye-btn svg{width:18px;height:18px;fill:#d8ddff;opacity:.92;}
+  .api-eye-btn svg{width:18px;height:18px;fill:#000;opacity:1;}
   .bulk-box{
     margin-top:14px;
     padding:12px;
