@@ -1,5 +1,5 @@
 /*  My Lists – IMDb → Stremio (custom per-list ordering, IMDb date order, sources & UI)
- *  v12.4.0 – Power user list management + TMDB verification
+ *  v12.5.0 – API key controls for TMDB + Trakt
  */
 "use strict";
 const express = require("express");
@@ -116,6 +116,8 @@ let PREFS = {
   mainLists: [],
   tmdbKey: TMDB_API_KEY || "",
   tmdbKeyValid: null,
+  traktClientId: TRAKT_CLIENT_ID || "",
+  traktClientIdValid: null,
   displayNames: {},       // { listId: "Custom Name" }
   frozenLists: {},        // { listId: { ids:[], orders:{}, name, url, frozenAt, sortKey, sortReverse, customOrder } }
   customLists: {},        // { listId: { kind, sources, createdAt } }
@@ -1213,13 +1215,14 @@ function parseTraktListUrl(raw) {
 }
 
 async function traktJson(path) {
-  if (!TRAKT_CLIENT_ID) throw new Error("TRAKT_CLIENT_ID not set");
+  const traktClientId = String(PREFS.traktClientId || TRAKT_CLIENT_ID || "").trim();
+  if (!traktClientId) throw new Error("TRAKT_CLIENT_ID not set");
   const url = `https://api.trakt.tv${path}`;
   const r = await fetch(url, {
     headers: {
       "Content-Type": "application/json",
       "trakt-api-version": "2",
-      "trakt-api-key": TRAKT_CLIENT_ID,
+      "trakt-api-key": traktClientId,
       "User-Agent": UA
     },
     redirect: "follow"
@@ -3085,6 +3088,10 @@ app.post("/api/prefs", async (req,res) => {
       PREFS.tmdbKey = body.tmdbKey.trim();
       if (!PREFS.tmdbKey) PREFS.tmdbKeyValid = null;
     }
+    if (typeof body.traktClientId === "string") {
+      PREFS.traktClientId = body.traktClientId.trim();
+      if (!PREFS.traktClientId) PREFS.traktClientIdValid = null;
+    }
 
     if (body.customOrder && typeof body.customOrder === "object") {
       PREFS.customOrder = body.customOrder;
@@ -3163,6 +3170,37 @@ app.post("/api/tmdb-save", async (req, res) => {
     await persistSnapshot();
     res.json({ ok: true });
   } catch (e) { res.status(500).send("TMDB save failed"); }
+});
+
+app.post("/api/trakt-verify", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const key = String(req.body.key || "").trim();
+    if (!key) return res.status(400).send("Missing Trakt client id");
+    PREFS.traktClientId = key;
+    PREFS.traktClientIdValid = null;
+    await traktJson("/users/me");
+    PREFS.traktClientIdValid = true;
+    await persistSnapshot();
+    return res.json({ ok: true, message: "Trakt client id verified and active." });
+  } catch (e) {
+    PREFS.traktClientIdValid = false;
+    await persistSnapshot();
+    const msg = e.message || "Trakt verification failed.";
+    const status = /->\s*(401|403|404)/.test(msg) ? 400 : 500;
+    res.status(status).json({ ok: false, message: msg });
+  }
+});
+
+app.post("/api/trakt-save", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  try {
+    const key = String(req.body.key || "").trim();
+    PREFS.traktClientId = key;
+    PREFS.traktClientIdValid = key ? PREFS.traktClientIdValid : null;
+    await persistSnapshot();
+    res.json({ ok: true });
+  } catch (e) { res.status(500).send("Trakt save failed"); }
 });
 
 app.post("/api/list-rename", async (req, res) => {
@@ -4389,14 +4427,40 @@ app.get("/admin", async (req,res)=>{
     border-radius:14px;
     padding:12px 14px;
   }
-  .tmdb-box{margin-top:12px;}
-  .tmdb-row{
+  .api-key-box{margin-top:12px;}
+  .api-key-row{
     display:flex;
     flex-wrap:wrap;
     gap:8px;
     align-items:center;
   }
-  .tmdb-row input{flex:1; min-width:180px;}
+  .api-key-input-wrap{
+    position:relative;
+    flex:1;
+    min-width:240px;
+  }
+  .api-key-input-wrap input{
+    width:100%;
+    padding-right:42px;
+    box-sizing:border-box;
+  }
+  .api-eye-btn{
+    position:absolute;
+    top:50%;
+    right:8px;
+    transform:translateY(-50%);
+    width:28px;
+    height:28px;
+    border-radius:8px;
+    border:1px solid transparent;
+    background:transparent;
+    box-shadow:none;
+    padding:4px;
+    display:grid;
+    place-items:center;
+  }
+  .api-eye-btn:hover{background:rgba(255,255,255,.08);}
+  .api-eye-btn svg{width:18px;height:18px;fill:#d8ddff;opacity:.92;}
   .bulk-box{
     margin-top:14px;
     padding:12px;
@@ -4643,15 +4707,35 @@ app.get("/admin", async (req,res)=>{
             </form>
           </div>
           <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
-          <div class="tmdb-box">
+          <div class="api-key-box">
             <label class="mini">TMDB API Key (optional)</label>
-            <div class="tmdb-row">
-              <input id="tmdbKeyInput" type="text" placeholder="Enter TMDB API key" />
+            <div class="api-key-row">
+              <div class="api-key-input-wrap">
+                <input id="tmdbKeyInput" type="password" placeholder="Enter TMDB API key" autocomplete="off" spellcheck="false" />
+                <button class="api-eye-btn" type="button" data-toggle-visibility="tmdbKeyInput" aria-label="Show TMDB key" title="Show key">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.5 0 9.5 4.3 10.8 6a1.7 1.7 0 0 1 0 2c-1.3 1.8-5.3 6-10.8 6S2.5 14.8 1.2 13a1.7 1.7 0 0 1 0-2C2.5 9.3 6.5 5 12 5zm0 2c-4.4 0-7.8 3.3-9.2 5 1.4 1.8 4.8 5 9.2 5s7.8-3.2 9.2-5c-1.4-1.7-4.8-5-9.2-5zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
+                </button>
+              </div>
               <button id="tmdbSaveBtn" type="button">Save</button>
               <button id="tmdbVerifyBtn" type="button" class="btn2">Verify</button>
             </div>
             <div class="mini muted">Use a TMDB v3 API key or a v4 Read Access Token.</div>
             <div id="tmdbStatus" class="mini muted"></div>
+          </div>
+          <div class="api-key-box">
+            <label class="mini">Trakt Client ID (optional)</label>
+            <div class="api-key-row">
+              <div class="api-key-input-wrap">
+                <input id="traktClientIdInput" type="password" placeholder="Enter Trakt client id" autocomplete="off" spellcheck="false" />
+                <button class="api-eye-btn" type="button" data-toggle-visibility="traktClientIdInput" aria-label="Show Trakt client id" title="Show key">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.5 0 9.5 4.3 10.8 6a1.7 1.7 0 0 1 0 2c-1.3 1.8-5.3 6-10.8 6S2.5 14.8 1.2 13a1.7 1.7 0 0 1 0-2C2.5 9.3 6.5 5 12 5zm0 2c-4.4 0-7.8 3.3-9.2 5 1.4 1.8 4.8 5 9.2 5s7.8-3.2 9.2-5c-1.4-1.7-4.8-5-9.2-5zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
+                </button>
+              </div>
+              <button id="traktSaveBtn" type="button">Save</button>
+              <button id="traktVerifyBtn" type="button" class="btn2">Verify</button>
+            </div>
+            <div class="mini muted">Use the Trakt app Client ID from trakt.tv/oauth/applications.</div>
+            <div id="traktStatus" class="mini muted"></div>
           </div>
         </div>
       </div>
@@ -5706,13 +5790,27 @@ async function render() {
   }
   window.renderDiscovered = renderDiscovered;
 
-  function wireTmdbControls() {
-    const input = document.getElementById('tmdbKeyInput');
-    const status = document.getElementById('tmdbStatus');
-    const saveBtn = document.getElementById('tmdbSaveBtn');
-    const verifyBtn = document.getElementById('tmdbVerifyBtn');
+  function wireSecretVisibility() {
+    document.querySelectorAll('[data-toggle-visibility]').forEach(btn => {
+      btn.onclick = () => {
+        const targetId = btn.getAttribute('data-toggle-visibility');
+        const input = targetId ? document.getElementById(targetId) : null;
+        if (!input) return;
+        const isHidden = input.type === 'password';
+        input.type = isHidden ? 'text' : 'password';
+        btn.setAttribute('aria-label', isHidden ? 'Hide key' : 'Show key');
+        btn.title = isHidden ? 'Hide key' : 'Show key';
+      };
+    });
+  }
+
+  function wireApiKeyControls({ inputId, statusId, saveId, verifyId, savePath, verifyPath, stateValue, stateValid, okText, invalidText, savedText, verifyFallbackText }) {
+    const input = document.getElementById(inputId);
+    const status = document.getElementById(statusId);
+    const saveBtn = document.getElementById(saveId);
+    const verifyBtn = document.getElementById(verifyId);
     if (!input || !status || !saveBtn || !verifyBtn) return;
-    input.value = prefs.tmdbKey || '';
+    input.value = stateValue || '';
 
     const setStatus = (ok, text) => {
       status.textContent = text || '';
@@ -5720,22 +5818,22 @@ async function render() {
       if (ok === true) status.className = 'status-pill ok';
       if (ok === false) status.className = 'status-pill bad';
     };
-    if (prefs.tmdbKeyValid === true) setStatus(true, '✓ TMDB key verified and active');
-    else if (prefs.tmdbKeyValid === false) setStatus(false, 'TMDB key invalid or unauthorized');
+    if (stateValid === true) setStatus(true, okText);
+    else if (stateValid === false) setStatus(false, invalidText);
     else setStatus(null, 'Not verified yet.');
 
     saveBtn.onclick = async () => {
       saveBtn.disabled = true;
       try {
-        const r = await fetch('/api/tmdb-save?admin=' + ADMIN, {
+        const r = await fetch(savePath + '?admin=' + ADMIN, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key: input.value })
         });
         if (!r.ok) throw new Error(await r.text());
-        setStatus(null, 'TMDB key saved.');
+        setStatus(null, savedText);
       } catch (e) {
-        setStatus(false, e.message || 'Failed to save TMDB key.');
+        setStatus(false, e.message || ('Failed to save ' + verifyFallbackText));
       } finally {
         saveBtn.disabled = false;
       }
@@ -5745,20 +5843,54 @@ async function render() {
       verifyBtn.disabled = true;
       setStatus(null, 'Verifying…');
       try {
-        const r = await fetch('/api/tmdb-verify?admin=' + ADMIN, {
+        const r = await fetch(verifyPath + '?admin=' + ADMIN, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key: input.value })
         });
         const data = await r.json().catch(() => ({}));
-        if (!r.ok || !data.ok) throw new Error(data.message || 'TMDB verification failed.');
-        setStatus(true, data.message || 'TMDB key verified.');
+        if (!r.ok || !data.ok) throw new Error(data.message || (verifyFallbackText + ' verification failed.'));
+        setStatus(true, data.message || okText);
       } catch (e) {
-        setStatus(false, e.message || 'TMDB verification failed.');
+        setStatus(false, e.message || (verifyFallbackText + ' verification failed.'));
       } finally {
         verifyBtn.disabled = false;
       }
     };
+  }
+
+  function wireTmdbControls() {
+    wireApiKeyControls({
+      inputId: 'tmdbKeyInput',
+      statusId: 'tmdbStatus',
+      saveId: 'tmdbSaveBtn',
+      verifyId: 'tmdbVerifyBtn',
+      savePath: '/api/tmdb-save',
+      verifyPath: '/api/tmdb-verify',
+      stateValue: prefs.tmdbKey,
+      stateValid: prefs.tmdbKeyValid,
+      okText: '✓ TMDB key verified and active',
+      invalidText: 'TMDB key invalid or unauthorized',
+      savedText: 'TMDB key saved.',
+      verifyFallbackText: 'TMDB key'
+    });
+  }
+
+  function wireTraktControls() {
+    wireApiKeyControls({
+      inputId: 'traktClientIdInput',
+      statusId: 'traktStatus',
+      saveId: 'traktSaveBtn',
+      verifyId: 'traktVerifyBtn',
+      savePath: '/api/trakt-save',
+      verifyPath: '/api/trakt-verify',
+      stateValue: prefs.traktClientId,
+      stateValid: prefs.traktClientIdValid,
+      okText: '✓ Trakt client id verified and active',
+      invalidText: 'Trakt client id invalid or unauthorized',
+      savedText: 'Trakt client id saved.',
+      verifyFallbackText: 'Trakt client id'
+    });
   }
 
   function wireBulkAdd() {
@@ -5792,7 +5924,9 @@ async function render() {
     };
   }
 
+  wireSecretVisibility();
   wireTmdbControls();
+  wireTraktControls();
   wireBulkAdd();
   renderSnapshotList();
   renderDiscovered();
