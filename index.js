@@ -3179,7 +3179,7 @@ app.post("/api/trakt-verify", async (req, res) => {
     if (!key) return res.status(400).send("Missing Trakt client id");
     PREFS.traktClientId = key;
     PREFS.traktClientIdValid = null;
-    await traktJson("/users/me");
+    await traktJson("/lists/popular?page=1&limit=1");
     PREFS.traktClientIdValid = true;
     await persistSnapshot();
     return res.json({ ok: true, message: "Trakt client id verified and active." });
@@ -4461,6 +4461,8 @@ app.get("/admin", async (req,res)=>{
   }
   .api-eye-btn:hover{background:rgba(255,255,255,.08);}
   .api-eye-btn svg{width:18px;height:18px;fill:#000;opacity:1;}
+  .api-eye-btn.is-revealed{background:transparent;}
+  .api-eye-btn.is-revealed:hover{background:rgba(255,255,255,.08);}
   .bulk-box{
     margin-top:14px;
     padding:12px;
@@ -4713,7 +4715,7 @@ app.get("/admin", async (req,res)=>{
               <div class="api-key-input-wrap">
                 <input id="tmdbKeyInput" type="password" placeholder="Enter TMDB API key" autocomplete="off" spellcheck="false" />
                 <button class="api-eye-btn" type="button" data-toggle-visibility="tmdbKeyInput" aria-label="Show TMDB key" title="Show key">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.5 0 9.5 4.3 10.8 6a1.7 1.7 0 0 1 0 2c-1.3 1.8-5.3 6-10.8 6S2.5 14.8 1.2 13a1.7 1.7 0 0 1 0-2C2.5 9.3 6.5 5 12 5zm0 2c-4.4 0-7.8 3.3-9.2 5 1.4 1.8 4.8 5 9.2 5s7.8-3.2 9.2-5c-1.4-1.7-4.8-5-9.2-5zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 2.2 2.2 3.6l3.1 3.1C3.6 8.1 2.2 9.8 1.2 11a1.7 1.7 0 0 0 0 2c1.3 1.8 5.3 6 10.8 6 2 0 3.8-.6 5.3-1.5l3.1 3.1 1.4-1.4L3.6 2.2zM12 17c-4.4 0-7.8-3.2-9.2-5 1-1.3 2.7-3 4.9-4.1l1.8 1.8a2.5 2.5 0 0 0 3.8 3.1l2.5 2.5A8.8 8.8 0 0 1 12 17zm10.8-6c-1.1-1.5-4.2-4.9-8.7-5.8l1.7 1.7c2.6.9 4.6 2.9 5.4 4.1-.5.6-1.2 1.5-2.2 2.3l1.4 1.4c1.1-.9 1.9-1.9 2.4-2.5a1.7 1.7 0 0 0 0-2.2z"/></svg>
                 </button>
               </div>
               <button id="tmdbSaveBtn" type="button">Save</button>
@@ -4728,7 +4730,7 @@ app.get("/admin", async (req,res)=>{
               <div class="api-key-input-wrap">
                 <input id="traktClientIdInput" type="password" placeholder="Enter Trakt client id" autocomplete="off" spellcheck="false" />
                 <button class="api-eye-btn" type="button" data-toggle-visibility="traktClientIdInput" aria-label="Show Trakt client id" title="Show key">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.5 0 9.5 4.3 10.8 6a1.7 1.7 0 0 1 0 2c-1.3 1.8-5.3 6-10.8 6S2.5 14.8 1.2 13a1.7 1.7 0 0 1 0-2C2.5 9.3 6.5 5 12 5zm0 2c-4.4 0-7.8 3.3-9.2 5 1.4 1.8 4.8 5 9.2 5s7.8-3.2 9.2-5c-1.4-1.7-4.8-5-9.2-5zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 2.2 2.2 3.6l3.1 3.1C3.6 8.1 2.2 9.8 1.2 11a1.7 1.7 0 0 0 0 2c1.3 1.8 5.3 6 10.8 6 2 0 3.8-.6 5.3-1.5l3.1 3.1 1.4-1.4L3.6 2.2zM12 17c-4.4 0-7.8-3.2-9.2-5 1-1.3 2.7-3 4.9-4.1l1.8 1.8a2.5 2.5 0 0 0 3.8 3.1l2.5 2.5A8.8 8.8 0 0 1 12 17zm10.8-6c-1.1-1.5-4.2-4.9-8.7-5.8l1.7 1.7c2.6.9 4.6 2.9 5.4 4.1-.5.6-1.2 1.5-2.2 2.3l1.4 1.4c1.1-.9 1.9-1.9 2.4-2.5a1.7 1.7 0 0 0 0-2.2z"/></svg>
                 </button>
               </div>
               <button id="traktSaveBtn" type="button">Save</button>
@@ -5791,15 +5793,24 @@ async function render() {
   window.renderDiscovered = renderDiscovered;
 
   function wireSecretVisibility() {
+    const eyeOpen = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.5 0 9.5 4.3 10.8 6a1.7 1.7 0 0 1 0 2c-1.3 1.8-5.3 6-10.8 6S2.5 14.8 1.2 13a1.7 1.7 0 0 1 0-2C2.5 9.3 6.5 5 12 5zm0 2c-4.4 0-7.8 3.3-9.2 5 1.4 1.8 4.8 5 9.2 5s7.8-3.2 9.2-5c-1.4-1.7-4.8-5-9.2-5zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>';
+    const eyeClosed = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 2.2 2.2 3.6l3.1 3.1C3.6 8.1 2.2 9.8 1.2 11a1.7 1.7 0 0 0 0 2c1.3 1.8 5.3 6 10.8 6 2 0 3.8-.6 5.3-1.5l3.1 3.1 1.4-1.4L3.6 2.2zM12 17c-4.4 0-7.8-3.2-9.2-5 1-1.3 2.7-3 4.9-4.1l1.8 1.8a2.5 2.5 0 0 0 3.8 3.1l2.5 2.5A8.8 8.8 0 0 1 12 17zm10.8-6c-1.1-1.5-4.2-4.9-8.7-5.8l1.7 1.7c2.6.9 4.6 2.9 5.4 4.1-.5.6-1.2 1.5-2.2 2.3l1.4 1.4c1.1-.9 1.9-1.9 2.4-2.5a1.7 1.7 0 0 0 0-2.2z"/></svg>';
     document.querySelectorAll('[data-toggle-visibility]').forEach(btn => {
+      const targetId = btn.getAttribute('data-toggle-visibility');
+      const input = targetId ? document.getElementById(targetId) : null;
+      if (!input) return;
+
+      const syncIcon = () => {
+        const hidden = input.type === 'password';
+        btn.innerHTML = hidden ? eyeClosed : eyeOpen;
+        btn.setAttribute('aria-label', hidden ? 'Show key' : 'Hide key');
+        btn.title = hidden ? 'Show key' : 'Hide key';
+      };
+
+      syncIcon();
       btn.onclick = () => {
-        const targetId = btn.getAttribute('data-toggle-visibility');
-        const input = targetId ? document.getElementById(targetId) : null;
-        if (!input) return;
-        const isHidden = input.type === 'password';
-        input.type = isHidden ? 'text' : 'password';
-        btn.setAttribute('aria-label', isHidden ? 'Hide key' : 'Show key');
-        btn.title = isHidden ? 'Hide key' : 'Show key';
+        input.type = input.type === 'password' ? 'text' : 'password';
+        syncIcon();
       };
     });
   }
