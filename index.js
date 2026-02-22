@@ -72,9 +72,9 @@ const IMDB_GRAPHQL_ENDPOINT = "https://caching.graphql.imdb.com/";
 const IMDB_HASH_TITLE_LIST_MAIN_PAGE =
   "e3aac5739487b9f7f1398fb345dcef9b5a5baa48b71522fa514e77e41d6502e7";
 
-// include "imdb" (raw list order) and mirror IMDb’s release-date order when available
+// include source-native raw order options ("imdb" / "trakt") and mirror IMDb release-date order when available
 const SORT_OPTIONS = [
-  "custom","imdb","popularity",
+  "custom","imdb","trakt","popularity",
   "date_asc","date_desc",
   "rating_asc","rating_desc",
   "runtime_asc","runtime_desc",
@@ -1950,6 +1950,65 @@ function normalizeTitleSearchQuery(raw, forcedType = "all") {
   return { term: cleaned || text, year: Number.isFinite(year) ? year : null, mediaType: inferredType };
 }
 
+async function fetchTmdbExternalImdbId(itemType, tmdbId, apiKey) {
+  try {
+    const external = await fetchTmdbJson(`/${itemType}/${tmdbId}/external_ids`, apiKey);
+    return extractImdbId(external?.imdb_id || "");
+  } catch {
+    return "";
+  }
+}
+
+async function fetchTmdbCollectionImdbIds(collectionId, { limit = 120 } = {}) {
+  if (!tmdbEnabled()) return [];
+  const cid = Number(collectionId);
+  if (!Number.isFinite(cid)) return [];
+  const apiKey = getTmdbKey();
+  const info = await fetchTmdbJson(`/collection/${cid}`, apiKey);
+  const parts = Array.isArray(info?.parts) ? info.parts : [];
+  const out = [];
+  const seen = new Set();
+  for (const part of parts) {
+    if (out.length >= limit) break;
+    const type = part && part.first_air_date ? "tv" : "movie";
+    const pid = Number(part?.id);
+    if (!Number.isFinite(pid)) continue;
+    const imdb = await fetchTmdbExternalImdbId(type, pid, apiKey);
+    if (imdb && !seen.has(imdb)) {
+      seen.add(imdb);
+      out.push(imdb);
+    }
+  }
+  return out;
+}
+
+async function searchTmdbCollections(query, { limit = 5 } = {}) {
+  if (!tmdbEnabled()) return [];
+  const term = String(query || "").trim();
+  if (!term) return [];
+  const apiKey = getTmdbKey();
+  const search = await fetchTmdbJson(`/search/collection?query=${encodeURIComponent(term)}&include_adult=false&page=1`, apiKey);
+  const pool = Array.isArray(search?.results) ? search.results : [];
+  const out = [];
+  for (const item of pool) {
+    if (out.length >= limit) break;
+    const collectionId = Number(item?.id);
+    if (!Number.isFinite(collectionId)) continue;
+    const parts = await fetchTmdbCollectionImdbIds(collectionId, { limit: 200 });
+    out.push({
+      tmdbId: collectionId,
+      mediaType: "collection",
+      title: sanitizeName(item.name || item.original_name || ""),
+      year: null,
+      poster: tmdbImage(item.poster_path, "w342"),
+      imdbId: "",
+      collectionItemIds: parts,
+      collectionCount: parts.length
+    });
+  }
+  return out;
+}
+
 async function searchTmdbTitles(query, { limit = 5, mediaType = "all" } = {}) {
   if (!tmdbEnabled()) return [];
   const normalized = normalizeTitleSearchQuery(query, mediaType);
@@ -1958,7 +2017,9 @@ async function searchTmdbTitles(query, { limit = 5, mediaType = "all" } = {}) {
   const apiKey = getTmdbKey();
 
   let pool = [];
-  if (normalized.mediaType === "movie") {
+  if (normalized.mediaType === "collection") {
+    return searchTmdbCollections(term, { limit });
+  } else if (normalized.mediaType === "movie") {
     const yearParam = normalized.year ? `&year=${normalized.year}` : "";
     const search = await fetchTmdbJson(`/search/movie?query=${encodeURIComponent(term)}&include_adult=false&page=1${yearParam}`, apiKey);
     pool = Array.isArray(search?.results) ? search.results.map(x => ({ ...x, media_type: "movie" })) : [];
@@ -1987,13 +2048,7 @@ async function searchTmdbTitles(query, { limit = 5, mediaType = "all" } = {}) {
     const tmdbId = Number(item.id);
     if (!Number.isFinite(tmdbId)) continue;
 
-    let imdbId = "";
-    try {
-      const external = await fetchTmdbJson(`/${itemType}/${tmdbId}/external_ids`, apiKey);
-      imdbId = extractImdbId(external?.imdb_id || "");
-    } catch {
-      imdbId = "";
-    }
+    const imdbId = await fetchTmdbExternalImdbId(itemType, tmdbId, apiKey);
 
     const title = itemType === "movie"
       ? sanitizeName(item.title || item.original_title || "")
@@ -2153,7 +2208,7 @@ function sortByOrderKey(metas, lsid, key) {
   const arr =
     (list.orders && Array.isArray(list.orders[key]) && list.orders[key].length)
       ? list.orders[key]
-      : (key === "imdb" ? (list.ids || []) : null);
+      : ((key === "imdb" || key === "trakt") ? (list.ids || []) : null);
   if (!arr) return metas.slice();
   const pos = new Map(arr.map((id, i) => [id, i]));
   return metas.slice().sort((a, b) => (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9));
@@ -2527,6 +2582,7 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         if (next[id].orders.date_asc)  next[id].orders.date_asc  = remap(next[id].orders.date_asc);
         if (next[id].orders.date_desc) next[id].orders.date_desc = remap(next[id].orders.date_desc);
         next[id].orders.imdb = next[id].ids.slice();
+        if (isTraktListId(id)) next[id].orders.trakt = next[id].ids.slice();
         if (PREFS.frozenLists && PREFS.frozenLists[id]) {
           PREFS.frozenLists[id].ids = next[id].ids.slice();
           PREFS.frozenLists[id].orders = next[id].orders;
@@ -2539,6 +2595,7 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       for (const id of Object.keys(next)) {
         next[id].orders = next[id].orders || {};
         next[id].orders.imdb = next[id].ids.slice();
+        if (isTraktListId(id)) next[id].orders.trakt = next[id].ids.slice();
       }
     }
 
@@ -2935,7 +2992,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     }
 
     if (sort === "custom") metas = applyCustomOrder(metas, lsid);
-    else if (sort === "imdb") metas = sortByOrderKey(metas, lsid, "imdb");
+    else if (sort === "imdb" || sort === "trakt") metas = sortByOrderKey(metas, lsid, sort);
     else if (sort === "date_asc" || sort === "date_desc") {
       const haveImdbOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sort]) && LISTS[lsid].orders[sort].length;
       metas = haveImdbOrder ? sortByOrderKey(metas, lsid, sort) : stableSort(metas, sort);
@@ -3179,7 +3236,7 @@ app.post("/api/trakt-verify", async (req, res) => {
     if (!key) return res.status(400).send("Missing Trakt client id");
     PREFS.traktClientId = key;
     PREFS.traktClientIdValid = null;
-    await traktJson("/users/me");
+    await traktJson("/lists/popular?page=1&limit=1");
     PREFS.traktClientIdValid = true;
     await persistSnapshot();
     return res.json({ ok: true, message: "Trakt client id verified and active." });
@@ -3603,14 +3660,26 @@ app.get("/api/list-search-title", async (req, res) => {
     if (!tmdbEnabled()) return res.status(400).json({ ok: false, message: "TMDB key missing or invalid" });
 
     const typeRaw = String(req.query.type || "all").toLowerCase();
-    const type = (typeRaw === "movie" || typeRaw === "tv") ? typeRaw : "all";
+    const type = (typeRaw === "movie" || typeRaw === "tv" || typeRaw === "collection") ? typeRaw : "all";
     const results = await searchTmdbTitles(q, { limit, mediaType: type });
     const existing = lsid ? new Set(listIdsWithEdits(lsid)) : new Set();
-    const items = results.map(item => ({
-      ...item,
-      canAdd: !!(item.imdbId && isImdb(item.imdbId) && !existing.has(item.imdbId)),
-      inList: !!(item.imdbId && existing.has(item.imdbId))
-    }));
+    const items = results.map(item => {
+      if (item.mediaType === "collection") {
+        const partIds = Array.isArray(item.collectionItemIds) ? item.collectionItemIds.filter(isImdb) : [];
+        const addable = partIds.filter(id => !existing.has(id));
+        return {
+          ...item,
+          collectionItemIds: partIds,
+          canAdd: addable.length > 0,
+          inList: partIds.length > 0 && addable.length === 0
+        };
+      }
+      return {
+        ...item,
+        canAdd: !!(item.imdbId && isImdb(item.imdbId) && !existing.has(item.imdbId)),
+        inList: !!(item.imdbId && existing.has(item.imdbId))
+      };
+    });
     res.json({ ok: true, items });
   } catch (e) {
     console.error(e);
@@ -3618,8 +3687,62 @@ app.get("/api/list-search-title", async (req, res) => {
   }
 });
 
+app.post("/api/list-add-collection", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).json({ ok: false, message: "Forbidden" });
+  try {
+    const lsid = String(req.body.lsid || "").trim();
+    const collectionId = Number(req.body.collectionId);
+    if (!isListId(lsid) || !Number.isFinite(collectionId)) return res.status(400).json({ ok: false, message: "Bad input" });
+    if (!tmdbEnabled()) return res.status(400).json({ ok: false, message: "TMDB key missing or invalid" });
+
+    const ids = await fetchTmdbCollectionImdbIds(collectionId, { limit: 300 });
+    if (!ids.length) return res.status(400).json({ ok: false, message: "Collection has no addable IMDb items" });
+
+    const existing = new Set(listIdsWithEdits(lsid));
+    const toAdd = ids.filter(id => isImdb(id) && !existing.has(id));
+
+    if (isOfflineList(lsid)) {
+      const list = LISTS[lsid];
+      if (!list) return res.status(404).json({ ok: false, message: "List not found" });
+      list.ids = appendUniqueIds(list.ids || [], toAdd);
+      list.orders = list.orders || {};
+      list.orders.imdb = list.ids.slice();
+      await saveOfflineList(lsid);
+    } else {
+      PREFS.listEdits = PREFS.listEdits || {};
+      const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+      toAdd.forEach(tt => {
+        if (!ed.added.includes(tt)) ed.added.push(tt);
+      });
+      ed.removed = (ed.removed || []).filter(x => !toAdd.includes(x));
+      syncFrozenEdits(lsid);
+    }
+
+    if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    await persistSnapshot();
+
+    res.json({ ok: true, added: toAdd.length, requested: ids.length });
+
+    if (toAdd.length) {
+      setTimeout(async () => {
+        for (const tt of toAdd) {
+          try {
+            await getBestMeta(tt);
+            CARD.set(tt, cardFor(tt));
+          } catch {}
+        }
+        await persistSnapshot();
+      }, 0);
+    }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, message: "Failed to add collection" });
+  }
+});
+
 // remove an item (tt...) from a list
 app.post("/api/list-remove", async (req, res) => {
+
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
     const lsid = String(req.body.lsid || "");
@@ -4461,6 +4584,8 @@ app.get("/admin", async (req,res)=>{
   }
   .api-eye-btn:hover{background:rgba(255,255,255,.08);}
   .api-eye-btn svg{width:18px;height:18px;fill:#000;opacity:1;}
+  .api-eye-btn.is-revealed{background:transparent;}
+  .api-eye-btn.is-revealed:hover{background:rgba(255,255,255,.08);}
   .bulk-box{
     margin-top:14px;
     padding:12px;
@@ -4713,7 +4838,7 @@ app.get("/admin", async (req,res)=>{
               <div class="api-key-input-wrap">
                 <input id="tmdbKeyInput" type="password" placeholder="Enter TMDB API key" autocomplete="off" spellcheck="false" />
                 <button class="api-eye-btn" type="button" data-toggle-visibility="tmdbKeyInput" aria-label="Show TMDB key" title="Show key">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.5 0 9.5 4.3 10.8 6a1.7 1.7 0 0 1 0 2c-1.3 1.8-5.3 6-10.8 6S2.5 14.8 1.2 13a1.7 1.7 0 0 1 0-2C2.5 9.3 6.5 5 12 5zm0 2c-4.4 0-7.8 3.3-9.2 5 1.4 1.8 4.8 5 9.2 5s7.8-3.2 9.2-5c-1.4-1.7-4.8-5-9.2-5zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 2.2 2.2 3.6l3.1 3.1C3.6 8.1 2.2 9.8 1.2 11a1.7 1.7 0 0 0 0 2c1.3 1.8 5.3 6 10.8 6 2 0 3.8-.6 5.3-1.5l3.1 3.1 1.4-1.4L3.6 2.2zM12 17c-4.4 0-7.8-3.2-9.2-5 1-1.3 2.7-3 4.9-4.1l1.8 1.8a2.5 2.5 0 0 0 3.8 3.1l2.5 2.5A8.8 8.8 0 0 1 12 17zm10.8-6c-1.1-1.5-4.2-4.9-8.7-5.8l1.7 1.7c2.6.9 4.6 2.9 5.4 4.1-.5.6-1.2 1.5-2.2 2.3l1.4 1.4c1.1-.9 1.9-1.9 2.4-2.5a1.7 1.7 0 0 0 0-2.2z"/></svg>
                 </button>
               </div>
               <button id="tmdbSaveBtn" type="button">Save</button>
@@ -4728,7 +4853,7 @@ app.get("/admin", async (req,res)=>{
               <div class="api-key-input-wrap">
                 <input id="traktClientIdInput" type="password" placeholder="Enter Trakt client id" autocomplete="off" spellcheck="false" />
                 <button class="api-eye-btn" type="button" data-toggle-visibility="traktClientIdInput" aria-label="Show Trakt client id" title="Show key">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.5 0 9.5 4.3 10.8 6a1.7 1.7 0 0 1 0 2c-1.3 1.8-5.3 6-10.8 6S2.5 14.8 1.2 13a1.7 1.7 0 0 1 0-2C2.5 9.3 6.5 5 12 5zm0 2c-4.4 0-7.8 3.3-9.2 5 1.4 1.8 4.8 5 9.2 5s7.8-3.2 9.2-5c-1.4-1.7-4.8-5-9.2-5zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 2.2 2.2 3.6l3.1 3.1C3.6 8.1 2.2 9.8 1.2 11a1.7 1.7 0 0 0 0 2c1.3 1.8 5.3 6 10.8 6 2 0 3.8-.6 5.3-1.5l3.1 3.1 1.4-1.4L3.6 2.2zM12 17c-4.4 0-7.8-3.2-9.2-5 1-1.3 2.7-3 4.9-4.1l1.8 1.8a2.5 2.5 0 0 0 3.8 3.1l2.5 2.5A8.8 8.8 0 0 1 12 17zm10.8-6c-1.1-1.5-4.2-4.9-8.7-5.8l1.7 1.7c2.6.9 4.6 2.9 5.4 4.1-.5.6-1.2 1.5-2.2 2.3l1.4 1.4c1.1-.9 1.9-1.9 2.4-2.5a1.7 1.7 0 0 0 0-2.2z"/></svg>
                 </button>
               </div>
               <button id="traktSaveBtn" type="button">Save</button>
@@ -5312,6 +5437,7 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
   typeSel.appendChild(el('option', { value: 'all', text: 'All' }));
   typeSel.appendChild(el('option', { value: 'movie', text: 'Movies' }));
   typeSel.appendChild(el('option', { value: 'tv', text: 'Shows' }));
+  typeSel.appendChild(el('option', { value: 'collection', text: 'Collections' }));
   const searchBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Search' });
   const clearBtn = el('button', { class: 'btn2 title-search-clear', type: 'button', text: '✕', title: 'Clear search' });
   const status = el('span', { class: 'mini muted title-search-status' });
@@ -5336,7 +5462,9 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
   }
 
   function canAddItem(item) {
-    if (!item || !item.imdbId) return false;
+    if (!item) return false;
+    if (item.mediaType === 'collection') return !!item.canAdd;
+    if (!item.imdbId) return false;
     if (item.inList) return false;
     if (localAdded.has(item.imdbId)) return false;
     return !!item.canAdd;
@@ -5350,37 +5478,55 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
       poster.src = item.poster || 'https://images.metahub.space/poster/small/tt0111161/img';
       poster.alt = item.title || 'Poster';
       const meta = el('div', { class: 'meta' });
-      const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
+      const typeLabel = item.mediaType === 'tv' ? 'Series' : (item.mediaType === 'collection' ? 'Collection' : 'Movie');
       const yearText = Number.isFinite(item.year) ? String(item.year) : 'Unknown year';
-      const name = el('div', { class: 'name', text: (item.title || 'Untitled') + ' (' + yearText + ')' });
-      const subtitle = el('div', { class: 'sub', text: typeLabel + (item.imdbId ? ' • ' + item.imdbId : ' • no IMDb id') });
+      const name = el('div', { class: 'name', text: (item.title || 'Untitled') + (item.mediaType === 'collection' ? '' : (' (' + yearText + ')')) });
+      const subtitle = el('div', { class: 'sub', text: item.mediaType === 'collection'
+        ? (typeLabel + ' • ' + (Number(item.collectionCount) || 0) + ' items')
+        : (typeLabel + (item.imdbId ? ' • ' + item.imdbId : ' • no IMDb id')) });
       meta.appendChild(name);
       meta.appendChild(subtitle);
 
-      const addBtn = el('button', { class: 'btn2', type: 'button', text: item.inList || localAdded.has(item.imdbId) ? 'Added' : 'Add' });
+      const addBtn = el('button', { class: 'btn2', type: 'button', text: item.mediaType === 'collection' ? (item.inList ? 'Added' : 'Add collection') : (item.inList || localAdded.has(item.imdbId) ? 'Added' : 'Add') });
       addBtn.disabled = !canAddItem(item);
       addBtn.onclick = async () => {
-        if (!item.imdbId || addBtn.disabled) return;
+        if (addBtn.disabled) return;
         addBtn.disabled = true;
         addBtn.textContent = 'Adding…';
-        status.textContent = 'Adding ' + item.imdbId + '…';
+        status.textContent = item.mediaType === 'collection' ? 'Adding collection…' : ('Adding ' + item.imdbId + '…');
         try {
-          if (typeof onAdd === 'function') await onAdd(item.imdbId, item);
-          else if (lsid) {
-            const r = await fetch('/api/list-add?admin=' + ADMIN, {
+          if (item.mediaType === 'collection') {
+            if (!lsid) throw new Error('Collection add requires a target list.');
+            const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ lsid, id: item.imdbId })
+              body: JSON.stringify({ lsid, collectionId: item.tmdbId })
             });
-            if (!r.ok) throw new Error(await r.text());
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+            item.canAdd = false;
+            item.inList = true;
+            addBtn.textContent = 'Added';
+            status.textContent = 'Added ' + (data.added || 0) + ' item(s) from collection.';
+          } else {
+            if (!item.imdbId) throw new Error('No IMDb id for this result');
+            if (typeof onAdd === 'function') await onAdd(item.imdbId, item);
+            else if (lsid) {
+              const r = await fetch('/api/list-add?admin=' + ADMIN, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lsid, id: item.imdbId })
+              });
+              if (!r.ok) throw new Error(await r.text());
+            }
+            localAdded.add(item.imdbId);
+            item.canAdd = false;
+            addBtn.textContent = 'Added';
+            status.textContent = 'Added ' + item.imdbId + '.';
           }
-          localAdded.add(item.imdbId);
-          item.canAdd = false;
-          addBtn.textContent = 'Added';
-          status.textContent = 'Added ' + item.imdbId + '.';
         } catch (e) {
           addBtn.disabled = false;
-          addBtn.textContent = 'Add';
+          addBtn.textContent = item.mediaType === 'collection' ? 'Add collection' : 'Add';
           status.textContent = e.message || 'Add failed.';
         }
       };
@@ -5791,15 +5937,24 @@ async function render() {
   window.renderDiscovered = renderDiscovered;
 
   function wireSecretVisibility() {
+    const eyeOpen = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.5 0 9.5 4.3 10.8 6a1.7 1.7 0 0 1 0 2c-1.3 1.8-5.3 6-10.8 6S2.5 14.8 1.2 13a1.7 1.7 0 0 1 0-2C2.5 9.3 6.5 5 12 5zm0 2c-4.4 0-7.8 3.3-9.2 5 1.4 1.8 4.8 5 9.2 5s7.8-3.2 9.2-5c-1.4-1.7-4.8-5-9.2-5zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>';
+    const eyeClosed = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 2.2 2.2 3.6l3.1 3.1C3.6 8.1 2.2 9.8 1.2 11a1.7 1.7 0 0 0 0 2c1.3 1.8 5.3 6 10.8 6 2 0 3.8-.6 5.3-1.5l3.1 3.1 1.4-1.4L3.6 2.2zM12 17c-4.4 0-7.8-3.2-9.2-5 1-1.3 2.7-3 4.9-4.1l1.8 1.8a2.5 2.5 0 0 0 3.8 3.1l2.5 2.5A8.8 8.8 0 0 1 12 17zm10.8-6c-1.1-1.5-4.2-4.9-8.7-5.8l1.7 1.7c2.6.9 4.6 2.9 5.4 4.1-.5.6-1.2 1.5-2.2 2.3l1.4 1.4c1.1-.9 1.9-1.9 2.4-2.5a1.7 1.7 0 0 0 0-2.2z"/></svg>';
     document.querySelectorAll('[data-toggle-visibility]').forEach(btn => {
+      const targetId = btn.getAttribute('data-toggle-visibility');
+      const input = targetId ? document.getElementById(targetId) : null;
+      if (!input) return;
+
+      const syncIcon = () => {
+        const hidden = input.type === 'password';
+        btn.innerHTML = hidden ? eyeClosed : eyeOpen;
+        btn.setAttribute('aria-label', hidden ? 'Show key' : 'Hide key');
+        btn.title = hidden ? 'Show key' : 'Hide key';
+      };
+
+      syncIcon();
       btn.onclick = () => {
-        const targetId = btn.getAttribute('data-toggle-visibility');
-        const input = targetId ? document.getElementById(targetId) : null;
-        if (!input) return;
-        const isHidden = input.type === 'password';
-        input.type = isHidden ? 'text' : 'password';
-        btn.setAttribute('aria-label', isHidden ? 'Hide key' : 'Show key');
-        btn.title = isHidden ? 'Hide key' : 'Show key';
+        input.type = input.type === 'password' ? 'text' : 'password';
+        syncIcon();
       };
     });
   }
@@ -6388,7 +6543,7 @@ async function render() {
             const pb = pos.has(b.id)?pos.get(b.id):1e9;
             return pa-pb;
           });
-        } else if (sortKey === 'imdb') {
+        } else if (sortKey === 'imdb' || sortKey === 'trakt') {
           return items.slice().sort((a,b)=> (imdbIndex.get(a.id) ?? 1e9) - (imdbIndex.get(b.id) ?? 1e9));
         } else if (sortKey === 'date_asc' && imdbDateAsc.length){
           const pos = new Map(imdbDateAsc.map((id,i)=>[id,i]));
