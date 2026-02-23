@@ -5227,17 +5227,21 @@ function wireOfflineCreatePanel(refresh) {
   const draftSearch = (searchMount && typeof createTitleSearchWidget === 'function')
     ? createTitleSearchWidget({
         onAdd: async (imdbId, item) => {
+          const pullImdbId = (value) => {
+            const m = String(value || '').match(/tt\d{7,}/i);
+            return m ? m[0] : '';
+          };
           if (item && item.mediaType === 'collection') {
             const before = draftIds.length;
             const rawIds = Array.isArray(item.collectionItemIds) ? item.collectionItemIds : [];
             rawIds.forEach((raw) => {
-              const id = extractImdbId(raw);
+              const id = pullImdbId(raw);
               if (id && !draftIds.includes(id)) draftIds.push(id);
             });
             updateCount();
             return Math.max(0, draftIds.length - before);
           }
-          const id = extractImdbId(imdbId);
+          const id = pullImdbId(imdbId);
           if (id && !draftIds.includes(id)) draftIds.push(id);
           updateCount();
           return id ? 1 : 0;
