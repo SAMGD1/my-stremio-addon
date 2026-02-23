@@ -5523,8 +5523,23 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
               if (!r.ok) throw new Error(data.message || 'Failed to add collection');
               addedCount = Number(data.added) || 0;
             } else if (typeof onAdd === 'function') {
-              const maybeAdded = await onAdd('', item);
-              addedCount = Number.isFinite(Number(maybeAdded)) ? Number(maybeAdded) : 0;
+              const normalizedIds = Array.from(new Set((Array.isArray(item.collectionItemIds) ? item.collectionItemIds : [])
+                .map((raw) => {
+                  const m = String(raw || '').match(/tt\d{7,}/i);
+                  return m ? m[0] : '';
+                })
+                .filter(Boolean)));
+              if (normalizedIds.length) {
+                for (const cid of normalizedIds) {
+                  const maybeAdded = await onAdd(cid, { ...item, mediaType: 'movie', imdbId: cid });
+                  const n = Number(maybeAdded);
+                  addedCount += Number.isFinite(n) ? n : 1;
+                }
+              } else {
+                const maybeAdded = await onAdd('', item);
+                const n = Number(maybeAdded);
+                addedCount = Number.isFinite(n) ? n : 0;
+              }
               if (addedCount <= 0) throw new Error('Collection has no new addable IMDb items.');
             } else {
               throw new Error('Collection add requires a target list.');
