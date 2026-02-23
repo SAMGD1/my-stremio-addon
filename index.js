@@ -5526,14 +5526,25 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
               if (!r.ok) throw new Error(data.message || 'Failed to add collection');
               addedCount = Number(data.added) || 0;
             } else if (typeof onAdd === 'function') {
-              const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ collectionId: item.tmdbId, dryRun: true })
-              });
-              const data = await r.json().catch(() => ({}));
-              if (!r.ok) throw new Error(data.message || 'Failed to load collection items');
-              const ids = Array.isArray(data.ids) ? data.ids : [];
+              let resolvedIds = [];
+              try {
+                const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ collectionId: item.tmdbId, dryRun: true })
+                });
+                const data = await r.json().catch(() => ({}));
+                if (r.ok) resolvedIds = Array.isArray(data.ids) ? data.ids : [];
+              } catch {}
+
+              const fallbackIds = Array.isArray(item.collectionItemIds) ? item.collectionItemIds : [];
+              const ids = Array.from(new Set((resolvedIds.length ? resolvedIds : fallbackIds)
+                .map((raw) => {
+                  const m = String(raw || '').match(/tt\d{7,}/i);
+                  return m ? m[0] : '';
+                })
+                .filter(Boolean)));
+
               for (const cid of ids) {
                 const maybeAdded = await onAdd(cid, { ...item, mediaType: 'movie', imdbId: cid });
                 const n = Number(maybeAdded);
