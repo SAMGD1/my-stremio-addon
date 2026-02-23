@@ -153,6 +153,25 @@ let LAST_MANIFEST_KEY = "";
 // ----------------- UTILS -----------------
 const isImdb = v => /^tt\d{7,}$/i.test(String(v||""));
 
+const TMDB_DRAFT_REF_RE = /^tmdb:(movie|tv|collection):(\d+)$/i;
+
+function parseTmdbDraftRef(value) {
+  const m = String(value || "").trim().match(TMDB_DRAFT_REF_RE);
+  if (!m) return null;
+  const mediaType = String(m[1] || "").toLowerCase();
+  const tmdbId = Number(m[2]);
+  if (!Number.isFinite(tmdbId)) return null;
+  return { mediaType, tmdbId };
+}
+
+function makeTmdbDraftRef(mediaType, tmdbId) {
+  const mt = String(mediaType || "").toLowerCase();
+  const id = Number(tmdbId);
+  if (!Number.isFinite(id)) return "";
+  if (mt !== "movie" && mt !== "tv" && mt !== "collection") return "";
+  return `tmdb:${mt}:${id}`;
+}
+
 const isImdbListId = v => /^ls\d{6,}$/i.test(String(v||""));
 const isImdbCustomId = v => /^imdb:[a-z0-9._-]+$/i.test(String(v||""));
 const isTraktListId = v => /^trakt:[^:]+:[^:]+$/i.test(String(v||""));
@@ -176,6 +195,18 @@ function parseImdbCsv(text) {
     ids.push(tt);
   }
   return ids;
+}
+
+function appendUniqueRawIds(base, incoming) {
+  const out = Array.isArray(base) ? base.slice() : [];
+  const seen = new Set(out);
+  for (const raw of incoming || []) {
+    const value = String(raw || "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
 }
 
 function appendUniqueIds(base, incoming) {
@@ -1982,6 +2013,43 @@ async function fetchTmdbCollectionImdbIds(collectionId, { limit = 120 } = {}) {
   return out;
 }
 
+async function resolveDraftRawIdsToImdb(rawIds) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of rawIds || []) {
+    const value = String(raw || "").trim();
+    if (!value) continue;
+
+    if (isImdb(value)) {
+      if (!seen.has(value)) {
+        seen.add(value);
+        out.push(value);
+      }
+      continue;
+    }
+
+    const ref = parseTmdbDraftRef(value);
+    if (!ref) continue;
+
+    if (ref.mediaType === "collection") {
+      const ids = await fetchTmdbCollectionImdbIds(ref.tmdbId, { limit: 300 });
+      for (const tt of ids) {
+        if (!isImdb(tt) || seen.has(tt)) continue;
+        seen.add(tt);
+        out.push(tt);
+      }
+      continue;
+    }
+
+    const imdbId = await fetchTmdbExternalImdbId(ref.mediaType, ref.tmdbId, getTmdbKey());
+    if (isImdb(imdbId) && !seen.has(imdbId)) {
+      seen.add(imdbId);
+      out.push(imdbId);
+    }
+  }
+  return out;
+}
+
 async function searchTmdbCollections(query, { limit = 5 } = {}) {
   if (!tmdbEnabled()) return [];
   const term = String(query || "").trim();
@@ -3338,11 +3406,15 @@ app.post("/api/create-offline-list", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
     const name = sanitizeName(req.body.name || "");
-    const idsFromBody = Array.isArray(req.body.ids) ? req.body.ids.filter(isImdb) : [];
+    const rawIdsFromBody = Array.isArray(req.body.ids)
+      ? req.body.ids.map(v => String(v || "").trim()).filter(Boolean)
+      : [];
     const csvText = String(req.body.csvText || "");
     const csvIds = csvText ? parseImdbCsv(csvText) : [];
-    const ids = appendUniqueIds([], idsFromBody.concat(csvIds));
+    const rawIds = appendUniqueRawIds([], rawIdsFromBody.concat(csvIds));
+    const ids = await resolveDraftRawIdsToImdb(rawIds);
     if (!name) return res.status(400).send("Name required");
+    if (!ids.length && rawIds.length) return res.status(400).send("Could not resolve queued TMDB items to IMDb IDs");
     const newId = makeCustomListId("offline");
     LISTS[newId] = {
       id: newId,
@@ -3667,23 +3739,43 @@ app.get("/api/list-search-title", async (req, res) => {
       if (item.mediaType === "collection") {
         const partIds = Array.isArray(item.collectionItemIds) ? item.collectionItemIds.filter(isImdb) : [];
         const addable = partIds.filter(id => !existing.has(id));
+        const hasTmdbRef = Number.isFinite(Number(item.tmdbId));
         return {
           ...item,
           collectionItemIds: partIds,
-          canAdd: addable.length > 0,
-          inList: partIds.length > 0 && addable.length === 0
+          canAdd: lsid ? (addable.length > 0) : (hasTmdbRef || addable.length > 0),
+          inList: !!(lsid && partIds.length > 0 && addable.length === 0),
+          tmdbRef: makeTmdbDraftRef("collection", item.tmdbId)
         };
       }
+      const hasImdb = !!(item.imdbId && isImdb(item.imdbId));
+      const hasTmdbRef = Number.isFinite(Number(item.tmdbId)) && (item.mediaType === "movie" || item.mediaType === "tv");
       return {
         ...item,
-        canAdd: !!(item.imdbId && isImdb(item.imdbId) && !existing.has(item.imdbId)),
-        inList: !!(item.imdbId && existing.has(item.imdbId))
+        canAdd: lsid ? !!(hasImdb && !existing.has(item.imdbId)) : !!(hasImdb || hasTmdbRef),
+        inList: !!(lsid && hasImdb && existing.has(item.imdbId)),
+        tmdbRef: makeTmdbDraftRef(item.mediaType, item.tmdbId)
       };
     });
     res.json({ ok: true, items });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, message: "Search failed" });
+  }
+});
+
+app.get("/api/tmdb-collection-items", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).json({ ok: false, message: "Forbidden" });
+  try {
+    const collectionId = Number(req.query.collectionId);
+    if (!Number.isFinite(collectionId)) return res.status(400).json({ ok: false, message: "Bad input" });
+    if (!tmdbEnabled()) return res.status(400).json({ ok: false, message: "TMDB key missing or invalid" });
+
+    const ids = await fetchTmdbCollectionImdbIds(collectionId, { limit: 300 });
+    res.json({ ok: true, ids });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, message: "Failed to fetch collection items" });
   }
 });
 
@@ -4208,19 +4300,21 @@ app.get("/admin", async (req,res)=>{
   .create-layout{
     display:grid;
     gap:14px;
-    grid-template-columns:1.2fr .8fr;
+    grid-template-columns:.95fr 1.05fr;
     grid-template-areas:
-      "name actions"
+      "name cancel"
       "csv imdb"
-      "meta meta";
+      "meta actions";
     align-items:start;
   }
   .create-name{grid-area:name;}
-  .create-actions{grid-area:actions;justify-self:end;text-align:right;}
+  .create-cancel{grid-area:cancel;justify-self:end;text-align:right;}
+  .create-actions{grid-area:actions;justify-self:end;align-self:end;text-align:right;}
   .create-actions .actions-stack{
     align-items:flex-end;
   }
   .create-csv{grid-area:csv;}
+  .create-csv .csv-drop{max-width:560px;}
   .create-imdb{grid-area:imdb;}
   .create-meta{grid-area:meta;}
   .actions-stack{
@@ -4246,7 +4340,7 @@ app.get("/admin", async (req,res)=>{
     color:#dcd8ff;
     cursor:pointer;
     transition:background .2s ease, border-color .2s ease;
-    min-height:190px;
+    min-height:150px;
     display:flex;
     flex-direction:column;
     align-items:center;
@@ -4387,22 +4481,47 @@ app.get("/admin", async (req,res)=>{
     margin:10px auto 6px;
   }
   .title-search-row{
+    display:grid;
+    gap:8px;
+    grid-template-columns:minmax(180px,1fr) 128px auto;
+    align-items:end;
+  }
+  .title-search-row input{
+    width:100%;
+    min-width:0;
+    box-sizing:border-box;
+  }
+  .title-search-row select{
+    width:100%;
+    min-width:0;
+  }
+  .title-search-actions{
     display:flex;
     gap:8px;
     align-items:center;
-    flex-wrap:wrap;
+    justify-content:flex-start;
+    white-space:nowrap;
   }
-  .title-search-row input{
-    flex:1;
-    min-width:180px;
-  }
-  .title-search-row select{
-    min-width:130px;
+  .title-search-actions .bulk-btn{
+    margin-top:0;
+    height:36px;
+    padding:8px 16px;
   }
   .title-search-clear{
-    min-width:34px;
+    min-width:36px;
+    height:36px;
     padding:8px 11px;
     justify-content:center;
+  }
+  @media(max-width:640px){
+    .title-search-row{
+      grid-template-columns:1fr 128px;
+      align-items:center;
+    }
+    .title-search-actions{
+      grid-column:1 / -1;
+      justify-content:flex-start;
+    }
   }
   .title-search-status{
     display:block;
@@ -5012,10 +5131,12 @@ app.get("/admin", async (req,res)=>{
             <label class="mini">List name</label>
             <input id="offlineListName" class="name-input" type="text" placeholder="Name your list" />
           </div>
+          <div class="create-cancel">
+            <button id="offlineCancelBtn" type="button" class="btn2">Cancel</button>
+          </div>
           <div class="create-actions">
             <div class="actions-stack">
               <button id="offlineSaveBtn" type="button">Save list</button>
-              <button id="offlineCancelBtn" type="button">Cancel</button>
               <span id="offlineSaveStatus" class="mini muted"></span>
             </div>
           </div>
@@ -5024,8 +5145,8 @@ app.get("/admin", async (req,res)=>{
             <label class="csv-drop" id="offlineCsvDrop">
               <input id="offlineCsvInput" type="file" accept=".csv,text/csv" />
               <div class="csv-card">
-                <div><b>Drop your IMDb CSV</b> or click to choose file</div>
-                <div class="mini muted">Drag & drop is supported. We read IMDb tt... IDs in order.</div>
+                <div><b>Drop IMDb CSV</b> or choose file</div>
+                <div class="mini muted">Drag & drop supported. Reads IMDb tt IDs in order.</div>
               </div>
               <div id="offlineCsvStatus" class="mini muted"></div>
             </label>
@@ -5036,9 +5157,9 @@ app.get("/admin", async (req,res)=>{
           </div>
           <div class="create-imdb">
             <div class="imdb-box">
+              <div id="offlineTitleSearchMount"></div>
               <label class="mini">Add by IMDb ID (tt...)</label>
               <input id="offlineAddIdInput" type="text" placeholder="tt1234567 or IMDb URL" />
-              <div id="offlineTitleSearchMount"></div>
               <label class="mini bulk-label">Add those IMDb tt in bulk</label>
               <textarea id="offlineAddBulkInput" placeholder="tt1234567 tt7654321 or IMDb URLs"></textarea>
               <button id="offlineAddBulkBtn" class="bulk-btn" type="button">Add bulk</button>
@@ -5440,12 +5561,14 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
   typeSel.appendChild(el('option', { value: 'collection', text: 'Collections' }));
   const searchBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Search' });
   const clearBtn = el('button', { class: 'btn2 title-search-clear', type: 'button', text: '✕', title: 'Clear search' });
+  const actions = el('div', { class: 'title-search-actions' });
+  actions.appendChild(searchBtn);
+  actions.appendChild(clearBtn);
   const status = el('span', { class: 'mini muted title-search-status' });
   const results = el('div', { class: 'title-search-results' });
   row.appendChild(input);
   row.appendChild(typeSel);
-  row.appendChild(searchBtn);
-  row.appendChild(clearBtn);
+  row.appendChild(actions);
   root.appendChild(label);
   root.appendChild(row);
   root.appendChild(status);
@@ -5461,13 +5584,28 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
     lastItems = [];
   }
 
+  function draftAddKey(item) {
+    if (!item) return "";
+    if (item.imdbId) return String(item.imdbId);
+    if (item.tmdbRef) return String(item.tmdbRef);
+    if (Number.isFinite(Number(item.tmdbId)) && item.mediaType) return 'tmdb:' + item.mediaType + ':' + Number(item.tmdbId);
+    return "";
+  }
+
   function canAddItem(item) {
     if (!item) return false;
-    if (item.mediaType === 'collection') return !!item.canAdd;
-    if (!item.imdbId) return false;
     if (item.inList) return false;
-    if (localAdded.has(item.imdbId)) return false;
+    const key = draftAddKey(item);
+    if (key && localAdded.has(key)) return false;
     return !!item.canAdd;
+  }
+
+  async function addCollectionToDraft(item) {
+    if (typeof onAdd !== 'function') throw new Error('Collection add requires a target list.');
+    const ref = item?.tmdbRef || (Number.isFinite(Number(item?.tmdbId)) ? ('tmdb:collection:' + Number(item.tmdbId)) : "");
+    if (!ref) throw new Error('Collection id missing');
+    await onAdd(ref, item);
+    return { added: Number(item.collectionCount) || 1, total: Number(item.collectionCount) || 1 };
   }
 
   function renderItems(items) {
@@ -5487,31 +5625,41 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
       meta.appendChild(name);
       meta.appendChild(subtitle);
 
-      const addBtn = el('button', { class: 'btn2', type: 'button', text: item.mediaType === 'collection' ? (item.inList ? 'Added' : 'Add collection') : (item.inList || localAdded.has(item.imdbId) ? 'Added' : 'Add') });
+      const addBtn = el('button', { class: 'btn2', type: 'button', text: item.mediaType === 'collection' ? (item.inList ? 'Added' : 'Add collection') : (item.inList || localAdded.has(draftAddKey(item)) ? 'Added' : 'Add') });
       addBtn.disabled = !canAddItem(item);
       addBtn.onclick = async () => {
         if (addBtn.disabled) return;
         addBtn.disabled = true;
         addBtn.textContent = 'Adding…';
-        status.textContent = item.mediaType === 'collection' ? 'Adding collection…' : ('Adding ' + item.imdbId + '…');
+        status.textContent = item.mediaType === 'collection' ? 'Adding collection…' : ('Adding ' + (item.imdbId || item.tmdbRef || 'item') + '…');
         try {
           if (item.mediaType === 'collection') {
-            if (!lsid) throw new Error('Collection add requires a target list.');
-            const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ lsid, collectionId: item.tmdbId })
-            });
-            const data = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+            let addedCount = 0;
+            if (lsid) {
+              const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lsid, collectionId: item.tmdbId })
+              });
+              const data = await r.json().catch(() => ({}));
+              if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+              addedCount = Number(data.added) || 0;
+            } else {
+              const draftResult = await addCollectionToDraft(item);
+              addedCount = draftResult.added;
+            }
             item.canAdd = false;
             item.inList = true;
             addBtn.textContent = 'Added';
-            status.textContent = 'Added ' + (data.added || 0) + ' item(s) from collection.';
+            status.textContent = 'Added ' + addedCount + ' item(s) from collection.';
           } else {
-            if (!item.imdbId) throw new Error('No IMDb id for this result');
-            if (typeof onAdd === 'function') await onAdd(item.imdbId, item);
-            else if (lsid) {
+            const addKey = draftAddKey(item);
+            if (typeof onAdd === 'function') {
+              if (item.imdbId) await onAdd(item.imdbId, item);
+              else if (item.tmdbRef) await onAdd(item.tmdbRef, item);
+              else throw new Error('No addable TMDB/IMDb id for this result');
+            } else if (lsid) {
+              if (!item.imdbId) throw new Error('No IMDb id for this result');
               const r = await fetch('/api/list-add?admin=' + ADMIN, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -5519,10 +5667,10 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
               });
               if (!r.ok) throw new Error(await r.text());
             }
-            localAdded.add(item.imdbId);
+            if (addKey) localAdded.add(addKey);
             item.canAdd = false;
             addBtn.textContent = 'Added';
-            status.textContent = 'Added ' + item.imdbId + '.';
+            status.textContent = 'Added ' + (item.imdbId || item.tmdbRef || item.title || 'item') + '.';
           }
         } catch (e) {
           addBtn.disabled = false;
