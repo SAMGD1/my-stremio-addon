@@ -3687,6 +3687,21 @@ app.get("/api/list-search-title", async (req, res) => {
   }
 });
 
+app.get("/api/tmdb-collection-items", async (req, res) => {
+  if (!adminAllowed(req)) return res.status(403).json({ ok: false, message: "Forbidden" });
+  try {
+    const collectionId = Number(req.query.collectionId);
+    if (!Number.isFinite(collectionId)) return res.status(400).json({ ok: false, message: "Bad input" });
+    if (!tmdbEnabled()) return res.status(400).json({ ok: false, message: "TMDB key missing or invalid" });
+
+    const ids = await fetchTmdbCollectionImdbIds(collectionId, { limit: 300 });
+    res.json({ ok: true, ids });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, message: "Failed to fetch collection items" });
+  }
+});
+
 app.post("/api/list-add-collection", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).json({ ok: false, message: "Forbidden" });
   try {
@@ -5471,7 +5486,15 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
   }
 
   async function addCollectionToDraft(item) {
-    const partIds = Array.isArray(item?.collectionItemIds) ? item.collectionItemIds.filter(id => /^tt\d{7,}$/i.test(id)) : [];
+    let partIds = Array.isArray(item?.collectionItemIds) ? item.collectionItemIds.filter(id => /^tt\d{7,}$/i.test(id)) : [];
+    if (!partIds.length && Number.isFinite(Number(item?.tmdbId))) {
+      const r = await fetch('/api/tmdb-collection-items?admin=' + ADMIN + '&collectionId=' + encodeURIComponent(String(item.tmdbId)));
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.message || 'Failed to fetch collection items');
+      partIds = Array.isArray(data.ids) ? data.ids.filter(id => /^tt\d{7,}$/i.test(id)) : [];
+      item.collectionItemIds = partIds.slice();
+      item.collectionCount = partIds.length;
+    }
     if (!partIds.length) throw new Error('Collection has no addable IMDb items');
     if (typeof onAdd !== 'function') throw new Error('Collection add requires a target list.');
 
