@@ -5228,18 +5228,19 @@ function wireOfflineCreatePanel(refresh) {
     ? createTitleSearchWidget({
         onAdd: async (imdbId, item) => {
           if (item && item.mediaType === 'collection') {
-            const ids = Array.isArray(item.collectionItemIds)
-              ? item.collectionItemIds.filter(id => /^tt\d{7,}$/i.test(String(id || '')))
-              : [];
-            ids.forEach((id) => {
-              if (!draftIds.includes(id)) draftIds.push(id);
+            const before = draftIds.length;
+            const rawIds = Array.isArray(item.collectionItemIds) ? item.collectionItemIds : [];
+            rawIds.forEach((raw) => {
+              const id = extractImdbId(raw);
+              if (id && !draftIds.includes(id)) draftIds.push(id);
             });
             updateCount();
-            return ids.length;
+            return Math.max(0, draftIds.length - before);
           }
-          if (!draftIds.includes(imdbId)) draftIds.push(imdbId);
+          const id = extractImdbId(imdbId);
+          if (id && !draftIds.includes(id)) draftIds.push(id);
           updateCount();
-          return 1;
+          return id ? 1 : 0;
         }
       })
     : null;
@@ -5519,7 +5520,8 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
               addedCount = Number(data.added) || 0;
             } else if (typeof onAdd === 'function') {
               const maybeAdded = await onAdd('', item);
-              addedCount = Number(maybeAdded) || (Array.isArray(item.collectionItemIds) ? item.collectionItemIds.length : 0);
+              addedCount = Number.isFinite(Number(maybeAdded)) ? Number(maybeAdded) : 0;
+              if (addedCount <= 0) throw new Error('Collection has no new addable IMDb items.');
             } else {
               throw new Error('Collection add requires a target list.');
             }
