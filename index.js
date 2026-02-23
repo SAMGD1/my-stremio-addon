@@ -3692,11 +3692,13 @@ app.post("/api/list-add-collection", async (req, res) => {
   try {
     const lsid = String(req.body.lsid || "").trim();
     const collectionId = Number(req.body.collectionId);
-    if (!isListId(lsid) || !Number.isFinite(collectionId)) return res.status(400).json({ ok: false, message: "Bad input" });
+    const dryRun = !!req.body.dryRun;
+    if ((!dryRun && !isListId(lsid)) || !Number.isFinite(collectionId)) return res.status(400).json({ ok: false, message: "Bad input" });
     if (!tmdbEnabled()) return res.status(400).json({ ok: false, message: "TMDB key missing or invalid" });
 
     const ids = await fetchTmdbCollectionImdbIds(collectionId, { limit: 300 });
     if (!ids.length) return res.status(400).json({ ok: false, message: "Collection has no addable IMDb items" });
+    if (dryRun) return res.json({ ok: true, ids, added: ids.length, requested: ids.length });
 
     const existing = new Set(listIdsWithEdits(lsid));
     const toAdd = ids.filter(id => isImdb(id) && !existing.has(id));
@@ -5242,9 +5244,10 @@ function wireOfflineCreatePanel(refresh) {
             return Math.max(0, draftIds.length - before);
           }
           const id = pullImdbId(imdbId);
+          const before = draftIds.length;
           if (id && !draftIds.includes(id)) draftIds.push(id);
           updateCount();
-          return id ? 1 : 0;
+          return Math.max(0, draftIds.length - before);
         }
       })
     : null;
@@ -5523,22 +5526,18 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
               if (!r.ok) throw new Error(data.message || 'Failed to add collection');
               addedCount = Number(data.added) || 0;
             } else if (typeof onAdd === 'function') {
-              const normalizedIds = Array.from(new Set((Array.isArray(item.collectionItemIds) ? item.collectionItemIds : [])
-                .map((raw) => {
-                  const m = String(raw || '').match(/tt\d{7,}/i);
-                  return m ? m[0] : '';
-                })
-                .filter(Boolean)));
-              if (normalizedIds.length) {
-                for (const cid of normalizedIds) {
-                  const maybeAdded = await onAdd(cid, { ...item, mediaType: 'movie', imdbId: cid });
-                  const n = Number(maybeAdded);
-                  addedCount += Number.isFinite(n) ? n : 1;
-                }
-              } else {
-                const maybeAdded = await onAdd('', item);
+              const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ collectionId: item.tmdbId, dryRun: true })
+              });
+              const data = await r.json().catch(() => ({}));
+              if (!r.ok) throw new Error(data.message || 'Failed to load collection items');
+              const ids = Array.isArray(data.ids) ? data.ids : [];
+              for (const cid of ids) {
+                const maybeAdded = await onAdd(cid, { ...item, mediaType: 'movie', imdbId: cid });
                 const n = Number(maybeAdded);
-                addedCount = Number.isFinite(n) ? n : 0;
+                addedCount += Number.isFinite(n) ? n : 0;
               }
               if (addedCount <= 0) throw new Error('Collection has no new addable IMDb items.');
             } else {
