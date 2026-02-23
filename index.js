@@ -7623,6 +7623,7 @@ render();
 
       for (const id of Object.keys(LISTS)) {
         if (LISTS[id]?.name) LISTS[id].name = sanitizeName(LISTS[id].name);
+        materializeDateDescForList(LISTS[id]);
       }
       ensureAllListOrders(LISTS);
 
