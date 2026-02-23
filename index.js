@@ -2871,7 +2871,7 @@ function catalogs(){
   return ids.map(lsid => ({
     type: "my lists",
     id: `list:${lsid}`,
-    name: `${isFrozenList(lsid) ? "⭐" : "🗂"} ${listDisplayName(lsid)}`,
+    name: `${isFrozenList(lsid) ? "❄️" : "🗂"} ${listDisplayName(lsid)}`,
     extraSupported: ["skip","limit","sort","genre"],
     extra: [
       { name:"skip" }, { name:"limit" },
@@ -6011,7 +6011,7 @@ async function render() {
     const finalOrder = ordered.concat(missing);
     finalOrder.forEach(id => {
       const li = el('li');
-      const title = (frozenMap[id] ? '⭐ ' : '') + displayName(id);
+      const title = (frozenMap[id] ? '❄️ ' : '') + displayName(id);
       li.appendChild(el('b', { text: title }));
       li.appendChild(document.createTextNode(' '));
       li.appendChild(el('small', { text: '(' + listCount(id) + ' items)' }));
@@ -6881,7 +6881,7 @@ async function render() {
     const moveTd = el('td',{},[moveWrap]);
 
     const nameCell = el('td',{});
-    const rowTitle = (isFrozen ? '⭐ ' : '') + displayName(lsid);
+    const rowTitle = (isFrozen ? '❄️ ' : '') + displayName(lsid);
     const nameLabel = el('div',{text:rowTitle, title:lsid});
     nameCell.appendChild(nameLabel);
     if (!isSimpleMode) nameCell.appendChild(el('small',{text:lsid}));
