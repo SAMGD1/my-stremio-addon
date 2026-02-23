@@ -4,7 +4,6 @@
 "use strict";
 const express = require("express");
 const fs = require("fs/promises");
-const zlib = require("zlib");
 
 (function loadDotEnvLocal() {
   try {
@@ -42,8 +41,7 @@ const IMDB_LIST_IDS = (process.env.IMDB_LIST_IDS || "")
   .split(/[,\s]+/).map(s => s.trim()).filter(s => /^ls\d{6,}$/i.test(s));
 
 // Snapshot persistence
-const SNAP_LOCAL_GZ = "data/snapshot.json.gz";
-const SNAP_LOCAL_LEGACY = "data/snapshot.json";
+const SNAP_LOCAL    = "data/snapshot.json";
 const FROZEN_DIR    = "data/frozen";
 const BACKUP_DIR    = "data/backup";
 const OFFLINE_DIR   = "data/manual";
@@ -336,13 +334,9 @@ function isFrozenList(lsid) {
 }
 
 function frozenEntryFor(lsid, list) {
-  const next = ensureListOrders({
-    ids: (list?.ids || []).slice(),
-    orders: list?.orders ? { ...list.orders } : {}
-  });
   return {
-    ids: next.ids,
-    orders: next.orders,
+    ids: (list?.ids || []).slice(),
+    orders: list?.orders || {},
     name: listDisplayName(lsid),
     url: list?.url,
     frozenAt: PREFS.frozenLists?.[lsid]?.frozenAt || Date.now(),
@@ -455,8 +449,7 @@ async function imdbGraphqlGet(operationName, variables, sha256Hash) {
 }
 
 // ---- Supabase snapshot ----
-const SNAPSHOT_PATH_GZ = "snapshot.json.gz";
-const SNAPSHOT_PATH_LEGACY = "snapshot.json";
+const SNAPSHOT_PATH = "snapshot.json";
 const MANUAL_INDEX_PATH = "manual/index.json";
 const CUSTOM_INDEX_PATH = "custom/index.json";
 const FROZEN_INDEX_PATH = "frozen/index.json";
@@ -511,57 +504,11 @@ function scheduleSave(snapshot) {
     const data = pendingSnapshot;
     pendingSnapshot = null;
     getSupabaseApi()
-      .then(({ putBuffer }) => putBuffer(SNAPSHOT_PATH_GZ, encodeSnapshot(data), "application/gzip"))
+      .then(({ putJSON }) => putJSON(SNAPSHOT_PATH, data))
       .catch((err) => {
         if (SUPABASE_ENABLED) console.warn("[SNAPSHOT] supabase save failed:", err?.message || err);
       });
   }, 10000);
-}
-
-function encodeSnapshot(obj) {
-  const json = JSON.stringify(obj);
-  return zlib.gzipSync(Buffer.from(json, "utf8"));
-}
-
-function decodeSnapshot(buffer) {
-  const json = zlib.gunzipSync(buffer).toString("utf8");
-  return JSON.parse(json);
-}
-
-function sanitizeOrdersForSnapshot(orders) {
-  const src = orders && typeof orders === "object" ? orders : {};
-  const out = {};
-  for (const [key, value] of Object.entries(src)) {
-    if (!Array.isArray(value)) continue;
-    if (key === "date_desc") continue;
-    out[key] = value.slice();
-  }
-  return out;
-}
-
-function ensureListOrders(list) {
-  if (!list || typeof list !== "object") return list;
-  list.orders = list.orders && typeof list.orders === "object" ? list.orders : {};
-
-  if (Array.isArray(list.orders.date_asc)) {
-    list.orders.date_asc = list.orders.date_asc.filter(isImdb);
-  }
-  if (Array.isArray(list.orders.date_desc)) {
-    list.orders.date_desc = list.orders.date_desc.filter(isImdb);
-  }
-
-  if (
-    !Array.isArray(list.orders.date_desc) &&
-    Array.isArray(list.orders.date_asc) &&
-    list.orders.date_asc.length
-  ) {
-    list.orders.date_desc = list.orders.date_asc.slice().reverse();
-  }
-  return list;
-}
-
-function ensureAllListOrders(source = LISTS) {
-  for (const list of Object.values(source || {})) ensureListOrders(list);
 }
 
 async function loadSupabaseIndex(path) {
@@ -612,26 +559,20 @@ async function saveSnapshot(obj) {
   // local (best effort)
   try {
     await fs.mkdir("data", { recursive: true });
-    await fs.writeFile(SNAP_LOCAL_GZ, encodeSnapshot(obj));
+    await fs.writeFile(SNAP_LOCAL, JSON.stringify(obj, null, 2), "utf8");
   } catch {/* ignore */}
   scheduleSave(obj);
 }
 async function loadSnapshot() {
   // try Supabase first
   try {
-    const { getBuffer, getJSON } = await getSupabaseApi();
-    const gz = await getBuffer(SNAPSHOT_PATH_GZ);
-    if (gz) return decodeSnapshot(gz);
-    const data = await getJSON(SNAPSHOT_PATH_LEGACY);
+    const { getJSON } = await getSupabaseApi();
+    const data = await getJSON(SNAPSHOT_PATH);
     if (data) return data;
   } catch {/* ignore */}
   // local
   try {
-    const gz = await fs.readFile(SNAP_LOCAL_GZ);
-    return decodeSnapshot(gz);
-  } catch {/* ignore */}
-  try {
-    const txt = await fs.readFile(SNAP_LOCAL_LEGACY, "utf8");
+    const txt = await fs.readFile(SNAP_LOCAL, "utf8");
     return JSON.parse(txt);
   } catch { return null; }
 }
@@ -699,7 +640,6 @@ async function loadOfflineLists() {
           ids: ids.slice(),
           orders: data.orders || { imdb: ids.slice() }
         };
-        ensureListOrders(LISTS[id]);
         PREFS.customLists = PREFS.customLists || {};
         if (!PREFS.customLists[id]) {
           PREFS.customLists[id] = { kind: "offline", sources: ["offline"], createdAt: data.createdAt || Date.now() };
@@ -735,7 +675,6 @@ async function loadOfflineLists() {
             ids: listIds.slice(),
             orders: payload.orders || { imdb: listIds.slice() }
           };
-          ensureListOrders(LISTS[id]);
           PREFS.customLists = PREFS.customLists || {};
           if (!PREFS.customLists[id]) {
             PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
@@ -771,7 +710,6 @@ async function loadOfflineLists() {
             ids: listIds.slice(),
             orders: payload.orders || { imdb: listIds.slice() }
           };
-          ensureListOrders(LISTS[id]);
           PREFS.customLists = PREFS.customLists || {};
           if (!PREFS.customLists[id]) {
             PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
@@ -839,18 +777,10 @@ async function reconcileFrozenBackups() {
 }
 
 async function persistSnapshot() {
-  const listsForSnapshot = Object.create(null);
-  for (const [id, list] of Object.entries(LISTS || {})) {
-    listsForSnapshot[id] = {
-      ...list,
-      ids: Array.isArray(list?.ids) ? list.ids.slice() : [],
-      orders: sanitizeOrdersForSnapshot(list?.orders)
-    };
-  }
   await saveSnapshot({
     lastSyncAt: LAST_SYNC_AT,
     manifestRev: MANIFEST_REV,
-    lists: listsForSnapshot,
+    lists: LISTS,
     prefs: PREFS,
     fallback: Object.fromEntries(FALLBK),
     cards: Object.fromEntries(CARD),
@@ -924,7 +854,6 @@ async function loadCustomLists() {
             ids: Array.isArray(payload.ids) ? payload.ids.slice() : [],
             orders: payload.orders || {}
           };
-          ensureListOrders(LISTS[id]);
           PREFS.customLists = PREFS.customLists || {};
           PREFS.customLists[id] = {
             kind: backedKinds.has(payload.kind) ? payload.kind : kind,
@@ -958,7 +887,6 @@ async function loadCustomLists() {
           ids: payload.ids.slice(),
           orders: payload.orders || {}
         };
-        ensureListOrders(LISTS[id]);
         PREFS.customLists = PREFS.customLists || {};
         PREFS.customLists[id] = {
           kind: backedKinds.has(payload.kind) ? payload.kind : kind,
@@ -2345,18 +2273,9 @@ function applyCustomOrder(metas, lsid) {
 function sortByOrderKey(metas, lsid, key) {
   const list = LISTS[lsid];
   if (!list) return metas.slice();
-  ensureListOrders(list);
-  const derivedDateDesc =
-    key === "date_desc" &&
-    (!list.orders || !Array.isArray(list.orders.date_desc) || !list.orders.date_desc.length) &&
-    Array.isArray(list.orders?.date_asc)
-      ? list.orders.date_asc.slice().reverse()
-      : null;
   const arr =
     (list.orders && Array.isArray(list.orders[key]) && list.orders[key].length)
       ? list.orders[key]
-      : (derivedDateDesc && derivedDateDesc.length)
-        ? derivedDateDesc
       : ((key === "imdb" || key === "trakt") ? (list.ids || []) : null);
   if (!arr) return metas.slice();
   const pos = new Map(arr.map((id, i) => [id, i]));
@@ -2680,11 +2599,14 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(id)) {
           try {
             const asc  = await fetchImdbOrder(url, "release_date,asc");
+            const desc = await fetchImdbOrder(url, "release_date,desc");
             const pop  = await fetchImdbOrder(url, "moviemeter,asc");
             list.orders = list.orders || {};
             list.orders.date_asc  = asc.slice();
+            list.orders.date_desc = desc.slice();
             list.orders.popularity = pop.slice();
             asc.forEach(tt => uniques.add(tt));
+            desc.forEach(tt => uniques.add(tt));
             pop.forEach(tt => uniques.add(tt));
           } catch (e) {
             console.warn("[SYNC] extra IMDb sort fetch failed for", id, e.message);
@@ -2729,7 +2651,6 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         if (next[id].orders.date_desc) next[id].orders.date_desc = remap(next[id].orders.date_desc);
         next[id].orders.imdb = next[id].ids.slice();
         if (isTraktListId(id)) next[id].orders.trakt = next[id].ids.slice();
-        ensureListOrders(next[id]);
         if (PREFS.frozenLists && PREFS.frozenLists[id]) {
           PREFS.frozenLists[id].ids = next[id].ids.slice();
           PREFS.frozenLists[id].orders = next[id].orders;
@@ -2743,7 +2664,6 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         next[id].orders = next[id].orders || {};
         next[id].orders.imdb = next[id].ids.slice();
         if (isTraktListId(id)) next[id].orders.trakt = next[id].ids.slice();
-        ensureListOrders(next[id]);
       }
     }
 
@@ -2852,8 +2772,9 @@ async function syncSingleList(lsid, { manual = false } = {}) {
     }
     if (IMDB_FETCH_RELEASE_ORDERS && isImdbListId(lsid)) {
       const asc  = await fetchImdbOrder(url, "release_date,asc");
+      const desc = await fetchImdbOrder(url, "release_date,desc");
       const pop  = await fetchImdbOrder(url, "moviemeter,asc");
-      orders = { ...orders, date_asc: asc.slice(), popularity: pop.slice() };
+      orders = { ...orders, date_asc: asc.slice(), date_desc: desc.slice(), popularity: pop.slice() };
     }
   }
 
@@ -2875,7 +2796,6 @@ async function syncSingleList(lsid, { manual = false } = {}) {
 
   list.ids = idsToUse;
   list.orders = { ...orders, imdb: idsToUse.slice() };
-  ensureListOrders(list);
 
   if (isFrozenList(lsid)) {
     PREFS.frozenLists[lsid] = frozenEntryFor(lsid, list);
@@ -3092,7 +3012,6 @@ function syncFrozenEdits(lsid) {
   const orders = PREFS.frozenLists[lsid].orders || {};
   orders.imdb = ids.slice();
   PREFS.frozenLists[lsid].orders = orders;
-  ensureListOrders(PREFS.frozenLists[lsid]);
 }
 
 async function rebuildAllCards() {
@@ -3118,7 +3037,6 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     const lsid = id.slice(5);
     const list = LISTS[lsid];
     if (!list) return res.json({ metas: [] });
-    ensureListOrders(list);
 
     const extra = parseExtra(req.params.extra, req.query);
     const q = String(extra.search||"").toLowerCase().trim();
@@ -3263,7 +3181,6 @@ app.get("/stream-remove/:type/:id", async (req, res) => {
 // ------- Admin + debug & new endpoints -------
 app.get("/api/lists", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  ensureAllListOrders(LISTS);
   res.json(LISTS);
 });
 app.get("/api/prefs", (req,res) => {
@@ -3703,7 +3620,6 @@ app.get("/api/list-items", (req,res) => {
   const lsid = String(req.query.lsid || "");
   const list = LISTS[lsid];
   if (!list) return res.json({ items: [] });
-  ensureListOrders(list);
 
   const ids = listIdsWithEdits(lsid);
   const items = ids.map(tt => CARD.get(tt) || cardFor(tt));
@@ -6564,7 +6480,7 @@ async function render() {
 
       const imdbIndex = new Map((lists[lsid]?.ids || []).map((id,i)=>[id,i]));
       const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
-      const imdbDateDesc = (lists[lsid]?.orders?.date_desc || (Array.isArray(imdbDateAsc) ? imdbDateAsc.slice().reverse() : []));
+      const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
 
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
@@ -7623,9 +7539,7 @@ render();
 
       for (const id of Object.keys(LISTS)) {
         if (LISTS[id]?.name) LISTS[id].name = sanitizeName(LISTS[id].name);
-        materializeDateDescForList(LISTS[id]);
       }
-      ensureAllListOrders(LISTS);
 
       console.log("[BOOT] snapshot loaded");
     }
