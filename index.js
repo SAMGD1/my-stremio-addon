@@ -4300,19 +4300,21 @@ app.get("/admin", async (req,res)=>{
   .create-layout{
     display:grid;
     gap:14px;
-    grid-template-columns:1.2fr .8fr;
+    grid-template-columns:.95fr 1.05fr;
     grid-template-areas:
-      "name actions"
+      "name cancel"
       "csv imdb"
-      "meta meta";
+      "meta actions";
     align-items:start;
   }
   .create-name{grid-area:name;}
-  .create-actions{grid-area:actions;justify-self:end;text-align:right;}
+  .create-cancel{grid-area:cancel;justify-self:end;text-align:right;}
+  .create-actions{grid-area:actions;justify-self:end;align-self:end;text-align:right;}
   .create-actions .actions-stack{
     align-items:flex-end;
   }
   .create-csv{grid-area:csv;}
+  .create-csv .csv-drop{max-width:560px;}
   .create-imdb{grid-area:imdb;}
   .create-meta{grid-area:meta;}
   .actions-stack{
@@ -4338,7 +4340,7 @@ app.get("/admin", async (req,res)=>{
     color:#dcd8ff;
     cursor:pointer;
     transition:background .2s ease, border-color .2s ease;
-    min-height:190px;
+    min-height:150px;
     display:flex;
     flex-direction:column;
     align-items:center;
@@ -4479,22 +4481,47 @@ app.get("/admin", async (req,res)=>{
     margin:10px auto 6px;
   }
   .title-search-row{
+    display:grid;
+    gap:8px;
+    grid-template-columns:minmax(180px,1fr) 128px auto;
+    align-items:end;
+  }
+  .title-search-row input{
+    width:100%;
+    min-width:0;
+    box-sizing:border-box;
+  }
+  .title-search-row select{
+    width:100%;
+    min-width:0;
+  }
+  .title-search-actions{
     display:flex;
     gap:8px;
     align-items:center;
-    flex-wrap:wrap;
+    justify-content:flex-start;
+    white-space:nowrap;
   }
-  .title-search-row input{
-    flex:1;
-    min-width:180px;
-  }
-  .title-search-row select{
-    min-width:130px;
+  .title-search-actions .bulk-btn{
+    margin-top:0;
+    height:36px;
+    padding:8px 16px;
   }
   .title-search-clear{
-    min-width:34px;
+    min-width:36px;
+    height:36px;
     padding:8px 11px;
     justify-content:center;
+  }
+  @media(max-width:640px){
+    .title-search-row{
+      grid-template-columns:1fr 128px;
+      align-items:center;
+    }
+    .title-search-actions{
+      grid-column:1 / -1;
+      justify-content:flex-start;
+    }
   }
   .title-search-status{
     display:block;
@@ -5104,10 +5131,12 @@ app.get("/admin", async (req,res)=>{
             <label class="mini">List name</label>
             <input id="offlineListName" class="name-input" type="text" placeholder="Name your list" />
           </div>
+          <div class="create-cancel">
+            <button id="offlineCancelBtn" type="button" class="btn2">Cancel</button>
+          </div>
           <div class="create-actions">
             <div class="actions-stack">
               <button id="offlineSaveBtn" type="button">Save list</button>
-              <button id="offlineCancelBtn" type="button">Cancel</button>
               <span id="offlineSaveStatus" class="mini muted"></span>
             </div>
           </div>
@@ -5116,8 +5145,8 @@ app.get("/admin", async (req,res)=>{
             <label class="csv-drop" id="offlineCsvDrop">
               <input id="offlineCsvInput" type="file" accept=".csv,text/csv" />
               <div class="csv-card">
-                <div><b>Drop your IMDb CSV</b> or click to choose file</div>
-                <div class="mini muted">Drag & drop is supported. We read IMDb tt... IDs in order.</div>
+                <div><b>Drop IMDb CSV</b> or choose file</div>
+                <div class="mini muted">Drag & drop supported. Reads IMDb tt IDs in order.</div>
               </div>
               <div id="offlineCsvStatus" class="mini muted"></div>
             </label>
@@ -5128,9 +5157,9 @@ app.get("/admin", async (req,res)=>{
           </div>
           <div class="create-imdb">
             <div class="imdb-box">
+              <div id="offlineTitleSearchMount"></div>
               <label class="mini">Add by IMDb ID (tt...)</label>
               <input id="offlineAddIdInput" type="text" placeholder="tt1234567 or IMDb URL" />
-              <div id="offlineTitleSearchMount"></div>
               <label class="mini bulk-label">Add those IMDb tt in bulk</label>
               <textarea id="offlineAddBulkInput" placeholder="tt1234567 tt7654321 or IMDb URLs"></textarea>
               <button id="offlineAddBulkBtn" class="bulk-btn" type="button">Add bulk</button>
@@ -5532,12 +5561,14 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
   typeSel.appendChild(el('option', { value: 'collection', text: 'Collections' }));
   const searchBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Search' });
   const clearBtn = el('button', { class: 'btn2 title-search-clear', type: 'button', text: '✕', title: 'Clear search' });
+  const actions = el('div', { class: 'title-search-actions' });
+  actions.appendChild(searchBtn);
+  actions.appendChild(clearBtn);
   const status = el('span', { class: 'mini muted title-search-status' });
   const results = el('div', { class: 'title-search-results' });
   row.appendChild(input);
   row.appendChild(typeSel);
-  row.appendChild(searchBtn);
-  row.appendChild(clearBtn);
+  row.appendChild(actions);
   root.appendChild(label);
   root.appendChild(row);
   root.appendChild(status);
