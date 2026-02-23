@@ -26,7 +26,8 @@ Restart app after updating.
 
 Used for:
 - TMDB key validation in admin
-- title search-and-add widget
+- title search-and-add widget (movie/tv)
+- TMDB collection search + add-to-list
 - richer metadata/posters fallback
 
 ### Steps
@@ -46,5 +47,7 @@ Restart app after updating.
 ## Verify inside admin
 
 Open admin and test flows:
-- TMDB verify/save endpoints in settings/tools
+- TMDB verify/save endpoints (`/api/tmdb-verify`, `/api/tmdb-save`)
+- TMDB title search (`/api/list-search-title`) and collection add (`/api/list-add-collection`)
+- Trakt verify/save endpoints (`/api/trakt-verify`, `/api/trakt-save`)
 - Trakt sources in Add Lists and sync
