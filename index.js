@@ -5226,9 +5226,25 @@ function wireOfflineCreatePanel(refresh) {
   let draftIds = [];
   const draftSearch = (searchMount && typeof createTitleSearchWidget === 'function')
     ? createTitleSearchWidget({
-        onAdd: async (imdbId) => {
-          if (!draftIds.includes(imdbId)) draftIds.push(imdbId);
+        onAdd: async (imdbId, item) => {
+          const pullImdbId = (value) => {
+            const m = String(value || '').match(/tt\d{7,}/i);
+            return m ? m[0] : '';
+          };
+          if (item && item.mediaType === 'collection') {
+            const before = draftIds.length;
+            const rawIds = Array.isArray(item.collectionItemIds) ? item.collectionItemIds : [];
+            rawIds.forEach((raw) => {
+              const id = pullImdbId(raw);
+              if (id && !draftIds.includes(id)) draftIds.push(id);
+            });
+            updateCount();
+            return Math.max(0, draftIds.length - before);
+          }
+          const id = pullImdbId(imdbId);
+          if (id && !draftIds.includes(id)) draftIds.push(id);
           updateCount();
+          return id ? 1 : 0;
         }
       })
     : null;
@@ -5496,18 +5512,27 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
         status.textContent = item.mediaType === 'collection' ? 'Adding collection…' : ('Adding ' + item.imdbId + '…');
         try {
           if (item.mediaType === 'collection') {
-            if (!lsid) throw new Error('Collection add requires a target list.');
-            const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ lsid, collectionId: item.tmdbId })
-            });
-            const data = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+            let addedCount = 0;
+            if (lsid) {
+              const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lsid, collectionId: item.tmdbId })
+              });
+              const data = await r.json().catch(() => ({}));
+              if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+              addedCount = Number(data.added) || 0;
+            } else if (typeof onAdd === 'function') {
+              const maybeAdded = await onAdd('', item);
+              addedCount = Number.isFinite(Number(maybeAdded)) ? Number(maybeAdded) : 0;
+              if (addedCount <= 0) throw new Error('Collection has no new addable IMDb items.');
+            } else {
+              throw new Error('Collection add requires a target list.');
+            }
             item.canAdd = false;
             item.inList = true;
             addBtn.textContent = 'Added';
-            status.textContent = 'Added ' + (data.added || 0) + ' item(s) from collection.';
+            status.textContent = 'Added ' + addedCount + ' item(s) from collection.';
           } else {
             if (!item.imdbId) throw new Error('No IMDb id for this result');
             if (typeof onAdd === 'function') await onAdd(item.imdbId, item);
