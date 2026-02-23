@@ -2871,7 +2871,7 @@ function catalogs(){
   return ids.map(lsid => ({
     type: "my lists",
     id: `list:${lsid}`,
-    name: `${isFrozenList(lsid) ? "❄️" : "🗂"} ${listDisplayName(lsid)}`,
+    name: `${isFrozenList(lsid) ? "❄️" : "✨"} ${listDisplayName(lsid)}`,
     extraSupported: ["skip","limit","sort","genre"],
     extra: [
       { name:"skip" }, { name:"limit" },
