@@ -1,4 +1,4 @@
-# My Lists Stremio Addon (v12.4.0)
+# My Lists Stremio Addon (v12.5.0)
 
 Turn IMDb + Trakt lists into Stremio catalogs you can fully control from a web admin panel.
 
@@ -7,7 +7,9 @@ This project supports:
 - direct list source ingestion (IMDb `ls...`, watchlists, Trakt lists/watchlists),
 - per-list sorting and custom order,
 - one-click title add/remove from Stremio stream actions,
-- optional TMDB metadata enrichment,
+- TMDB title search (movie/TV/**collection**) with add-to-list,
+- TMDB metadata enrichment and key verification in admin,
+- Trakt API key verification in admin,
 - local-only persistence or Supabase-backed persistence.
 
 ---
@@ -28,9 +30,16 @@ Start here, then follow the guide you need:
 
 ```bash
 npm install
-cp .env.example .env
-# edit .env
+# create and edit .env
 npm start
+```
+
+Minimum `.env` example:
+
+```env
+ADMIN_PASSWORD=choose_a_strong_password
+SHARED_SECRET=choose_another_secret
+PORT=7000
 ```
 
 Then open:
@@ -83,7 +92,7 @@ Then open:
 | Variable | Purpose |
 |---|---|
 | `TRAKT_CLIENT_ID` | Enables Trakt list ingestion and Trakt user list discovery. |
-| `TMDB_API_KEY` | Enables TMDB verification + title search/add + metadata enrichment. |
+| `TMDB_API_KEY` | Enables TMDB verification + title search/add + collection add + metadata enrichment. |
 
 ### Optional storage backend
 
@@ -102,6 +111,13 @@ Then open:
 3. Customize list visibility/order/defaults.
 4. In Stremio, use stream actions to quickly add/remove titles to selected streamlists.
 5. Use advanced tools for freeze, merge, duplicate, rename, block/unblock, backup links, manual/offline lists, and bulk imports.
+
+Extra TMDB-powered flow:
+6. In list management, search TMDB titles (movie/tv/collection), then add a single title or a whole TMDB collection to a target list.
+
+API key controls:
+- Admin supports runtime verify/save for TMDB (`/api/tmdb-verify`, `/api/tmdb-save`).
+- Admin supports runtime verify/save for Trakt (`/api/trakt-verify`, `/api/trakt-save`).
 
 For complete flow details, see [`docs/usage/how-it-works.md`](docs/usage/how-it-works.md).
 
