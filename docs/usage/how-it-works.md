@@ -67,11 +67,28 @@ Examples include:
 - create offline list,
 - CSV import,
 - list item add/remove/reset,
+- list bulk add (`/api/list-add-bulk`) with IMDb IDs,
+- TMDB title search (`/api/list-search-title`),
+- TMDB collection fetch (`/api/tmdb-collection-items`) and collection add (`/api/list-add-collection`),
 - custom order save,
 - source add/bulk add,
 - block/unblock/remove list,
 - sync/purge-sync,
 - title search.
+
+## TMDB collection implementation notes
+
+- Search supports `movie`, `tv`, and `collection` modes.
+- Collection search results include pre-resolved IMDb IDs for collection parts when available.
+- Adding a collection calls TMDB collection endpoints, resolves IMDb IDs, and then appends only items not already in the target list.
+- For offline/manual lists, collection items are written directly to the offline list payload.
+- For synced lists, collection items are stored as list edits (`added` / `removed`) so upstream source data stays intact.
+
+## Runtime API key controls
+
+- TMDB key can be validated and saved at runtime from admin (`/api/tmdb-verify`, `/api/tmdb-save`).
+- Trakt client id can be validated and saved at runtime from admin (`/api/trakt-verify`, `/api/trakt-save`).
+- Keys are persisted in snapshot prefs so restart keeps the last saved values.
 
 ## Stream actions
 

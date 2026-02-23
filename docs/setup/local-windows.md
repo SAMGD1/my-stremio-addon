@@ -31,11 +31,7 @@ npm install
 
 ## 4) Create environment file
 
-```powershell
-Copy-Item .env.example .env
-```
-
-Edit `.env` and set at least:
+Create a new file named `.env` in the project root, then set at least:
 
 ```env
 ADMIN_PASSWORD=choose_a_strong_password
@@ -49,6 +45,7 @@ Optional:
 IMDB_USER_URL=https://www.imdb.com/user/urXXXXXXX/lists/
 TRAKT_CLIENT_ID=
 TMDB_API_KEY=
+# (optional, unlocks title + collection search/add)
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_BUCKET=mylist-data

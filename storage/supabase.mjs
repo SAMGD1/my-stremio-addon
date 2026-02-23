@@ -21,6 +21,18 @@ export async function putJSON(path, data) {
   if (error) throw error;
 }
 
+export async function putBuffer(path, buffer, contentType = "application/octet-stream") {
+  const body = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .upload(path, body, {
+      upsert: true,
+      contentType
+    });
+
+  if (error) throw error;
+}
+
 export async function getJSON(path) {
   const { data, error } = await supabase.storage
     .from(BUCKET)
@@ -30,6 +42,16 @@ export async function getJSON(path) {
 
   const text = await data.text();
   return JSON.parse(text);
+}
+
+export async function getBuffer(path) {
+  const { data, error } = await supabase.storage
+    .from(BUCKET)
+    .download(path);
+
+  if (error) return null;
+  const ab = await data.arrayBuffer();
+  return Buffer.from(ab);
 }
 
 export async function deleteJSON(path) {
