@@ -336,9 +336,13 @@ function isFrozenList(lsid) {
 }
 
 function frozenEntryFor(lsid, list) {
-  return {
+  const next = ensureListOrders({
     ids: (list?.ids || []).slice(),
-    orders: list?.orders || {},
+    orders: list?.orders ? { ...list.orders } : {}
+  });
+  return {
+    ids: next.ids,
+    orders: next.orders,
     name: listDisplayName(lsid),
     url: list?.url,
     frozenAt: PREFS.frozenLists?.[lsid]?.frozenAt || Date.now(),
@@ -535,9 +539,17 @@ function sanitizeOrdersForSnapshot(orders) {
   return out;
 }
 
-function materializeDateDescForList(list) {
-  if (!list || typeof list !== "object") return;
+function ensureListOrders(list) {
+  if (!list || typeof list !== "object") return list;
   list.orders = list.orders && typeof list.orders === "object" ? list.orders : {};
+
+  if (Array.isArray(list.orders.date_asc)) {
+    list.orders.date_asc = list.orders.date_asc.filter(isImdb);
+  }
+  if (Array.isArray(list.orders.date_desc)) {
+    list.orders.date_desc = list.orders.date_desc.filter(isImdb);
+  }
+
   if (
     !Array.isArray(list.orders.date_desc) &&
     Array.isArray(list.orders.date_asc) &&
@@ -545,6 +557,11 @@ function materializeDateDescForList(list) {
   ) {
     list.orders.date_desc = list.orders.date_asc.slice().reverse();
   }
+  return list;
+}
+
+function ensureAllListOrders(source = LISTS) {
+  for (const list of Object.values(source || {})) ensureListOrders(list);
 }
 
 async function loadSupabaseIndex(path) {
@@ -682,7 +699,7 @@ async function loadOfflineLists() {
           ids: ids.slice(),
           orders: data.orders || { imdb: ids.slice() }
         };
-        materializeDateDescForList(LISTS[id]);
+        ensureListOrders(LISTS[id]);
         PREFS.customLists = PREFS.customLists || {};
         if (!PREFS.customLists[id]) {
           PREFS.customLists[id] = { kind: "offline", sources: ["offline"], createdAt: data.createdAt || Date.now() };
@@ -718,7 +735,7 @@ async function loadOfflineLists() {
             ids: listIds.slice(),
             orders: payload.orders || { imdb: listIds.slice() }
           };
-          materializeDateDescForList(LISTS[id]);
+          ensureListOrders(LISTS[id]);
           PREFS.customLists = PREFS.customLists || {};
           if (!PREFS.customLists[id]) {
             PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
@@ -754,7 +771,7 @@ async function loadOfflineLists() {
             ids: listIds.slice(),
             orders: payload.orders || { imdb: listIds.slice() }
           };
-          materializeDateDescForList(LISTS[id]);
+          ensureListOrders(LISTS[id]);
           PREFS.customLists = PREFS.customLists || {};
           if (!PREFS.customLists[id]) {
             PREFS.customLists[id] = { kind: "offline", sources: ["manual"], createdAt: payload.createdAt || Date.now() };
@@ -907,7 +924,7 @@ async function loadCustomLists() {
             ids: Array.isArray(payload.ids) ? payload.ids.slice() : [],
             orders: payload.orders || {}
           };
-          materializeDateDescForList(LISTS[id]);
+          ensureListOrders(LISTS[id]);
           PREFS.customLists = PREFS.customLists || {};
           PREFS.customLists[id] = {
             kind: backedKinds.has(payload.kind) ? payload.kind : kind,
@@ -941,7 +958,7 @@ async function loadCustomLists() {
           ids: payload.ids.slice(),
           orders: payload.orders || {}
         };
-        materializeDateDescForList(LISTS[id]);
+        ensureListOrders(LISTS[id]);
         PREFS.customLists = PREFS.customLists || {};
         PREFS.customLists[id] = {
           kind: backedKinds.has(payload.kind) ? payload.kind : kind,
@@ -2328,6 +2345,7 @@ function applyCustomOrder(metas, lsid) {
 function sortByOrderKey(metas, lsid, key) {
   const list = LISTS[lsid];
   if (!list) return metas.slice();
+  ensureListOrders(list);
   const derivedDateDesc =
     key === "date_desc" &&
     (!list.orders || !Array.isArray(list.orders.date_desc) || !list.orders.date_desc.length) &&
@@ -2711,7 +2729,7 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         if (next[id].orders.date_desc) next[id].orders.date_desc = remap(next[id].orders.date_desc);
         next[id].orders.imdb = next[id].ids.slice();
         if (isTraktListId(id)) next[id].orders.trakt = next[id].ids.slice();
-        materializeDateDescForList(next[id]);
+        ensureListOrders(next[id]);
         if (PREFS.frozenLists && PREFS.frozenLists[id]) {
           PREFS.frozenLists[id].ids = next[id].ids.slice();
           PREFS.frozenLists[id].orders = next[id].orders;
@@ -2725,7 +2743,7 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         next[id].orders = next[id].orders || {};
         next[id].orders.imdb = next[id].ids.slice();
         if (isTraktListId(id)) next[id].orders.trakt = next[id].ids.slice();
-        materializeDateDescForList(next[id]);
+        ensureListOrders(next[id]);
       }
     }
 
@@ -2857,7 +2875,7 @@ async function syncSingleList(lsid, { manual = false } = {}) {
 
   list.ids = idsToUse;
   list.orders = { ...orders, imdb: idsToUse.slice() };
-  materializeDateDescForList(list);
+  ensureListOrders(list);
 
   if (isFrozenList(lsid)) {
     PREFS.frozenLists[lsid] = frozenEntryFor(lsid, list);
@@ -3074,6 +3092,7 @@ function syncFrozenEdits(lsid) {
   const orders = PREFS.frozenLists[lsid].orders || {};
   orders.imdb = ids.slice();
   PREFS.frozenLists[lsid].orders = orders;
+  ensureListOrders(PREFS.frozenLists[lsid]);
 }
 
 async function rebuildAllCards() {
@@ -3099,6 +3118,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     const lsid = id.slice(5);
     const list = LISTS[lsid];
     if (!list) return res.json({ metas: [] });
+    ensureListOrders(list);
 
     const extra = parseExtra(req.params.extra, req.query);
     const q = String(extra.search||"").toLowerCase().trim();
@@ -3243,6 +3263,7 @@ app.get("/stream-remove/:type/:id", async (req, res) => {
 // ------- Admin + debug & new endpoints -------
 app.get("/api/lists", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  ensureAllListOrders(LISTS);
   res.json(LISTS);
 });
 app.get("/api/prefs", (req,res) => {
@@ -3682,6 +3703,7 @@ app.get("/api/list-items", (req,res) => {
   const lsid = String(req.query.lsid || "");
   const list = LISTS[lsid];
   if (!list) return res.json({ items: [] });
+  ensureListOrders(list);
 
   const ids = listIdsWithEdits(lsid);
   const items = ids.map(tt => CARD.get(tt) || cardFor(tt));
@@ -7603,6 +7625,7 @@ render();
         if (LISTS[id]?.name) LISTS[id].name = sanitizeName(LISTS[id].name);
         materializeDateDescForList(LISTS[id]);
       }
+      ensureAllListOrders(LISTS);
 
       console.log("[BOOT] snapshot loaded");
     }
