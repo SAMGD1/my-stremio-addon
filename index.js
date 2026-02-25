@@ -228,6 +228,28 @@ function resolveStreamImdbId(rawId) {
   return base;
 }
 
+function pinAddedIdsToFront(lsid, incomingIds) {
+  if (!isListId(lsid)) return;
+  const added = [];
+  const seen = new Set();
+  for (const raw of incomingIds || []) {
+    const tt = extractImdbId(raw);
+    if (!tt || !isImdb(tt) || seen.has(tt)) continue;
+    seen.add(tt);
+    added.push(tt);
+  }
+  if (!added.length) return;
+
+  const addedSet = new Set(added);
+  const current = listIdsWithEdits(lsid);
+  const rest = current.filter(id => !addedSet.has(id));
+
+  PREFS.customOrder = PREFS.customOrder || {};
+  PREFS.customOrder[lsid] = added.concat(rest);
+  PREFS.perListSort = PREFS.perListSort || {};
+  PREFS.perListSort[lsid] = "custom";
+}
+
 async function addImdbToList(lsid, imdbId) {
   if (!isListId(lsid)) return { ok: false, reason: "no_list" };
   const list = LISTS[lsid];
@@ -258,6 +280,8 @@ async function addImdbToList(lsid, imdbId) {
 
   await getBestMeta(imdbId).catch(() => null);
   CARD.set(imdbId, cardFor(imdbId));
+
+  pinAddedIdsToFront(lsid, [imdbId]);
   await persistSnapshot();
   return { ok: true, lsid };
 }
@@ -3654,6 +3678,7 @@ app.post("/api/list-add", async (req, res) => {
 
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
+    pinAddedIdsToFront(lsid, [tt]);
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     await persistSnapshot();
@@ -3702,6 +3727,7 @@ app.post("/api/list-add-bulk", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    pinAddedIdsToFront(lsid, toAdd);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -3811,6 +3837,7 @@ app.post("/api/list-add-collection", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    pinAddedIdsToFront(lsid, toAdd);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
