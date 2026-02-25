@@ -228,12 +228,20 @@ function resolveStreamImdbId(rawId) {
   return base;
 }
 
+function effectiveSortForList(lsid) {
+  const explicit = String((PREFS.perListSort && PREFS.perListSort[lsid]) || "").toLowerCase();
+  if (VALID_SORT.has(explicit)) return explicit;
+  if (isImdbListId(lsid) || isImdbCustomId(lsid)) return "imdb";
+  if (isTraktListId(lsid)) return "trakt";
+  return "name_asc";
+}
+
 function currentSortedIdsForList(lsid) {
   if (!isListId(lsid)) return [];
   const ids = listIdsWithEdits(lsid);
   let metas = ids.map(tt => CARD.get(tt) || cardFor(tt));
 
-  const sortKey = String((PREFS.perListSort && PREFS.perListSort[lsid]) || "name_asc").toLowerCase();
+  const sortKey = effectiveSortForList(lsid);
   if (sortKey === "custom") metas = applyCustomOrder(metas, lsid);
   else if (sortKey === "imdb" || sortKey === "trakt") metas = sortByOrderKey(metas, lsid, sortKey);
   else if (sortKey === "date_asc" || sortKey === "date_desc") {
