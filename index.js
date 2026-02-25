@@ -245,7 +245,28 @@ function currentSortedIdsForList(lsid) {
   return metas.map(m => m.id).filter(isImdb);
 }
 
-function pinAddedIdsToFront(lsid, incomingIds) {
+function normalizeBaselineOrder(lsid, baselineOrder) {
+  const current = listIdsWithEdits(lsid);
+  const currentSet = new Set(current);
+  const out = [];
+  const seen = new Set();
+
+  for (const raw of baselineOrder || []) {
+    const tt = extractImdbId(raw);
+    if (!tt || !currentSet.has(tt) || seen.has(tt)) continue;
+    seen.add(tt);
+    out.push(tt);
+  }
+
+  for (const tt of current) {
+    if (seen.has(tt)) continue;
+    seen.add(tt);
+    out.push(tt);
+  }
+  return out;
+}
+
+function pinAddedIdsToFront(lsid, incomingIds, baselineOrder = null) {
   if (!isListId(lsid)) return;
   const added = [];
   const seen = new Set();
@@ -258,7 +279,9 @@ function pinAddedIdsToFront(lsid, incomingIds) {
   if (!added.length) return;
 
   const addedSet = new Set(added);
-  const current = currentSortedIdsForList(lsid);
+  const current = Array.isArray(baselineOrder) && baselineOrder.length
+    ? normalizeBaselineOrder(lsid, baselineOrder)
+    : currentSortedIdsForList(lsid);
   const rest = current.filter(id => !addedSet.has(id));
 
   PREFS.customOrder = PREFS.customOrder || {};
@@ -3695,7 +3718,7 @@ app.post("/api/list-add", async (req, res) => {
 
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
-    pinAddedIdsToFront(lsid, [tt]);
+    pinAddedIdsToFront(lsid, [tt], Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     await persistSnapshot();
@@ -3744,7 +3767,7 @@ app.post("/api/list-add-bulk", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
-    pinAddedIdsToFront(lsid, toAdd);
+    pinAddedIdsToFront(lsid, toAdd, Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -3854,7 +3877,7 @@ app.post("/api/list-add-collection", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
-    pinAddedIdsToFront(lsid, toAdd);
+    pinAddedIdsToFront(lsid, toAdd, Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -6538,6 +6561,12 @@ async function render() {
         if (rowSel) rowSel.value = 'custom';
       }
 
+      function currentVisibleOrder(){
+        const ids = Array.from(td.querySelectorAll('ul.thumbs li.thumb[data-id]')).map(li => li.getAttribute('data-id')).filter(Boolean);
+        if (prefs.sortReverse && prefs.sortReverse[lsid]) return ids.slice().reverse();
+        return ids;
+      }
+
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
       const resetBtn = el('button',{text:'Reset order', class:'order-reset-btn'});
@@ -6570,7 +6599,7 @@ async function render() {
           const r = await fetch('/api/list-add?admin=' + ADMIN, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lsid, id: imdbId })
+            body: JSON.stringify({ lsid, id: imdbId, visibleOrder: currentVisibleOrder() })
           });
           if (!r.ok) throw new Error(await r.text());
           forceCustomSortSelection();
@@ -6580,7 +6609,7 @@ async function render() {
           const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lsid, collectionId: item.tmdbId })
+            body: JSON.stringify({ lsid, collectionId: item.tmdbId, visibleOrder: currentVisibleOrder() })
           });
           const data = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(data.message || 'Failed to add collection');
@@ -6697,7 +6726,7 @@ async function render() {
             const r = await fetch('/api/list-add?admin='+ADMIN, {
               method: 'POST',
               headers: { 'Content-Type':'application/json' },
-              body: JSON.stringify({ lsid, id: m[1] })
+              body: JSON.stringify({ lsid, id: m[1], visibleOrder: currentVisibleOrder() })
             });
             if (!r.ok) throw new Error(await r.text());
             forceCustomSortSelection();
