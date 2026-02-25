@@ -285,7 +285,7 @@ function pinAddedIdsToFront(lsid, incomingIds, baselineOrder = null) {
   const rest = current.filter(id => !addedSet.has(id));
 
   PREFS.customOrder = PREFS.customOrder || {};
-  PREFS.customOrder[lsid] = added.concat(rest);
+  PREFS.customOrder[lsid] = rest.concat(added);
   PREFS.perListSort = PREFS.perListSort || {};
   PREFS.perListSort[lsid] = "custom";
 }
