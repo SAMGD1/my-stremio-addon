@@ -2957,8 +2957,8 @@ function catalogs(){
         name:"genre",
         options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS
       }
-    ]
-    // no posterShape – Stremio uses default poster style
+    ],
+    posterShape: "landscape"
   }));
 }
 app.get("/manifest.json", (req,res)=>{
@@ -3140,8 +3140,11 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
 
-    // No poster-shape swap; meta already has a single poster field
-    res.json({ metas: metas.slice(skip, skip+limit) });
+    const visibleMetas = metas.slice(skip, skip+limit).map(m => ({
+      ...m,
+      poster: m.background || m.backdrop || m.poster || undefined
+    }));
+    res.json({ metas: visibleMetas });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
 });
 
