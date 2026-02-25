@@ -3142,7 +3142,8 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     const visibleMetas = metas.slice(skip, skip+limit).map(m => ({
       ...m,
-      poster: m.background || m.backdrop || m.poster || undefined
+      poster: m.background || m.backdrop || m.poster || undefined,
+      posterShape: "landscape"
     }));
     res.json({ metas: visibleMetas });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
