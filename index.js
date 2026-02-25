@@ -132,7 +132,8 @@ let PREFS = {
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
     traktUsers: []        // array of Trakt user URLs or usernames
   },
-  blocked: []             // listIds you removed/blocked (IMDb or Trakt)
+  blocked: [],            // listIds you removed/blocked (IMDb or Trakt)
+  posterMode: "landscape" // landscape | portrait (Stremio poster container + image source)
 };
 
 const BEST   = new Map(); // Map<tt, { kind, meta }>
@@ -228,6 +229,76 @@ function resolveStreamImdbId(rawId) {
   return base;
 }
 
+function effectiveSortForList(lsid) {
+  const explicit = String((PREFS.perListSort && PREFS.perListSort[lsid]) || "").toLowerCase();
+  if (VALID_SORT.has(explicit)) return explicit;
+  if (isImdbListId(lsid) || isImdbCustomId(lsid)) return "imdb";
+  if (isTraktListId(lsid)) return "trakt";
+  return "name_asc";
+}
+
+function currentSortedIdsForList(lsid) {
+  if (!isListId(lsid)) return [];
+  const ids = listIdsWithEdits(lsid);
+  let metas = ids.map(tt => CARD.get(tt) || cardFor(tt));
+
+  const sortKey = effectiveSortForList(lsid);
+  if (sortKey === "custom") metas = applyCustomOrder(metas, lsid);
+  else if (sortKey === "imdb" || sortKey === "trakt") metas = sortByOrderKey(metas, lsid, sortKey);
+  else if (sortKey === "date_asc" || sortKey === "date_desc") {
+    const haveSourceOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sortKey]) && LISTS[lsid].orders[sortKey].length;
+    metas = haveSourceOrder ? sortByOrderKey(metas, lsid, sortKey) : stableSort(metas, sortKey);
+  } else metas = stableSort(metas, sortKey);
+
+  if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
+  return metas.map(m => m.id).filter(isImdb);
+}
+
+function normalizeBaselineOrder(lsid, baselineOrder) {
+  const current = listIdsWithEdits(lsid);
+  const currentSet = new Set(current);
+  const out = [];
+  const seen = new Set();
+
+  for (const raw of baselineOrder || []) {
+    const tt = extractImdbId(raw);
+    if (!tt || !currentSet.has(tt) || seen.has(tt)) continue;
+    seen.add(tt);
+    out.push(tt);
+  }
+
+  for (const tt of current) {
+    if (seen.has(tt)) continue;
+    seen.add(tt);
+    out.push(tt);
+  }
+  return out;
+}
+
+function pinAddedIdsToFront(lsid, incomingIds, baselineOrder = null) {
+  if (!isListId(lsid)) return;
+  const added = [];
+  const seen = new Set();
+  for (const raw of incomingIds || []) {
+    const tt = extractImdbId(raw);
+    if (!tt || !isImdb(tt) || seen.has(tt)) continue;
+    seen.add(tt);
+    added.push(tt);
+  }
+  if (!added.length) return;
+
+  const addedSet = new Set(added);
+  const current = Array.isArray(baselineOrder) && baselineOrder.length
+    ? normalizeBaselineOrder(lsid, baselineOrder)
+    : currentSortedIdsForList(lsid);
+  const rest = current.filter(id => !addedSet.has(id));
+
+  PREFS.customOrder = PREFS.customOrder || {};
+  PREFS.customOrder[lsid] = rest.concat(added);
+  PREFS.perListSort = PREFS.perListSort || {};
+  PREFS.perListSort[lsid] = "custom";
+}
+
 async function addImdbToList(lsid, imdbId) {
   if (!isListId(lsid)) return { ok: false, reason: "no_list" };
   const list = LISTS[lsid];
@@ -258,6 +329,8 @@ async function addImdbToList(lsid, imdbId) {
 
   await getBestMeta(imdbId).catch(() => null);
   CARD.set(imdbId, cardFor(imdbId));
+
+  pinAddedIdsToFront(lsid, [imdbId]);
   await persistSnapshot();
   return { ok: true, lsid };
 }
@@ -2343,6 +2416,10 @@ async function fetchLiveListIds(lsid, sourceMap = LISTS, seen = new Set()) {
 }
 
 // ----------------- SYNC -----------------
+function posterMode() {
+  return PREFS.posterMode === "portrait" ? "portrait" : "landscape";
+}
+
 function manifestKey() {
   const enabled = (PREFS.enabled && PREFS.enabled.length) ? PREFS.enabled : Object.keys(LISTS);
   const names   = enabled.map(id => listDisplayName(id)).sort().join("|");
@@ -2354,9 +2431,10 @@ function manifestKey() {
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
   const hidden = (PREFS.hiddenLists || []).join(",");
+  const pMode = posterMode();
 
   const mainLists = JSON.stringify(PREFS.mainLists || []);
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}#h${hidden}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}#h${hidden}#p${pMode}`;
 }
 
 async function harvestSources() {
@@ -2885,8 +2963,8 @@ function catalogs(){
         name:"genre",
         options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS
       }
-    ]
-    // no posterShape – Stremio uses default poster style
+    ],
+    posterShape: posterMode() === "landscape" ? "landscape" : "poster"
   }));
 }
 app.get("/manifest.json", (req,res)=>{
@@ -3068,8 +3146,15 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
 
-    // No poster-shape swap; meta already has a single poster field
-    res.json({ metas: metas.slice(skip, skip+limit) });
+    const isLandscapeMode = posterMode() === "landscape";
+    const visibleMetas = metas.slice(skip, skip+limit).map(m => ({
+      ...m,
+      poster: isLandscapeMode
+        ? (m.background || m.backdrop || m.poster || undefined)
+        : (m.poster || m.background || m.backdrop || undefined),
+      posterShape: isLandscapeMode ? "landscape" : "poster"
+    }));
+    res.json({ metas: visibleMetas });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
 });
 
@@ -3209,6 +3294,10 @@ app.post("/api/prefs", async (req,res) => {
       : (PREFS.sortOptions || {});
 
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
+    if (typeof body.posterMode === "string") {
+      const pm = body.posterMode.toLowerCase();
+      PREFS.posterMode = (pm === "portrait") ? "portrait" : "landscape";
+    }
     if (typeof body.tmdbKey === "string") {
       PREFS.tmdbKey = body.tmdbKey.trim();
       if (!PREFS.tmdbKey) PREFS.tmdbKeyValid = null;
@@ -3654,6 +3743,7 @@ app.post("/api/list-add", async (req, res) => {
 
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
+    pinAddedIdsToFront(lsid, [tt], Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     await persistSnapshot();
@@ -3702,6 +3792,7 @@ app.post("/api/list-add-bulk", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    pinAddedIdsToFront(lsid, toAdd, Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -3811,6 +3902,7 @@ app.post("/api/list-add-collection", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    pinAddedIdsToFront(lsid, toAdd, Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -4952,6 +5044,16 @@ app.get("/admin", async (req,res)=>{
           </div>
           <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
           <div class="api-key-box">
+            <label class="mini">Poster layout in Stremio</label>
+            <div class="move-style-toggle" aria-label="Poster layout mode">
+              <div class="seg" role="group" aria-label="Poster layout">
+                <button id="posterPortraitBtn" type="button" class="btn2">Portrait</button>
+                <button id="posterLandscapeBtn" type="button" class="btn2">Landscape</button>
+              </div>
+            </div>
+            <div class="mini muted">When changing this, reinstall or update the addon in Stremio so the new poster container shape is applied.</div>
+          </div>
+          <div class="api-key-box">
             <label class="mini">TMDB API Key (optional)</label>
             <div class="api-key-row">
               <div class="api-key-input-wrap">
@@ -5549,7 +5651,7 @@ function parseCsvImdbIds(text){
   return ids;
 }
 
-function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
+function createTitleSearchWidget({ lsid = '', onAdd = null, onAddCollection = null } = {}) {
   const root = el('div', { class: 'title-search-box' });
   const label = el('label', { class: 'mini', text: 'Search TMDB by title and add item' });
   const row = el('div', { class: 'title-search-row' });
@@ -5636,14 +5738,19 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
           if (item.mediaType === 'collection') {
             let addedCount = 0;
             if (lsid) {
-              const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lsid, collectionId: item.tmdbId })
-              });
-              const data = await r.json().catch(() => ({}));
-              if (!r.ok) throw new Error(data.message || 'Failed to add collection');
-              addedCount = Number(data.added) || 0;
+              if (typeof onAddCollection === 'function') {
+                const data = await onAddCollection(item);
+                addedCount = Number(data?.added) || 0;
+              } else {
+                const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ lsid, collectionId: item.tmdbId })
+                });
+                const data = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+                addedCount = Number(data.added) || 0;
+              }
             } else {
               const draftResult = await addCollectionToDraft(item);
               addedCount = draftResult.added;
@@ -5850,8 +5957,27 @@ async function render() {
   }
 
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
+  if (prefs.posterMode !== 'portrait' && prefs.posterMode !== 'landscape') prefs.posterMode = 'landscape';
   const refresh = async () => { await render(); };
   const listCount = (lsid) => (lists[lsid]?.ids || []).length;
+
+  const posterPortraitBtn = document.getElementById('posterPortraitBtn');
+  const posterLandscapeBtn = document.getElementById('posterLandscapeBtn');
+  const applyPosterModeUi = () => {
+    if (posterPortraitBtn) posterPortraitBtn.classList.toggle('active', prefs.posterMode === 'portrait');
+    if (posterLandscapeBtn) posterLandscapeBtn.classList.toggle('active', prefs.posterMode === 'landscape');
+  };
+  applyPosterModeUi();
+  if (posterPortraitBtn) posterPortraitBtn.onclick = async () => {
+    prefs.posterMode = 'portrait';
+    applyPosterModeUi();
+    await saveAll('Saved. Reinstall/update addon in Stremio to apply poster container changes.');
+  };
+  if (posterLandscapeBtn) posterLandscapeBtn.onclick = async () => {
+    prefs.posterMode = 'landscape';
+    applyPosterModeUi();
+    await saveAll('Saved. Reinstall/update addon in Stremio to apply poster container changes.');
+  };
 
   prefs.userBackups = prefs.userBackups || { users: [], traktUsers: [] };
   function renderPills(id, arr, onRemove, opts = {}){
@@ -6482,6 +6608,19 @@ async function render() {
       const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
       const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
 
+      function forceCustomSortSelection(){
+        prefs.perListSort = prefs.perListSort || {};
+        prefs.perListSort[lsid] = 'custom';
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        if (rowSel) rowSel.value = 'custom';
+      }
+
+      function currentVisibleOrder(){
+        const ids = Array.from(td.querySelectorAll('ul.thumbs li.thumb[data-id]')).map(li => li.getAttribute('data-id')).filter(Boolean);
+        if (prefs.sortReverse && prefs.sortReverse[lsid]) return ids.slice().reverse();
+        return ids;
+      }
+
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
       const resetBtn = el('button',{text:'Reset order', class:'order-reset-btn'});
@@ -6514,10 +6653,23 @@ async function render() {
           const r = await fetch('/api/list-add?admin=' + ADMIN, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lsid, id: imdbId })
+            body: JSON.stringify({ lsid, id: imdbId, visibleOrder: currentVisibleOrder() })
           });
           if (!r.ok) throw new Error(await r.text());
+          forceCustomSortSelection();
           await refresh();
+        },
+        onAddCollection: async (item) => {
+          const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, collectionId: item.tmdbId, visibleOrder: currentVisibleOrder() })
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+          forceCustomSortSelection();
+          await refresh();
+          return data;
         }
       });
       searchWrap.appendChild(drawerSearch.el);
@@ -6625,11 +6777,13 @@ async function render() {
           if (!m) { alert('Enter a valid IMDb id'); return; }
           input.disabled = true;
           try {
-            await fetch('/api/list-add?admin='+ADMIN, {
+            const r = await fetch('/api/list-add?admin='+ADMIN, {
               method: 'POST',
               headers: { 'Content-Type':'application/json' },
-              body: JSON.stringify({ lsid, id: m[1] })
+              body: JSON.stringify({ lsid, id: m[1], visibleOrder: currentVisibleOrder() })
             });
+            if (!r.ok) throw new Error(await r.text());
+            forceCustomSortSelection();
             input.value = '';
             await refresh();
           } finally {
@@ -7494,6 +7648,7 @@ async function render() {
       sources: prefs.sources || {},
       userBackups: prefs.userBackups || {},
       blocked: prefs.blocked || [],
+      posterMode: prefs.posterMode || "landscape",
       reconcileFrozenState: true
     };
     msg.textContent = "Saving…";
