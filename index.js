@@ -228,6 +228,28 @@ function resolveStreamImdbId(rawId) {
   return base;
 }
 
+function pinAddedIdsToFront(lsid, incomingIds) {
+  if (!isListId(lsid)) return;
+  const added = [];
+  const seen = new Set();
+  for (const raw of incomingIds || []) {
+    const tt = extractImdbId(raw);
+    if (!tt || !isImdb(tt) || seen.has(tt)) continue;
+    seen.add(tt);
+    added.push(tt);
+  }
+  if (!added.length) return;
+
+  const addedSet = new Set(added);
+  const current = listIdsWithEdits(lsid);
+  const rest = current.filter(id => !addedSet.has(id));
+
+  PREFS.customOrder = PREFS.customOrder || {};
+  PREFS.customOrder[lsid] = added.concat(rest);
+  PREFS.perListSort = PREFS.perListSort || {};
+  PREFS.perListSort[lsid] = "custom";
+}
+
 async function addImdbToList(lsid, imdbId) {
   if (!isListId(lsid)) return { ok: false, reason: "no_list" };
   const list = LISTS[lsid];
@@ -258,6 +280,8 @@ async function addImdbToList(lsid, imdbId) {
 
   await getBestMeta(imdbId).catch(() => null);
   CARD.set(imdbId, cardFor(imdbId));
+
+  pinAddedIdsToFront(lsid, [imdbId]);
   await persistSnapshot();
   return { ok: true, lsid };
 }
@@ -3654,6 +3678,7 @@ app.post("/api/list-add", async (req, res) => {
 
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
+    pinAddedIdsToFront(lsid, [tt]);
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     await persistSnapshot();
@@ -3702,6 +3727,7 @@ app.post("/api/list-add-bulk", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    pinAddedIdsToFront(lsid, toAdd);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -3811,6 +3837,7 @@ app.post("/api/list-add-collection", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    pinAddedIdsToFront(lsid, toAdd);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -5549,7 +5576,7 @@ function parseCsvImdbIds(text){
   return ids;
 }
 
-function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
+function createTitleSearchWidget({ lsid = '', onAdd = null, onAddCollection = null } = {}) {
   const root = el('div', { class: 'title-search-box' });
   const label = el('label', { class: 'mini', text: 'Search TMDB by title and add item' });
   const row = el('div', { class: 'title-search-row' });
@@ -5636,14 +5663,19 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
           if (item.mediaType === 'collection') {
             let addedCount = 0;
             if (lsid) {
-              const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lsid, collectionId: item.tmdbId })
-              });
-              const data = await r.json().catch(() => ({}));
-              if (!r.ok) throw new Error(data.message || 'Failed to add collection');
-              addedCount = Number(data.added) || 0;
+              if (typeof onAddCollection === 'function') {
+                const data = await onAddCollection(item);
+                addedCount = Number(data?.added) || 0;
+              } else {
+                const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ lsid, collectionId: item.tmdbId })
+                });
+                const data = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+                addedCount = Number(data.added) || 0;
+              }
             } else {
               const draftResult = await addCollectionToDraft(item);
               addedCount = draftResult.added;
@@ -6482,6 +6514,13 @@ async function render() {
       const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
       const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
 
+      function forceCustomSortSelection(){
+        prefs.perListSort = prefs.perListSort || {};
+        prefs.perListSort[lsid] = 'custom';
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        if (rowSel) rowSel.value = 'custom';
+      }
+
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
       const resetBtn = el('button',{text:'Reset order', class:'order-reset-btn'});
@@ -6517,7 +6556,20 @@ async function render() {
             body: JSON.stringify({ lsid, id: imdbId })
           });
           if (!r.ok) throw new Error(await r.text());
+          forceCustomSortSelection();
           await refresh();
+        },
+        onAddCollection: async (item) => {
+          const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, collectionId: item.tmdbId })
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+          forceCustomSortSelection();
+          await refresh();
+          return data;
         }
       });
       searchWrap.appendChild(drawerSearch.el);
@@ -6625,11 +6677,13 @@ async function render() {
           if (!m) { alert('Enter a valid IMDb id'); return; }
           input.disabled = true;
           try {
-            await fetch('/api/list-add?admin='+ADMIN, {
+            const r = await fetch('/api/list-add?admin='+ADMIN, {
               method: 'POST',
               headers: { 'Content-Type':'application/json' },
               body: JSON.stringify({ lsid, id: m[1] })
             });
+            if (!r.ok) throw new Error(await r.text());
+            forceCustomSortSelection();
             input.value = '';
             await refresh();
           } finally {
