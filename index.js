@@ -1948,6 +1948,26 @@ async function fetchTmdbJson(path, apiKey) {
   if (!r.ok) throw new Error(`TMDB ${path} -> ${r.status}`);
   try { return await r.json(); } catch { return null; }
 }
+async function fetchTmdbAlternateBackdrop(itemType, tmdbId, primaryPath, apiKey) {
+  try {
+    if (!tmdbId) return "";
+    const data = await fetchTmdbJson(`/${itemType}/${tmdbId}/images`, apiKey);
+    const backdrops = Array.isArray(data?.backdrops) ? data.backdrops : [];
+    if (!backdrops.length) return "";
+    const normalizedPrimary = String(primaryPath || "").trim();
+    const candidate = backdrops
+      .slice()
+      .sort((a, b) => (Number(b?.vote_average) || 0) - (Number(a?.vote_average) || 0))
+      .find(img => {
+        const path = String(img?.file_path || "").trim();
+        if (!path) return false;
+        return !normalizedPrimary || path !== normalizedPrimary;
+      });
+    return candidate?.file_path || "";
+  } catch {
+    return "";
+  }
+}
 async function fetchTmdbMeta(imdbId) {
   if (!tmdbEnabled()) return null;
   const cached = TMDB_CACHE.get(imdbId);
@@ -1963,12 +1983,14 @@ async function fetchTmdbMeta(imdbId) {
     const ep = data?.tv_episode_results?.[0];
     let rec = null;
     if (tv) {
+      const altBackdropPath = await fetchTmdbAlternateBackdrop("tv", tv.id, tv.backdrop_path, apiKey);
       rec = {
         kind: "series",
         meta: {
           name: tv.name,
           poster: tmdbImage(tv.poster_path, "w500"),
           background: tmdbImage(tv.backdrop_path, "w780"),
+          landscapePoster: tmdbImage(altBackdropPath || tv.backdrop_path, "w780"),
           released: tv.first_air_date || undefined,
           year: tv.first_air_date ? Number(String(tv.first_air_date).slice(0, 4)) : undefined,
           description: tv.overview || undefined,
@@ -1976,12 +1998,14 @@ async function fetchTmdbMeta(imdbId) {
         }
       };
     } else if (movie) {
+      const altBackdropPath = await fetchTmdbAlternateBackdrop("movie", movie.id, movie.backdrop_path, apiKey);
       rec = {
         kind: "movie",
         meta: {
           name: movie.title,
           poster: tmdbImage(movie.poster_path, "w500"),
           background: tmdbImage(movie.backdrop_path, "w780"),
+          landscapePoster: tmdbImage(altBackdropPath || movie.backdrop_path, "w780"),
           released: movie.release_date || undefined,
           year: movie.release_date ? Number(String(movie.release_date).slice(0, 4)) : undefined,
           description: movie.overview || undefined,
@@ -1995,6 +2019,7 @@ async function fetchTmdbMeta(imdbId) {
           name: ep.name || ep.show_name,
           poster: tmdbImage(ep.still_path, "w500"),
           background: tmdbImage(ep.still_path, "w780"),
+          landscapePoster: tmdbImage(ep.still_path, "w780"),
           released: ep.air_date || undefined,
           year: ep.air_date ? Number(String(ep.air_date).slice(0, 4)) : undefined,
           description: ep.overview || undefined,
@@ -2021,6 +2046,7 @@ async function fetchTmdbMeta(imdbId) {
                 name: epData.name || epData.show_name,
                 poster: tmdbImage(epData.still_path, "w500"),
                 background: tmdbImage(epData.still_path, "w780"),
+                landscapePoster: tmdbImage(epData.still_path, "w780"),
                 released: epData.air_date || undefined,
                 year: epData.air_date ? Number(String(epData.air_date).slice(0, 4)) : undefined,
                 description: epData.overview || undefined,
@@ -3142,7 +3168,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     const visibleMetas = metas.slice(skip, skip+limit).map(m => ({
       ...m,
-      poster: m.background || m.backdrop || m.poster || undefined,
+      poster: m.landscapePoster || m.background || m.backdrop || m.poster || undefined,
       posterShape: "landscape"
     }));
     res.json({ metas: visibleMetas });
