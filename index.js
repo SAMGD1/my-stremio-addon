@@ -132,7 +132,8 @@ let PREFS = {
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
     traktUsers: []        // array of Trakt user URLs or usernames
   },
-  blocked: []             // listIds you removed/blocked (IMDb or Trakt)
+  blocked: [],            // listIds you removed/blocked (IMDb or Trakt)
+  posterMode: "landscape" // landscape | portrait (Stremio poster container + image source)
 };
 
 const BEST   = new Map(); // Map<tt, { kind, meta }>
@@ -2441,6 +2442,10 @@ async function fetchLiveListIds(lsid, sourceMap = LISTS, seen = new Set()) {
 }
 
 // ----------------- SYNC -----------------
+function posterMode() {
+  return PREFS.posterMode === "portrait" ? "portrait" : "landscape";
+}
+
 function manifestKey() {
   const enabled = (PREFS.enabled && PREFS.enabled.length) ? PREFS.enabled : Object.keys(LISTS);
   const names   = enabled.map(id => listDisplayName(id)).sort().join("|");
@@ -2452,9 +2457,10 @@ function manifestKey() {
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
   const hidden = (PREFS.hiddenLists || []).join(",");
+  const pMode = posterMode();
 
   const mainLists = JSON.stringify(PREFS.mainLists || []);
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}#h${hidden}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}#h${hidden}#p${pMode}`;
 }
 
 async function harvestSources() {
@@ -2984,7 +2990,7 @@ function catalogs(){
         options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS
       }
     ],
-    posterShape: "landscape"
+    posterShape: posterMode() === "landscape" ? "landscape" : "poster"
   }));
 }
 app.get("/manifest.json", (req,res)=>{
@@ -3166,10 +3172,13 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
 
+    const isLandscapeMode = posterMode() === "landscape";
     const visibleMetas = metas.slice(skip, skip+limit).map(m => ({
       ...m,
-      poster: m.landscapePoster || m.background || m.backdrop || m.poster || undefined,
-      posterShape: "landscape"
+      poster: isLandscapeMode
+        ? (m.background || m.backdrop || m.poster || undefined)
+        : (m.poster || m.background || m.backdrop || undefined),
+      posterShape: isLandscapeMode ? "landscape" : "poster"
     }));
     res.json({ metas: visibleMetas });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
@@ -3311,6 +3320,10 @@ app.post("/api/prefs", async (req,res) => {
       : (PREFS.sortOptions || {});
 
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
+    if (typeof body.posterMode === "string") {
+      const pm = body.posterMode.toLowerCase();
+      PREFS.posterMode = (pm === "portrait") ? "portrait" : "landscape";
+    }
     if (typeof body.tmdbKey === "string") {
       PREFS.tmdbKey = body.tmdbKey.trim();
       if (!PREFS.tmdbKey) PREFS.tmdbKeyValid = null;
@@ -5057,6 +5070,16 @@ app.get("/admin", async (req,res)=>{
           </div>
           <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
           <div class="api-key-box">
+            <label class="mini">Poster layout in Stremio</label>
+            <div class="move-style-toggle" aria-label="Poster layout mode">
+              <div class="seg" role="group" aria-label="Poster layout">
+                <button id="posterPortraitBtn" type="button" class="btn2">Portrait</button>
+                <button id="posterLandscapeBtn" type="button" class="btn2">Landscape</button>
+              </div>
+            </div>
+            <div class="mini muted">When changing this, reinstall or update the addon in Stremio so the new poster container shape is applied.</div>
+          </div>
+          <div class="api-key-box">
             <label class="mini">TMDB API Key (optional)</label>
             <div class="api-key-row">
               <div class="api-key-input-wrap">
@@ -5960,8 +5983,27 @@ async function render() {
   }
 
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
+  if (prefs.posterMode !== 'portrait' && prefs.posterMode !== 'landscape') prefs.posterMode = 'landscape';
   const refresh = async () => { await render(); };
   const listCount = (lsid) => (lists[lsid]?.ids || []).length;
+
+  const posterPortraitBtn = document.getElementById('posterPortraitBtn');
+  const posterLandscapeBtn = document.getElementById('posterLandscapeBtn');
+  const applyPosterModeUi = () => {
+    if (posterPortraitBtn) posterPortraitBtn.classList.toggle('active', prefs.posterMode === 'portrait');
+    if (posterLandscapeBtn) posterLandscapeBtn.classList.toggle('active', prefs.posterMode === 'landscape');
+  };
+  applyPosterModeUi();
+  if (posterPortraitBtn) posterPortraitBtn.onclick = async () => {
+    prefs.posterMode = 'portrait';
+    applyPosterModeUi();
+    await saveAll('Saved. Reinstall/update addon in Stremio to apply poster container changes.');
+  };
+  if (posterLandscapeBtn) posterLandscapeBtn.onclick = async () => {
+    prefs.posterMode = 'landscape';
+    applyPosterModeUi();
+    await saveAll('Saved. Reinstall/update addon in Stremio to apply poster container changes.');
+  };
 
   prefs.userBackups = prefs.userBackups || { users: [], traktUsers: [] };
   function renderPills(id, arr, onRemove, opts = {}){
@@ -7632,6 +7674,7 @@ async function render() {
       sources: prefs.sources || {},
       userBackups: prefs.userBackups || {},
       blocked: prefs.blocked || [],
+      posterMode: prefs.posterMode || "landscape",
       reconcileFrozenState: true
     };
     msg.textContent = "Saving…";
