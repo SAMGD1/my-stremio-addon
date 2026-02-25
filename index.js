@@ -228,6 +228,23 @@ function resolveStreamImdbId(rawId) {
   return base;
 }
 
+function currentSortedIdsForList(lsid) {
+  if (!isListId(lsid)) return [];
+  const ids = listIdsWithEdits(lsid);
+  let metas = ids.map(tt => CARD.get(tt) || cardFor(tt));
+
+  const sortKey = String((PREFS.perListSort && PREFS.perListSort[lsid]) || "name_asc").toLowerCase();
+  if (sortKey === "custom") metas = applyCustomOrder(metas, lsid);
+  else if (sortKey === "imdb" || sortKey === "trakt") metas = sortByOrderKey(metas, lsid, sortKey);
+  else if (sortKey === "date_asc" || sortKey === "date_desc") {
+    const haveSourceOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sortKey]) && LISTS[lsid].orders[sortKey].length;
+    metas = haveSourceOrder ? sortByOrderKey(metas, lsid, sortKey) : stableSort(metas, sortKey);
+  } else metas = stableSort(metas, sortKey);
+
+  if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
+  return metas.map(m => m.id).filter(isImdb);
+}
+
 function pinAddedIdsToFront(lsid, incomingIds) {
   if (!isListId(lsid)) return;
   const added = [];
@@ -241,7 +258,7 @@ function pinAddedIdsToFront(lsid, incomingIds) {
   if (!added.length) return;
 
   const addedSet = new Set(added);
-  const current = listIdsWithEdits(lsid);
+  const current = currentSortedIdsForList(lsid);
   const rest = current.filter(id => !addedSet.has(id));
 
   PREFS.customOrder = PREFS.customOrder || {};
