@@ -1335,6 +1335,10 @@ async function traktJson(path) {
   try { return await r.json(); } catch { return null; }
 }
 
+function isTraktConfigured() {
+  return !!String(PREFS.traktClientId || TRAKT_CLIENT_ID || "").trim();
+}
+
 async function fetchTraktListMeta(info) {
   const { user, slug, direct } = info;
   try {
@@ -1456,7 +1460,7 @@ async function fetchTraktListImdbIds(info) {
 }
 
 async function discoverTraktUserLists(user) {
-  if (!TRAKT_CLIENT_ID) return [];
+  if (!isTraktConfigured()) return [];
   const found = [];
   let page = 1;
   while (true) {
@@ -2425,7 +2429,7 @@ async function fetchLiveListIds(lsid, sourceMap = LISTS, seen = new Set()) {
 
   if (isTraktListId(lsid)) {
     const ts = parseTraktListKey(lsid);
-    if (!ts || !TRAKT_CLIENT_ID) return [];
+    if (!ts || !isTraktConfigured()) return [];
     try { return await fetchTraktListImdbIds(ts); }
     catch (e) { console.warn("[SYNC] Trakt fetch failed for", lsid, e.message); return []; }
   }
@@ -2509,7 +2513,7 @@ async function harvestSources() {
     // ---- Trakt lists ----
     const tinfo = parseTraktListUrl(val);
       if (tinfo) {
-        if (!TRAKT_CLIENT_ID) {
+        if (!isTraktConfigured()) {
           console.warn("[TRAKT] got list", val, "but TRAKT_CLIENT_ID is not set – ignoring.");
           continue;
         }
@@ -2679,7 +2683,7 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
       if (isTraktListId(id)) {
         const ts = parseTraktListKey(id);
-        if (ts && TRAKT_CLIENT_ID) {
+        if (ts && isTraktConfigured()) {
           try {
             raw = await fetchTraktListImdbIds(ts);
           } catch (e) {
@@ -2863,7 +2867,7 @@ async function syncSingleList(lsid, { manual = false } = {}) {
     throw new Error("Custom lists have no source to sync");
   } else if (isTraktListId(lsid)) {
     const ts = parseTraktListKey(lsid);
-    if (!ts || !TRAKT_CLIENT_ID) throw new Error("Trakt not configured");
+    if (!ts || !isTraktConfigured()) throw new Error("Trakt not configured");
     raw = await fetchTraktListImdbIds(ts);
   } else {
     const url = list.url || `https://www.imdb.com/list/${lsid}/`;
@@ -3423,7 +3427,13 @@ app.post("/api/trakt-verify", async (req, res) => {
     await traktJson("/lists/popular?page=1&limit=1");
     PREFS.traktClientIdValid = true;
     await persistSnapshot();
-    return res.json({ ok: true, message: "Trakt client id verified and active." });
+    try {
+      await fullSync({ rediscover: true, force: true });
+      return res.json({ ok: true, message: "Trakt client id verified and active. Lists resynced." });
+    } catch (syncErr) {
+      console.warn("[TRAKT] post-verify sync failed:", syncErr.message);
+      return res.json({ ok: true, message: "Trakt client id verified and active. Sync scheduled on next refresh." });
+    }
   } catch (e) {
     PREFS.traktClientIdValid = false;
     await persistSnapshot();
@@ -3436,10 +3446,18 @@ app.post("/api/trakt-verify", async (req, res) => {
 app.post("/api/trakt-save", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
+    const hadTrakt = isTraktConfigured();
     const key = String(req.body.key || "").trim();
     PREFS.traktClientId = key;
     PREFS.traktClientIdValid = key ? PREFS.traktClientIdValid : null;
     await persistSnapshot();
+    if (!hadTrakt && isTraktConfigured()) {
+      try {
+        await fullSync({ rediscover: true, force: true });
+      } catch (syncErr) {
+        console.warn("[TRAKT] post-save sync failed:", syncErr.message);
+      }
+    }
     res.json({ ok: true });
   } catch (e) { res.status(500).send("Trakt save failed"); }
 });
@@ -4326,11 +4344,12 @@ app.get("/admin", async (req,res)=>{
     width:52px;
     height:78px;
   }
-  .thumbs.cool-portrait .thumb{min-height:94px;padding:6px 8px;}
-  .thumbs.cool-portrait .thumb-img{width:56px;height:84px;}
+  .thumbs.cool-portrait{grid-template-columns:repeat(auto-fill,minmax(224px,1fr));}
+  .thumbs.cool-portrait .thumb{min-height:102px;padding:7px 9px;}
+  .thumbs.cool-portrait .thumb-img{width:60px;height:89px;}
   .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(280px,1fr));}
-  .thumbs.cool-landscape .thumb{min-height:100px;padding:6px 8px;}
-  .thumbs.cool-landscape .thumb-img{width:140px;height:80px;border-radius:8px;}
+  .thumbs.cool-landscape .thumb{min-height:108px;padding:7px 9px;}
+  .thumbs.cool-landscape .thumb-img{width:126px;height:72px;border-radius:8px;}
   .thumbs.cool-bg-enabled .thumb::before{
     content:"";
     position:absolute;
@@ -4455,6 +4474,7 @@ app.get("/admin", async (req,res)=>{
   .move-style-toggle .seg{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#181433;}
   .move-style-toggle button{padding:6px 10px;border:0;background:transparent;color:var(--muted);box-shadow:none;border-radius:0;}
   .move-style-toggle button.active{background:var(--accent2);color:#fff;}
+  .move-controls-dock{display:flex;justify-content:flex-start;margin:10px 0 8px;}
   .create-panel{
     display:none;
     margin-top:12px;
@@ -4704,16 +4724,16 @@ app.get("/admin", async (req,res)=>{
   }
   .title-search-item{
     display:flex;
-    align-items:center;
-    gap:8px;
+    align-items:flex-start;
+    gap:10px;
     border:1px solid var(--border);
     border-radius:10px;
-    padding:6px 8px;
+    padding:8px 10px;
     background:rgba(16,13,36,.6);
   }
   .title-search-item img{
-    width:36px;
-    height:54px;
+    width:44px;
+    height:66px;
     object-fit:cover;
     border-radius:6px;
     border:1px solid var(--border);
@@ -4722,14 +4742,18 @@ app.get("/admin", async (req,res)=>{
   .title-search-item .meta{
     flex:1;
     min-width:0;
-    line-height:1.2;
+    line-height:1.25;
   }
   .title-search-item .meta .name{
     font-size:13px;
     font-weight:600;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis;
+    white-space:normal;
+    overflow-wrap:anywhere;
+    word-break:break-word;
+  }
+  .title-search-item .btn2{
+    flex-shrink:0;
+    align-self:center;
   }
   .title-search-item .meta .sub{
     font-size:11px;
@@ -4768,8 +4792,10 @@ app.get("/admin", async (req,res)=>{
     outline:2px dashed rgba(139,124,247,.95);
     outline-offset:-2px;
   }
-  .mode-toggle{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-  .mode-btn{padding:6px 12px;font-size:12px;}
+  .customize-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+  .customize-header > div{min-width:260px;flex:1;}
+  .mode-toggle{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap;min-width:220px;}
+  .mode-btn{padding:9px 16px;font-size:14px;font-weight:700;}
   .mode-btn.active{background:var(--accent);box-shadow:0 8px 20px rgba(108,92,231,.45);}
   .mode-btn.hidden{display:none;}
   .row-menu{position:relative;}
@@ -5046,8 +5072,10 @@ app.get("/admin", async (req,res)=>{
   .link-pills{margin-top:6px;}
   .manager-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-top:10px;}
   .manager-group{border:1px solid rgba(68,58,122,.7);background:rgba(17,13,40,.7);border-radius:12px;padding:8px 10px;}
-  .manager-group > summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;font-weight:600;color:#ddd7ff;}
+  .manager-group > summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;font-weight:600;color:#ddd7ff;gap:10px;}
   .manager-group > summary::-webkit-details-marker{display:none;}
+  .manager-group > summary::after{content:"▾";opacity:.8;transition:transform .2s ease;flex-shrink:0;}
+  .manager-group[open] > summary::after{transform:rotate(180deg);}
   .manager-group > summary .mini{font-weight:500;}
   .manager-group .group-body{margin-top:8px;}
   .manager-subtitle{font-size:12px;color:var(--muted);margin:8px 0 4px;}
@@ -5281,46 +5309,48 @@ app.get("/admin", async (req,res)=>{
 
   <section id="section-customize" class="section">
     <div class="card center-card">
-      <h3>Customize Layout</h3>
-      <p class="muted" id="customizeLeadText">Simple mode is the default for a clean compact layout. Switch to Normal mode for full controls and list item tools.</p>
-      <div class="mode-toggle" id="layoutModeToggle">
-        <button id="simpleModeBtn" class="mode-btn" type="button">Simple mode</button>
-        <button id="normalModeBtn" class="mode-btn btn2" type="button">Normal mode</button>
-        <span class="mini muted">Simple mode hides item drawers and advanced controls.</span>
+      <div class="customize-header">
+        <div>
+          <h3>Customize Layout</h3>
+          <p class="muted" id="customizeLeadText">Simple mode is the default for a clean compact layout. Switch to Normal mode for full controls and list item tools.</p>
+        </div>
+        <div class="mode-toggle" id="layoutModeToggle">
+          <button id="simpleModeBtn" class="mode-btn" type="button">Simple mode</button>
+          <button id="normalModeBtn" class="mode-btn btn2" type="button">Normal mode</button>
+          <span class="mini muted" style="width:100%;text-align:right;">Simple mode hides item drawers and advanced controls.</span>
+        </div>
       </div>
       <div class="rowtools">
         <label class="pill normal-only"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
         <button id="showHiddenBtn" type="button" class="btn2" style="display:none;">Show hidden lists</button>
         <span class="mini muted normal-only">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
         <span class="rowtools-spacer"></span>
-        <div id="moveStyleToggle" class="move-style-toggle normal-only" aria-label="Normal mode move controls">
-          <span class="mini muted">Move controls</span>
-          <div class="seg" role="group" aria-label="Move control style">
-            <button type="button" id="moveStyleHandleBtn">☰</button>
-            <button type="button" id="moveStyleArrowsBtn">↑↓</button>
-          </div>
-        </div>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
       </div>
       <details id="coolTitleCardsPanel" class="manager-group normal-only" style="display:none;">
-        <summary><span>Cool title cards</span><span class="mini">website only</span></summary>
+        <summary><span>Custom Title Cards</span><span class="mini">website only</span></summary>
         <div class="group-body">
-          <div class="mini muted" style="margin-bottom:8px;">Change how item cards look in Customize Layout only.</div>
-          <div class="move-style-toggle" aria-label="Cool title card shape">
-            <span class="mini muted">Card image shape</span>
-            <div class="seg" role="group" aria-label="Card image shape">
-              <button type="button" id="coolCardsPortraitBtn">Portrait</button>
-              <button type="button" id="coolCardsLandscapeBtn">Landscape</button>
+          <details class="merge-dropdown" open>
+            <summary>Custom title card options</summary>
+            <div class="merge-dropdown-body">
+              <div class="mini muted" style="margin-bottom:8px;">Change how item cards look in Customize Layout only.</div>
+              <div class="move-style-toggle" aria-label="Custom title card shape">
+                <span class="mini muted">Card image shape</span>
+                <div class="seg" role="group" aria-label="Card image shape">
+                  <button type="button" id="coolCardsPortraitBtn">Portrait</button>
+                  <button type="button" id="coolCardsLandscapeBtn">Landscape</button>
+                </div>
+              </div>
+              <div class="move-style-toggle" aria-label="Custom title card background mode" style="margin-top:8px;">
+                <span class="mini muted">Background mode</span>
+                <div class="seg" role="group" aria-label="Background mode">
+                  <button type="button" id="coolCardsBgOffBtn">Off</button>
+                  <button type="button" id="coolCardsBgOnBtn">On</button>
+                </div>
+              </div>
+              <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
             </div>
-          </div>
-          <div class="move-style-toggle" aria-label="Cool title card background mode" style="margin-top:8px;">
-            <span class="mini muted">Background mode</span>
-            <div class="seg" role="group" aria-label="Background mode">
-              <button type="button" id="coolCardsBgOffBtn">Off</button>
-              <button type="button" id="coolCardsBgOnBtn">On</button>
-            </div>
-          </div>
-          <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
+          </details>
         </div>
       </details>
       <div id="createOfflinePanel" class="create-panel">
@@ -5369,6 +5399,15 @@ app.get("/admin", async (req,res)=>{
         </div>
       </div>
       <div id="mergeBuilder" class="merge-box" style="display:none;"></div>
+      <div class="move-controls-dock">
+        <div id="moveStyleToggle" class="move-style-toggle normal-only" aria-label="Normal mode move controls">
+          <span class="mini muted">Move controls</span>
+          <div class="seg" role="group" aria-label="Move control style">
+            <button type="button" id="moveStyleHandleBtn">☰</button>
+            <button type="button" id="moveStyleArrowsBtn">↑↓</button>
+          </div>
+        </div>
+      </div>
       <div id="prefs"></div>
     </div>
   </section>
@@ -6494,11 +6533,11 @@ async function render() {
     try {
       const raw = JSON.parse(localStorage.getItem('coolTitleCards') || '{}');
       return {
-        shape: raw.shape === 'portrait' ? 'portrait' : 'landscape',
+        shape: raw.shape === 'landscape' ? 'landscape' : 'portrait',
         bg: raw.bg !== false
       };
     } catch {
-      return { shape: 'landscape', bg: true };
+      return { shape: 'portrait', bg: true };
     }
   };
   let coolCards = parseCoolCards();
