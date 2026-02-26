@@ -4325,11 +4325,11 @@ app.get("/admin", async (req,res)=>{
     width:52px;
     height:78px;
   }
-  .thumbs.cool-portrait .thumb{min-height:98px;padding:7px 9px;}
+  .thumbs.cool-portrait .thumb{min-height:94px;padding:6px 8px;}
   .thumbs.cool-portrait .thumb-img{width:56px;height:84px;}
   .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));}
-  .thumbs.cool-landscape .thumb{min-height:110px;padding:8px 10px;}
-  .thumbs.cool-landscape .thumb-img{width:130px;height:74px;border-radius:8px;}
+  .thumbs.cool-landscape .thumb{min-height:104px;padding:7px 9px;}
+  .thumbs.cool-landscape .thumb-img{width:140px;height:80px;border-radius:8px;}
   .thumbs.cool-bg-enabled .thumb::before{
     content:"";
     position:absolute;
@@ -4345,7 +4345,6 @@ app.get("/admin", async (req,res)=>{
   .thumbs.cool-portrait .thumb .del,
   .thumbs.cool-landscape .thumb .del,
   .thumbs.cool-bg-enabled .thumb .del{
-    display:block;
     top:8px;
     right:8px;
     width:26px;
