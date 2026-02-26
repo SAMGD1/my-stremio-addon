@@ -4340,6 +4340,18 @@ app.get("/admin", async (req,res)=>{
     pointer-events:none;
   }
   .thumbs.cool-bg-enabled .thumb > *{position:relative;z-index:1;}
+  .thumbs.cool-bg-enabled .thumb .del{
+    display:block;
+    top:10px;
+    right:10px;
+    width:26px;
+    height:26px;
+    line-height:26px;
+    border-radius:999px;
+    background:rgba(22,18,48,.9);
+    border:1px solid rgba(155,140,255,.45);
+    color:#ffb4b4;
+  }
   .thumb .title{font-size:14px}
   .thumb .id{font-size:11px;color:var(--muted)}
   .thumb[draggable="true"]{cursor:grab}
@@ -5361,6 +5373,13 @@ async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); ret
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
 async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
 async function getDiscovered(){ const r = await fetch('/api/discovered?admin='+ADMIN); return r.json(); }
+function upscaleTmdbImage(url, kind){
+  const raw = String(url || '');
+  if (!raw) return raw;
+  if (!/image\.tmdb\.org\/t\/p\//i.test(raw)) return raw;
+  const target = kind === 'bg' ? 'w1280' : 'w780';
+  return raw.replace(/\/t\/p\/(original|w\d+)/i, '/t/p/' + target);
+}
 async function saveCustomOrder(lsid, order){
   const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
   if (!r.ok) throw new Error('save failed');
@@ -6799,13 +6818,25 @@ async function render() {
           await refresh();
         };
 
-        const url = it.poster || it.background || '';
-        if (url) li.style.setProperty('--cool-bg', 'url("' + String(url).replace(/"/g, '\"') + '")');
-        const img = el('img',{src: url, alt:'', class:'thumb-img'});
+        const posterUrl = (coolCards.shape === 'landscape')
+          ? (it.background || it.backdrop || it.poster || '')
+          : (it.poster || it.background || it.backdrop || '');
+        const bgUrl = it.background || it.backdrop || posterUrl || '';
+        if (bgUrl) li.style.setProperty('--cool-bg', 'url("' + String(upscaleTmdbImage(bgUrl, 'bg')).replace(/"/g, '\"') + '")');
+        const img = el('img',{src: upscaleTmdbImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
         const wrap = el('div',{},[
           el('div',{class:'title',text: it.name || it.id}),
           el('div',{class:'id',text: it.id})
         ]);
+
+        li.addEventListener('click', (e) => {
+          const t = e.target;
+          if (!t) return;
+          if (t.closest('button, .del, .tile-move, .move-handle-btn, input, textarea, select, a')) return;
+          const stType = (it.type === 'series' || it.type === 'show' || it.type === 'tv') ? 'series' : 'movie';
+          if (!confirm('Open this item in Stremio?')) return;
+          window.location.href = 'stremio://detail/' + encodeURIComponent(stType) + '/' + encodeURIComponent(it.id || '');
+        });
         const moveBox = el('div',{class:'tile-move'});
         if (useArrowMove) {
           const upBtn = el('button',{type:'button',text:'↑'});
