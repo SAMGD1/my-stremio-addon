@@ -4327,8 +4327,8 @@ app.get("/admin", async (req,res)=>{
   }
   .thumbs.cool-portrait .thumb{min-height:94px;padding:6px 8px;}
   .thumbs.cool-portrait .thumb-img{width:56px;height:84px;}
-  .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));}
-  .thumbs.cool-landscape .thumb{min-height:104px;padding:7px 9px;}
+  .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(280px,1fr));}
+  .thumbs.cool-landscape .thumb{min-height:100px;padding:6px 8px;}
   .thumbs.cool-landscape .thumb-img{width:140px;height:80px;border-radius:8px;}
   .thumbs.cool-bg-enabled .thumb::before{
     content:"";
@@ -4342,11 +4342,28 @@ app.get("/admin", async (req,res)=>{
     pointer-events:none;
   }
   .thumbs.cool-bg-enabled .thumb > *{position:relative;z-index:1;}
+  .thumbs.cool-bg-enabled .thumb-img{
+    border:1px solid rgba(0,0,0,.72);
+    box-shadow:0 0 0 1px rgba(255,255,255,.04);
+  }
+  .thumbs.cool-bg-enabled .thumb .title,
+  .thumbs.cool-bg-enabled .thumb .id{
+    text-shadow:
+      -1px 0 0 rgba(0,0,0,.88),
+      1px 0 0 rgba(0,0,0,.88),
+      0 -1px 0 rgba(0,0,0,.88),
+      0 1px 0 rgba(0,0,0,.88),
+      0 2px 6px rgba(0,0,0,.75);
+  }
+
   .thumbs.cool-portrait .thumb .del,
   .thumbs.cool-landscape .thumb .del,
   .thumbs.cool-bg-enabled .thumb .del{
+    position:absolute;
     top:8px;
     right:8px;
+    left:auto;
+    bottom:auto;
     width:26px;
     height:26px;
     line-height:26px;
