@@ -4346,7 +4346,7 @@ app.get("/admin", async (req,res)=>{
   }
   .thumbs.cool-portrait{grid-template-columns:repeat(auto-fill,minmax(224px,1fr));}
   .thumbs.cool-portrait .thumb{min-height:102px;padding:7px 9px;}
-  .thumbs.cool-portrait .thumb-img{width:60px;height:89px;}
+  .thumbs.cool-portrait .thumb-img{width:66px;height:98px;}
   .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(280px,1fr));}
   .thumbs.cool-landscape .thumb{min-height:108px;padding:7px 9px;}
   .thumbs.cool-landscape .thumb-img{width:126px;height:72px;border-radius:8px;}
@@ -4732,8 +4732,8 @@ app.get("/admin", async (req,res)=>{
     background:rgba(16,13,36,.6);
   }
   .title-search-item img{
-    width:44px;
-    height:66px;
+    width:52px;
+    height:78px;
     object-fit:cover;
     border-radius:6px;
     border:1px solid var(--border);
