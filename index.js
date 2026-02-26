@@ -1335,6 +1335,10 @@ async function traktJson(path) {
   try { return await r.json(); } catch { return null; }
 }
 
+function isTraktConfigured() {
+  return !!String(PREFS.traktClientId || TRAKT_CLIENT_ID || "").trim();
+}
+
 async function fetchTraktListMeta(info) {
   const { user, slug, direct } = info;
   try {
@@ -1456,7 +1460,7 @@ async function fetchTraktListImdbIds(info) {
 }
 
 async function discoverTraktUserLists(user) {
-  if (!TRAKT_CLIENT_ID) return [];
+  if (!isTraktConfigured()) return [];
   const found = [];
   let page = 1;
   while (true) {
@@ -2425,7 +2429,7 @@ async function fetchLiveListIds(lsid, sourceMap = LISTS, seen = new Set()) {
 
   if (isTraktListId(lsid)) {
     const ts = parseTraktListKey(lsid);
-    if (!ts || !TRAKT_CLIENT_ID) return [];
+    if (!ts || !isTraktConfigured()) return [];
     try { return await fetchTraktListImdbIds(ts); }
     catch (e) { console.warn("[SYNC] Trakt fetch failed for", lsid, e.message); return []; }
   }
@@ -2509,7 +2513,7 @@ async function harvestSources() {
     // ---- Trakt lists ----
     const tinfo = parseTraktListUrl(val);
       if (tinfo) {
-        if (!TRAKT_CLIENT_ID) {
+        if (!isTraktConfigured()) {
           console.warn("[TRAKT] got list", val, "but TRAKT_CLIENT_ID is not set – ignoring.");
           continue;
         }
@@ -2679,7 +2683,7 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
       if (isTraktListId(id)) {
         const ts = parseTraktListKey(id);
-        if (ts && TRAKT_CLIENT_ID) {
+        if (ts && isTraktConfigured()) {
           try {
             raw = await fetchTraktListImdbIds(ts);
           } catch (e) {
@@ -2863,7 +2867,7 @@ async function syncSingleList(lsid, { manual = false } = {}) {
     throw new Error("Custom lists have no source to sync");
   } else if (isTraktListId(lsid)) {
     const ts = parseTraktListKey(lsid);
-    if (!ts || !TRAKT_CLIENT_ID) throw new Error("Trakt not configured");
+    if (!ts || !isTraktConfigured()) throw new Error("Trakt not configured");
     raw = await fetchTraktListImdbIds(ts);
   } else {
     const url = list.url || `https://www.imdb.com/list/${lsid}/`;
@@ -3423,7 +3427,13 @@ app.post("/api/trakt-verify", async (req, res) => {
     await traktJson("/lists/popular?page=1&limit=1");
     PREFS.traktClientIdValid = true;
     await persistSnapshot();
-    return res.json({ ok: true, message: "Trakt client id verified and active." });
+    try {
+      await fullSync({ rediscover: true, force: true });
+      return res.json({ ok: true, message: "Trakt client id verified and active. Lists resynced." });
+    } catch (syncErr) {
+      console.warn("[TRAKT] post-verify sync failed:", syncErr.message);
+      return res.json({ ok: true, message: "Trakt client id verified and active. Sync scheduled on next refresh." });
+    }
   } catch (e) {
     PREFS.traktClientIdValid = false;
     await persistSnapshot();
@@ -3436,10 +3446,18 @@ app.post("/api/trakt-verify", async (req, res) => {
 app.post("/api/trakt-save", async (req, res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try {
+    const hadTrakt = isTraktConfigured();
     const key = String(req.body.key || "").trim();
     PREFS.traktClientId = key;
     PREFS.traktClientIdValid = key ? PREFS.traktClientIdValid : null;
     await persistSnapshot();
+    if (!hadTrakt && isTraktConfigured()) {
+      try {
+        await fullSync({ rediscover: true, force: true });
+      } catch (syncErr) {
+        console.warn("[TRAKT] post-save sync failed:", syncErr.message);
+      }
+    }
     res.json({ ok: true });
   } catch (e) { res.status(500).send("Trakt save failed"); }
 });
