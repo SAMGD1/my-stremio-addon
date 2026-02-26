@@ -4325,6 +4325,21 @@ app.get("/admin", async (req,res)=>{
     width:52px;
     height:78px;
   }
+  .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));}
+  .thumbs.cool-landscape .thumb{min-height:110px;padding:8px 10px;}
+  .thumbs.cool-landscape .thumb-img{width:130px;height:74px;border-radius:8px;}
+  .thumbs.cool-bg-enabled .thumb::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    border-radius:12px;
+    background-image:var(--cool-bg);
+    background-size:cover;
+    background-position:center;
+    opacity:.38;
+    pointer-events:none;
+  }
+  .thumbs.cool-bg-enabled .thumb > *{position:relative;z-index:1;}
   .thumb .title{font-size:14px}
   .thumb .id{font-size:11px;color:var(--muted)}
   .thumb[draggable="true"]{cursor:grab}
@@ -5253,6 +5268,27 @@ app.get("/admin", async (req,res)=>{
         </div>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
       </div>
+      <details id="coolTitleCardsPanel" class="manager-group normal-only" style="display:none;">
+        <summary><span>Cool title cards</span><span class="mini">website only</span></summary>
+        <div class="group-body">
+          <div class="mini muted" style="margin-bottom:8px;">Change how item cards look in Customize Layout only.</div>
+          <div class="move-style-toggle" aria-label="Cool title card shape">
+            <span class="mini muted">Card image shape</span>
+            <div class="seg" role="group" aria-label="Card image shape">
+              <button type="button" id="coolCardsPortraitBtn">Portrait</button>
+              <button type="button" id="coolCardsLandscapeBtn">Landscape</button>
+            </div>
+          </div>
+          <div class="move-style-toggle" aria-label="Cool title card background mode" style="margin-top:8px;">
+            <span class="mini muted">Background mode</span>
+            <div class="seg" role="group" aria-label="Background mode">
+              <button type="button" id="coolCardsBgOffBtn">Off</button>
+              <button type="button" id="coolCardsBgOnBtn">On</button>
+            </div>
+          </div>
+          <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
+        </div>
+      </details>
       <div id="createOfflinePanel" class="create-panel">
         <div class="create-layout">
           <div class="create-name">
@@ -6405,12 +6441,26 @@ async function render() {
   const moveStyleArrowsBtn = document.getElementById('moveStyleArrowsBtn');
 
   const advancedToggle = document.getElementById('advancedToggle');
+  const coolTitleCardsPanel = document.getElementById('coolTitleCardsPanel');
   const mergeBuilder = document.getElementById('mergeBuilder');
   const mergeSelection = new Set();
   const layoutMode = localStorage.getItem('customizeMode') === 'normal' ? 'normal' : 'simple';
   const isSimpleMode = layoutMode === 'simple';
   const normalMoveStyle = localStorage.getItem('normalMoveStyle') === 'arrows' ? 'arrows' : 'handle';
   const useArrowMove = !isSimpleMode && normalMoveStyle === 'arrows';
+  const parseCoolCards = () => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('coolTitleCards') || '{}');
+      return {
+        shape: raw.shape === 'portrait' ? 'portrait' : 'landscape',
+        bg: raw.bg !== false
+      };
+    } catch {
+      return { shape: 'landscape', bg: true };
+    }
+  };
+  let coolCards = parseCoolCards();
+  const saveCoolCards = () => localStorage.setItem('coolTitleCards', JSON.stringify(coolCards));
   document.body.classList.toggle('mode-simple', isSimpleMode);
 
   if (customizeLeadText) {
@@ -6487,6 +6537,22 @@ async function render() {
     };
   }
 
+  const coolCardsPortraitBtn = document.getElementById('coolCardsPortraitBtn');
+  const coolCardsLandscapeBtn = document.getElementById('coolCardsLandscapeBtn');
+  const coolCardsBgOffBtn = document.getElementById('coolCardsBgOffBtn');
+  const coolCardsBgOnBtn = document.getElementById('coolCardsBgOnBtn');
+  const applyCoolCardsControls = () => {
+    if (coolCardsPortraitBtn) coolCardsPortraitBtn.classList.toggle('active', coolCards.shape === 'portrait');
+    if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.classList.toggle('active', coolCards.shape === 'landscape');
+    if (coolCardsBgOffBtn) coolCardsBgOffBtn.classList.toggle('active', !coolCards.bg);
+    if (coolCardsBgOnBtn) coolCardsBgOnBtn.classList.toggle('active', !!coolCards.bg);
+  };
+  applyCoolCardsControls();
+  if (coolCardsPortraitBtn) coolCardsPortraitBtn.onclick = () => { coolCards.shape = 'portrait'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.onclick = () => { coolCards.shape = 'landscape'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsBgOffBtn) coolCardsBgOffBtn.onclick = () => { coolCards.bg = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsBgOnBtn) coolCardsBgOnBtn.onclick = () => { coolCards.bg = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+
   if (advancedToggle) {
     const saved = !isSimpleMode && localStorage.getItem('advancedMode') === 'true';
     advancedToggle.checked = saved;
@@ -6522,6 +6588,7 @@ async function render() {
       showHiddenBtn.textContent = showHiddenOnly ? 'Show normal lists' : 'Show hidden lists';
     }
     document.querySelectorAll('.hide-list-btn').forEach(btn => { btn.style.display = on ? '' : 'none'; });
+    if (coolTitleCardsPanel) coolTitleCardsPanel.style.display = on ? '' : 'none';
     document.querySelectorAll('.adv-inline-btn').forEach(btn => {
       btn.style.display = on ? '' : 'none';
       if (!on) btn.setAttribute('aria-expanded', 'false');
@@ -6702,6 +6769,8 @@ async function render() {
       td.appendChild(searchWrap);
 
       const ul = el('ul',{class:'thumbs'});
+      if (coolCards.shape === 'landscape') ul.classList.add('cool-landscape');
+      if (coolCards.bg) ul.classList.add('cool-bg-enabled');
       td.appendChild(ul);
       let tvMoveTile = null;
       function setTvMoveTile(nextLi) {
@@ -6731,6 +6800,7 @@ async function render() {
         };
 
         const url = it.poster || it.background || '';
+        if (url) li.style.setProperty('--cool-bg', 'url("' + String(url).replace(/"/g, '\"') + '")');
         const img = el('img',{src: url, alt:'', class:'thumb-img'});
         const wrap = el('div',{},[
           el('div',{class:'title',text: it.name || it.id}),
