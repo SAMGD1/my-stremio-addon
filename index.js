@@ -4344,11 +4344,11 @@ app.get("/admin", async (req,res)=>{
     width:52px;
     height:78px;
   }
-  .thumbs.cool-portrait .thumb{min-height:94px;padding:6px 8px;}
-  .thumbs.cool-portrait .thumb-img{width:56px;height:84px;}
+  .thumbs.cool-portrait .thumb{min-height:100px;padding:7px 9px;}
+  .thumbs.cool-portrait .thumb-img{width:58px;height:87px;}
   .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(280px,1fr));}
-  .thumbs.cool-landscape .thumb{min-height:100px;padding:6px 8px;}
-  .thumbs.cool-landscape .thumb-img{width:140px;height:80px;border-radius:8px;}
+  .thumbs.cool-landscape .thumb{min-height:108px;padding:7px 9px;}
+  .thumbs.cool-landscape .thumb-img{width:126px;height:72px;border-radius:8px;}
   .thumbs.cool-bg-enabled .thumb::before{
     content:"";
     position:absolute;
@@ -4473,6 +4473,7 @@ app.get("/admin", async (req,res)=>{
   .move-style-toggle .seg{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#181433;}
   .move-style-toggle button{padding:6px 10px;border:0;background:transparent;color:var(--muted);box-shadow:none;border-radius:0;}
   .move-style-toggle button.active{background:var(--accent2);color:#fff;}
+  .move-controls-dock{display:flex;justify-content:flex-start;margin:10px 0 8px;}
   .create-panel{
     display:none;
     margin-top:12px;
@@ -4786,8 +4787,10 @@ app.get("/admin", async (req,res)=>{
     outline:2px dashed rgba(139,124,247,.95);
     outline-offset:-2px;
   }
-  .mode-toggle{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-  .mode-btn{padding:6px 12px;font-size:12px;}
+  .customize-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+  .customize-header > div{min-width:260px;flex:1;}
+  .mode-toggle{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap;min-width:220px;}
+  .mode-btn{padding:9px 16px;font-size:14px;font-weight:700;}
   .mode-btn.active{background:var(--accent);box-shadow:0 8px 20px rgba(108,92,231,.45);}
   .mode-btn.hidden{display:none;}
   .row-menu{position:relative;}
@@ -5299,46 +5302,48 @@ app.get("/admin", async (req,res)=>{
 
   <section id="section-customize" class="section">
     <div class="card center-card">
-      <h3>Customize Layout</h3>
-      <p class="muted" id="customizeLeadText">Simple mode is the default for a clean compact layout. Switch to Normal mode for full controls and list item tools.</p>
-      <div class="mode-toggle" id="layoutModeToggle">
-        <button id="simpleModeBtn" class="mode-btn" type="button">Simple mode</button>
-        <button id="normalModeBtn" class="mode-btn btn2" type="button">Normal mode</button>
-        <span class="mini muted">Simple mode hides item drawers and advanced controls.</span>
+      <div class="customize-header">
+        <div>
+          <h3>Customize Layout</h3>
+          <p class="muted" id="customizeLeadText">Simple mode is the default for a clean compact layout. Switch to Normal mode for full controls and list item tools.</p>
+        </div>
+        <div class="mode-toggle" id="layoutModeToggle">
+          <button id="simpleModeBtn" class="mode-btn" type="button">Simple mode</button>
+          <button id="normalModeBtn" class="mode-btn btn2" type="button">Normal mode</button>
+          <span class="mini muted" style="width:100%;text-align:right;">Simple mode hides item drawers and advanced controls.</span>
+        </div>
       </div>
       <div class="rowtools">
         <label class="pill normal-only"><input type="checkbox" id="advancedToggle" /> <span>Advanced</span></label>
         <button id="showHiddenBtn" type="button" class="btn2" style="display:none;">Show hidden lists</button>
         <span class="mini muted normal-only">Advanced mode expands list cards inline for rename, freeze, duplicate, and merge tools.</span>
         <span class="rowtools-spacer"></span>
-        <div id="moveStyleToggle" class="move-style-toggle normal-only" aria-label="Normal mode move controls">
-          <span class="mini muted">Move controls</span>
-          <div class="seg" role="group" aria-label="Move control style">
-            <button type="button" id="moveStyleHandleBtn">☰</button>
-            <button type="button" id="moveStyleArrowsBtn">↑↓</button>
-          </div>
-        </div>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
       </div>
       <details id="coolTitleCardsPanel" class="manager-group normal-only" style="display:none;">
-        <summary><span>Cool title cards</span><span class="mini">website only</span></summary>
+        <summary><span>Custom Title Cards</span><span class="mini">website only</span></summary>
         <div class="group-body">
-          <div class="mini muted" style="margin-bottom:8px;">Change how item cards look in Customize Layout only.</div>
-          <div class="move-style-toggle" aria-label="Cool title card shape">
-            <span class="mini muted">Card image shape</span>
-            <div class="seg" role="group" aria-label="Card image shape">
-              <button type="button" id="coolCardsPortraitBtn">Portrait</button>
-              <button type="button" id="coolCardsLandscapeBtn">Landscape</button>
+          <details class="merge-dropdown" open>
+            <summary>Custom title card options</summary>
+            <div class="merge-dropdown-body">
+              <div class="mini muted" style="margin-bottom:8px;">Change how item cards look in Customize Layout only.</div>
+              <div class="move-style-toggle" aria-label="Custom title card shape">
+                <span class="mini muted">Card image shape</span>
+                <div class="seg" role="group" aria-label="Card image shape">
+                  <button type="button" id="coolCardsPortraitBtn">Portrait</button>
+                  <button type="button" id="coolCardsLandscapeBtn">Landscape</button>
+                </div>
+              </div>
+              <div class="move-style-toggle" aria-label="Custom title card background mode" style="margin-top:8px;">
+                <span class="mini muted">Background mode</span>
+                <div class="seg" role="group" aria-label="Background mode">
+                  <button type="button" id="coolCardsBgOffBtn">Off</button>
+                  <button type="button" id="coolCardsBgOnBtn">On</button>
+                </div>
+              </div>
+              <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
             </div>
-          </div>
-          <div class="move-style-toggle" aria-label="Cool title card background mode" style="margin-top:8px;">
-            <span class="mini muted">Background mode</span>
-            <div class="seg" role="group" aria-label="Background mode">
-              <button type="button" id="coolCardsBgOffBtn">Off</button>
-              <button type="button" id="coolCardsBgOnBtn">On</button>
-            </div>
-          </div>
-          <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
+          </details>
         </div>
       </details>
       <div id="createOfflinePanel" class="create-panel">
@@ -5387,6 +5392,15 @@ app.get("/admin", async (req,res)=>{
         </div>
       </div>
       <div id="mergeBuilder" class="merge-box" style="display:none;"></div>
+      <div class="move-controls-dock">
+        <div id="moveStyleToggle" class="move-style-toggle normal-only" aria-label="Normal mode move controls">
+          <span class="mini muted">Move controls</span>
+          <div class="seg" role="group" aria-label="Move control style">
+            <button type="button" id="moveStyleHandleBtn">☰</button>
+            <button type="button" id="moveStyleArrowsBtn">↑↓</button>
+          </div>
+        </div>
+      </div>
       <div id="prefs"></div>
     </div>
   </section>
@@ -6512,11 +6526,11 @@ async function render() {
     try {
       const raw = JSON.parse(localStorage.getItem('coolTitleCards') || '{}');
       return {
-        shape: raw.shape === 'portrait' ? 'portrait' : 'landscape',
+        shape: raw.shape === 'landscape' ? 'landscape' : 'portrait',
         bg: raw.bg !== false
       };
     } catch {
-      return { shape: 'landscape', bg: true };
+      return { shape: 'portrait', bg: true };
     }
   };
   let coolCards = parseCoolCards();
