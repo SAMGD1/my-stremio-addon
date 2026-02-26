@@ -4724,16 +4724,16 @@ app.get("/admin", async (req,res)=>{
   }
   .title-search-item{
     display:flex;
-    align-items:center;
-    gap:8px;
+    align-items:flex-start;
+    gap:10px;
     border:1px solid var(--border);
     border-radius:10px;
-    padding:6px 8px;
+    padding:8px 10px;
     background:rgba(16,13,36,.6);
   }
   .title-search-item img{
-    width:36px;
-    height:54px;
+    width:44px;
+    height:66px;
     object-fit:cover;
     border-radius:6px;
     border:1px solid var(--border);
@@ -4742,14 +4742,18 @@ app.get("/admin", async (req,res)=>{
   .title-search-item .meta{
     flex:1;
     min-width:0;
-    line-height:1.2;
+    line-height:1.25;
   }
   .title-search-item .meta .name{
     font-size:13px;
     font-weight:600;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis;
+    white-space:normal;
+    overflow-wrap:anywhere;
+    word-break:break-word;
+  }
+  .title-search-item .btn2{
+    flex-shrink:0;
+    align-self:center;
   }
   .title-search-item .meta .sub{
     font-size:11px;
