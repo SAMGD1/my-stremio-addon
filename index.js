@@ -3402,8 +3402,9 @@ app.post("/api/tmdb-save", async (req, res) => {
     PREFS.tmdbKeyValid = key ? PREFS.tmdbKeyValid : null;
     TMDB_CACHE.clear();
     if (!key) {
-      BEST.clear();
-      CARD.clear();
+      // Rebuild cards immediately from CineMeta/IMDb fallbacks so removing TMDB key
+      // does not leave list items as raw tt ids with missing images.
+      await rebuildAllCards();
       LAST_MANIFEST_KEY = "";
       MANIFEST_REV++;
     }
