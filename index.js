@@ -4325,6 +4325,8 @@ app.get("/admin", async (req,res)=>{
     width:52px;
     height:78px;
   }
+  .thumbs.cool-portrait .thumb{min-height:98px;padding:7px 9px;}
+  .thumbs.cool-portrait .thumb-img{width:56px;height:84px;}
   .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));}
   .thumbs.cool-landscape .thumb{min-height:110px;padding:8px 10px;}
   .thumbs.cool-landscape .thumb-img{width:130px;height:74px;border-radius:8px;}
@@ -4340,10 +4342,12 @@ app.get("/admin", async (req,res)=>{
     pointer-events:none;
   }
   .thumbs.cool-bg-enabled .thumb > *{position:relative;z-index:1;}
+  .thumbs.cool-portrait .thumb .del,
+  .thumbs.cool-landscape .thumb .del,
   .thumbs.cool-bg-enabled .thumb .del{
     display:block;
-    top:10px;
-    right:10px;
+    top:8px;
+    right:8px;
     width:26px;
     height:26px;
     line-height:26px;
@@ -4351,6 +4355,7 @@ app.get("/admin", async (req,res)=>{
     background:rgba(22,18,48,.9);
     border:1px solid rgba(155,140,255,.45);
     color:#ffb4b4;
+    z-index:4;
   }
   .thumb .title{font-size:14px}
   .thumb .id{font-size:11px;color:var(--muted)}
@@ -6790,6 +6795,7 @@ async function render() {
 
       const ul = el('ul',{class:'thumbs'});
       if (coolCards.shape === 'landscape') ul.classList.add('cool-landscape');
+      else ul.classList.add('cool-portrait');
       if (coolCards.bg) ul.classList.add('cool-bg-enabled');
       td.appendChild(ul);
       let tvMoveTile = null;
