@@ -132,7 +132,8 @@ let PREFS = {
     lists: [],            // array of list URLs (IMDb or Trakt) or lsids
     traktUsers: []        // array of Trakt user URLs or usernames
   },
-  blocked: []             // listIds you removed/blocked (IMDb or Trakt)
+  blocked: [],            // listIds you removed/blocked (IMDb or Trakt)
+  posterMode: "landscape" // landscape | portrait (Stremio poster container + image source)
 };
 
 const BEST   = new Map(); // Map<tt, { kind, meta }>
@@ -228,6 +229,76 @@ function resolveStreamImdbId(rawId) {
   return base;
 }
 
+function effectiveSortForList(lsid) {
+  const explicit = String((PREFS.perListSort && PREFS.perListSort[lsid]) || "").toLowerCase();
+  if (VALID_SORT.has(explicit)) return explicit;
+  if (isImdbListId(lsid) || isImdbCustomId(lsid)) return "imdb";
+  if (isTraktListId(lsid)) return "trakt";
+  return "name_asc";
+}
+
+function currentSortedIdsForList(lsid) {
+  if (!isListId(lsid)) return [];
+  const ids = listIdsWithEdits(lsid);
+  let metas = ids.map(tt => CARD.get(tt) || cardFor(tt));
+
+  const sortKey = effectiveSortForList(lsid);
+  if (sortKey === "custom") metas = applyCustomOrder(metas, lsid);
+  else if (sortKey === "imdb" || sortKey === "trakt") metas = sortByOrderKey(metas, lsid, sortKey);
+  else if (sortKey === "date_asc" || sortKey === "date_desc") {
+    const haveSourceOrder = LISTS[lsid]?.orders && Array.isArray(LISTS[lsid].orders[sortKey]) && LISTS[lsid].orders[sortKey].length;
+    metas = haveSourceOrder ? sortByOrderKey(metas, lsid, sortKey) : stableSort(metas, sortKey);
+  } else metas = stableSort(metas, sortKey);
+
+  if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
+  return metas.map(m => m.id).filter(isImdb);
+}
+
+function normalizeBaselineOrder(lsid, baselineOrder) {
+  const current = listIdsWithEdits(lsid);
+  const currentSet = new Set(current);
+  const out = [];
+  const seen = new Set();
+
+  for (const raw of baselineOrder || []) {
+    const tt = extractImdbId(raw);
+    if (!tt || !currentSet.has(tt) || seen.has(tt)) continue;
+    seen.add(tt);
+    out.push(tt);
+  }
+
+  for (const tt of current) {
+    if (seen.has(tt)) continue;
+    seen.add(tt);
+    out.push(tt);
+  }
+  return out;
+}
+
+function pinAddedIdsToFront(lsid, incomingIds, baselineOrder = null) {
+  if (!isListId(lsid)) return;
+  const added = [];
+  const seen = new Set();
+  for (const raw of incomingIds || []) {
+    const tt = extractImdbId(raw);
+    if (!tt || !isImdb(tt) || seen.has(tt)) continue;
+    seen.add(tt);
+    added.push(tt);
+  }
+  if (!added.length) return;
+
+  const addedSet = new Set(added);
+  const current = Array.isArray(baselineOrder) && baselineOrder.length
+    ? normalizeBaselineOrder(lsid, baselineOrder)
+    : currentSortedIdsForList(lsid);
+  const rest = current.filter(id => !addedSet.has(id));
+
+  PREFS.customOrder = PREFS.customOrder || {};
+  PREFS.customOrder[lsid] = rest.concat(added);
+  PREFS.perListSort = PREFS.perListSort || {};
+  PREFS.perListSort[lsid] = "custom";
+}
+
 async function addImdbToList(lsid, imdbId) {
   if (!isListId(lsid)) return { ok: false, reason: "no_list" };
   const list = LISTS[lsid];
@@ -258,6 +329,8 @@ async function addImdbToList(lsid, imdbId) {
 
   await getBestMeta(imdbId).catch(() => null);
   CARD.set(imdbId, cardFor(imdbId));
+
+  pinAddedIdsToFront(lsid, [imdbId]);
   await persistSnapshot();
   return { ok: true, lsid };
 }
@@ -2343,6 +2416,10 @@ async function fetchLiveListIds(lsid, sourceMap = LISTS, seen = new Set()) {
 }
 
 // ----------------- SYNC -----------------
+function posterMode() {
+  return PREFS.posterMode === "portrait" ? "portrait" : "landscape";
+}
+
 function manifestKey() {
   const enabled = (PREFS.enabled && PREFS.enabled.length) ? PREFS.enabled : Object.keys(LISTS);
   const names   = enabled.map(id => listDisplayName(id)).sort().join("|");
@@ -2354,9 +2431,10 @@ function manifestKey() {
   const frozen  = Object.keys(PREFS.frozenLists || {}).join(",");
   const customLists = Object.keys(PREFS.customLists || {}).join(",");
   const hidden = (PREFS.hiddenLists || []).join(",");
+  const pMode = posterMode();
 
   const mainLists = JSON.stringify(PREFS.mainLists || []);
-  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}#h${hidden}`;
+  return `${enabled.join(",")}#${order}#${PREFS.defaultList}#${mainLists}#${names}#${perSort}#${perOpts}#r${perReverse}#c${custom}#f${frozen}#u${customLists}#h${hidden}#p${pMode}`;
 }
 
 async function harvestSources() {
@@ -2885,8 +2963,8 @@ function catalogs(){
         name:"genre",
         options: (PREFS.sortOptions && PREFS.sortOptions[lsid] && PREFS.sortOptions[lsid].length) ? PREFS.sortOptions[lsid] : SORT_OPTIONS
       }
-    ]
-    // no posterShape – Stremio uses default poster style
+    ],
+    posterShape: posterMode() === "landscape" ? "landscape" : "poster"
   }));
 }
 app.get("/manifest.json", (req,res)=>{
@@ -3068,8 +3146,15 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
 
     if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
 
-    // No poster-shape swap; meta already has a single poster field
-    res.json({ metas: metas.slice(skip, skip+limit) });
+    const isLandscapeMode = posterMode() === "landscape";
+    const visibleMetas = metas.slice(skip, skip+limit).map(m => ({
+      ...m,
+      poster: isLandscapeMode
+        ? (m.background || m.backdrop || m.poster || undefined)
+        : (m.poster || m.background || m.backdrop || undefined),
+      posterShape: isLandscapeMode ? "landscape" : "poster"
+    }));
+    res.json({ metas: visibleMetas });
   }catch(e){ console.error("catalog:", e); res.status(500).send("Internal Server Error"); }
 });
 
@@ -3209,6 +3294,10 @@ app.post("/api/prefs", async (req,res) => {
       : (PREFS.sortOptions || {});
 
     PREFS.upgradeEpisodes = !!body.upgradeEpisodes;
+    if (typeof body.posterMode === "string") {
+      const pm = body.posterMode.toLowerCase();
+      PREFS.posterMode = (pm === "portrait") ? "portrait" : "landscape";
+    }
     if (typeof body.tmdbKey === "string") {
       PREFS.tmdbKey = body.tmdbKey.trim();
       if (!PREFS.tmdbKey) PREFS.tmdbKeyValid = null;
@@ -3654,6 +3743,7 @@ app.post("/api/list-add", async (req, res) => {
 
     await getBestMeta(tt);
     CARD.set(tt, cardFor(tt));
+    pinAddedIdsToFront(lsid, [tt], Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     await persistSnapshot();
@@ -3702,6 +3792,7 @@ app.post("/api/list-add-bulk", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    pinAddedIdsToFront(lsid, toAdd, Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -3811,6 +3902,7 @@ app.post("/api/list-add-collection", async (req, res) => {
     }
 
     if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
+    pinAddedIdsToFront(lsid, toAdd, Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
     await persistSnapshot();
 
     res.json({ ok: true, added: toAdd.length, requested: ids.length });
@@ -4206,6 +4298,54 @@ app.get("/admin", async (req,res)=>{
     flex-shrink:0;
     width:52px;
     height:78px;
+  }
+  .thumbs.cool-portrait .thumb{min-height:94px;padding:6px 8px;}
+  .thumbs.cool-portrait .thumb-img{width:56px;height:84px;}
+  .thumbs.cool-landscape{grid-template-columns:repeat(auto-fill,minmax(280px,1fr));}
+  .thumbs.cool-landscape .thumb{min-height:100px;padding:6px 8px;}
+  .thumbs.cool-landscape .thumb-img{width:140px;height:80px;border-radius:8px;}
+  .thumbs.cool-bg-enabled .thumb::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    border-radius:12px;
+    background-image:var(--cool-bg);
+    background-size:cover;
+    background-position:center;
+    opacity:.38;
+    pointer-events:none;
+  }
+  .thumbs.cool-bg-enabled .thumb > *{position:relative;z-index:1;}
+  .thumbs.cool-bg-enabled .thumb-img{
+    border:1px solid rgba(0,0,0,.72);
+    box-shadow:0 0 0 1px rgba(255,255,255,.04);
+  }
+  .thumbs.cool-bg-enabled .thumb .title,
+  .thumbs.cool-bg-enabled .thumb .id{
+    text-shadow:
+      -1px 0 0 rgba(0,0,0,.88),
+      1px 0 0 rgba(0,0,0,.88),
+      0 -1px 0 rgba(0,0,0,.88),
+      0 1px 0 rgba(0,0,0,.88),
+      0 2px 6px rgba(0,0,0,.75);
+  }
+
+  .thumbs.cool-portrait .thumb .del,
+  .thumbs.cool-landscape .thumb .del,
+  .thumbs.cool-bg-enabled .thumb .del{
+    position:absolute;
+    top:8px;
+    right:8px;
+    left:auto;
+    bottom:auto;
+    width:26px;
+    height:26px;
+    line-height:26px;
+    border-radius:999px;
+    background:rgba(22,18,48,.9);
+    border:1px solid rgba(155,140,255,.45);
+    color:#ffb4b4;
+    z-index:4;
   }
   .thumb .title{font-size:14px}
   .thumb .id{font-size:11px;color:var(--muted)}
@@ -4952,6 +5092,16 @@ app.get("/admin", async (req,res)=>{
           </div>
           <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
           <div class="api-key-box">
+            <label class="mini">Poster layout in Stremio</label>
+            <div class="move-style-toggle" aria-label="Poster layout mode">
+              <div class="seg" role="group" aria-label="Poster layout">
+                <button id="posterPortraitBtn" type="button" class="btn2">Portrait</button>
+                <button id="posterLandscapeBtn" type="button" class="btn2">Landscape</button>
+              </div>
+            </div>
+            <div class="mini muted">When changing this, reinstall or update the addon in Stremio so the new poster container shape is applied.</div>
+          </div>
+          <div class="api-key-box">
             <label class="mini">TMDB API Key (optional)</label>
             <div class="api-key-row">
               <div class="api-key-input-wrap">
@@ -5125,6 +5275,27 @@ app.get("/admin", async (req,res)=>{
         </div>
         <button id="createOfflineBtn" type="button">＋ Create list</button>
       </div>
+      <details id="coolTitleCardsPanel" class="manager-group normal-only" style="display:none;">
+        <summary><span>Cool title cards</span><span class="mini">website only</span></summary>
+        <div class="group-body">
+          <div class="mini muted" style="margin-bottom:8px;">Change how item cards look in Customize Layout only.</div>
+          <div class="move-style-toggle" aria-label="Cool title card shape">
+            <span class="mini muted">Card image shape</span>
+            <div class="seg" role="group" aria-label="Card image shape">
+              <button type="button" id="coolCardsPortraitBtn">Portrait</button>
+              <button type="button" id="coolCardsLandscapeBtn">Landscape</button>
+            </div>
+          </div>
+          <div class="move-style-toggle" aria-label="Cool title card background mode" style="margin-top:8px;">
+            <span class="mini muted">Background mode</span>
+            <div class="seg" role="group" aria-label="Background mode">
+              <button type="button" id="coolCardsBgOffBtn">Off</button>
+              <button type="button" id="coolCardsBgOnBtn">On</button>
+            </div>
+          </div>
+          <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
+        </div>
+      </details>
       <div id="createOfflinePanel" class="create-panel">
         <div class="create-layout">
           <div class="create-name">
@@ -5197,6 +5368,14 @@ async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); ret
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
 async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
 async function getDiscovered(){ const r = await fetch('/api/discovered?admin='+ADMIN); return r.json(); }
+function upscaleTmdbImage(url, kind){
+  const raw = String(url || '');
+  if (!raw) return raw;
+  if (!raw.includes('image.tmdb.org/t/p/')) return raw;
+  const target = kind === 'bg' ? 'w1280' : 'w780';
+  const re = new RegExp('/t/p/(original|w[0-9]+)', 'i');
+  return raw.replace(re, '/t/p/' + target);
+}
 async function saveCustomOrder(lsid, order){
   const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
   if (!r.ok) throw new Error('save failed');
@@ -5549,7 +5728,7 @@ function parseCsvImdbIds(text){
   return ids;
 }
 
-function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
+function createTitleSearchWidget({ lsid = '', onAdd = null, onAddCollection = null } = {}) {
   const root = el('div', { class: 'title-search-box' });
   const label = el('label', { class: 'mini', text: 'Search TMDB by title and add item' });
   const row = el('div', { class: 'title-search-row' });
@@ -5636,14 +5815,19 @@ function createTitleSearchWidget({ lsid = '', onAdd = null } = {}) {
           if (item.mediaType === 'collection') {
             let addedCount = 0;
             if (lsid) {
-              const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lsid, collectionId: item.tmdbId })
-              });
-              const data = await r.json().catch(() => ({}));
-              if (!r.ok) throw new Error(data.message || 'Failed to add collection');
-              addedCount = Number(data.added) || 0;
+              if (typeof onAddCollection === 'function') {
+                const data = await onAddCollection(item);
+                addedCount = Number(data?.added) || 0;
+              } else {
+                const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ lsid, collectionId: item.tmdbId })
+                });
+                const data = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+                addedCount = Number(data.added) || 0;
+              }
             } else {
               const draftResult = await addCollectionToDraft(item);
               addedCount = draftResult.added;
@@ -5850,8 +6034,27 @@ async function render() {
   }
 
   prefs.sources = prefs.sources || { users: [], lists: [], traktUsers: [] };
+  if (prefs.posterMode !== 'portrait' && prefs.posterMode !== 'landscape') prefs.posterMode = 'landscape';
   const refresh = async () => { await render(); };
   const listCount = (lsid) => (lists[lsid]?.ids || []).length;
+
+  const posterPortraitBtn = document.getElementById('posterPortraitBtn');
+  const posterLandscapeBtn = document.getElementById('posterLandscapeBtn');
+  const applyPosterModeUi = () => {
+    if (posterPortraitBtn) posterPortraitBtn.classList.toggle('active', prefs.posterMode === 'portrait');
+    if (posterLandscapeBtn) posterLandscapeBtn.classList.toggle('active', prefs.posterMode === 'landscape');
+  };
+  applyPosterModeUi();
+  if (posterPortraitBtn) posterPortraitBtn.onclick = async () => {
+    prefs.posterMode = 'portrait';
+    applyPosterModeUi();
+    await saveAll('Saved. Reinstall/update addon in Stremio to apply poster container changes.');
+  };
+  if (posterLandscapeBtn) posterLandscapeBtn.onclick = async () => {
+    prefs.posterMode = 'landscape';
+    applyPosterModeUi();
+    await saveAll('Saved. Reinstall/update addon in Stremio to apply poster container changes.');
+  };
 
   prefs.userBackups = prefs.userBackups || { users: [], traktUsers: [] };
   function renderPills(id, arr, onRemove, opts = {}){
@@ -6253,12 +6456,26 @@ async function render() {
   const moveStyleArrowsBtn = document.getElementById('moveStyleArrowsBtn');
 
   const advancedToggle = document.getElementById('advancedToggle');
+  const coolTitleCardsPanel = document.getElementById('coolTitleCardsPanel');
   const mergeBuilder = document.getElementById('mergeBuilder');
   const mergeSelection = new Set();
   const layoutMode = localStorage.getItem('customizeMode') === 'normal' ? 'normal' : 'simple';
   const isSimpleMode = layoutMode === 'simple';
   const normalMoveStyle = localStorage.getItem('normalMoveStyle') === 'arrows' ? 'arrows' : 'handle';
   const useArrowMove = !isSimpleMode && normalMoveStyle === 'arrows';
+  const parseCoolCards = () => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('coolTitleCards') || '{}');
+      return {
+        shape: raw.shape === 'portrait' ? 'portrait' : 'landscape',
+        bg: raw.bg !== false
+      };
+    } catch {
+      return { shape: 'landscape', bg: true };
+    }
+  };
+  let coolCards = parseCoolCards();
+  const saveCoolCards = () => localStorage.setItem('coolTitleCards', JSON.stringify(coolCards));
   document.body.classList.toggle('mode-simple', isSimpleMode);
 
   if (customizeLeadText) {
@@ -6335,6 +6552,22 @@ async function render() {
     };
   }
 
+  const coolCardsPortraitBtn = document.getElementById('coolCardsPortraitBtn');
+  const coolCardsLandscapeBtn = document.getElementById('coolCardsLandscapeBtn');
+  const coolCardsBgOffBtn = document.getElementById('coolCardsBgOffBtn');
+  const coolCardsBgOnBtn = document.getElementById('coolCardsBgOnBtn');
+  const applyCoolCardsControls = () => {
+    if (coolCardsPortraitBtn) coolCardsPortraitBtn.classList.toggle('active', coolCards.shape === 'portrait');
+    if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.classList.toggle('active', coolCards.shape === 'landscape');
+    if (coolCardsBgOffBtn) coolCardsBgOffBtn.classList.toggle('active', !coolCards.bg);
+    if (coolCardsBgOnBtn) coolCardsBgOnBtn.classList.toggle('active', !!coolCards.bg);
+  };
+  applyCoolCardsControls();
+  if (coolCardsPortraitBtn) coolCardsPortraitBtn.onclick = () => { coolCards.shape = 'portrait'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.onclick = () => { coolCards.shape = 'landscape'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsBgOffBtn) coolCardsBgOffBtn.onclick = () => { coolCards.bg = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsBgOnBtn) coolCardsBgOnBtn.onclick = () => { coolCards.bg = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+
   if (advancedToggle) {
     const saved = !isSimpleMode && localStorage.getItem('advancedMode') === 'true';
     advancedToggle.checked = saved;
@@ -6370,6 +6603,7 @@ async function render() {
       showHiddenBtn.textContent = showHiddenOnly ? 'Show normal lists' : 'Show hidden lists';
     }
     document.querySelectorAll('.hide-list-btn').forEach(btn => { btn.style.display = on ? '' : 'none'; });
+    if (coolTitleCardsPanel) coolTitleCardsPanel.style.display = on ? '' : 'none';
     document.querySelectorAll('.adv-inline-btn').forEach(btn => {
       btn.style.display = on ? '' : 'none';
       if (!on) btn.setAttribute('aria-expanded', 'false');
@@ -6482,6 +6716,19 @@ async function render() {
       const imdbDateAsc  = (lists[lsid]?.orders?.date_asc  || []);
       const imdbDateDesc = (lists[lsid]?.orders?.date_desc || []);
 
+      function forceCustomSortSelection(){
+        prefs.perListSort = prefs.perListSort || {};
+        prefs.perListSort[lsid] = 'custom';
+        const rowSel = document.querySelector('tr[data-lsid="'+lsid+'"] select');
+        if (rowSel) rowSel.value = 'custom';
+      }
+
+      function currentVisibleOrder(){
+        const ids = Array.from(td.querySelectorAll('ul.thumbs li.thumb[data-id]')).map(li => li.getAttribute('data-id')).filter(Boolean);
+        if (prefs.sortReverse && prefs.sortReverse[lsid]) return ids.slice().reverse();
+        return ids;
+      }
+
       const tools = el('div', {class:'rowtools'});
       const saveBtn = el('button',{text:'Save order'});
       const resetBtn = el('button',{text:'Reset order', class:'order-reset-btn'});
@@ -6514,16 +6761,32 @@ async function render() {
           const r = await fetch('/api/list-add?admin=' + ADMIN, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lsid, id: imdbId })
+            body: JSON.stringify({ lsid, id: imdbId, visibleOrder: currentVisibleOrder() })
           });
           if (!r.ok) throw new Error(await r.text());
+          forceCustomSortSelection();
           await refresh();
+        },
+        onAddCollection: async (item) => {
+          const r = await fetch('/api/list-add-collection?admin=' + ADMIN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lsid, collectionId: item.tmdbId, visibleOrder: currentVisibleOrder() })
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(data.message || 'Failed to add collection');
+          forceCustomSortSelection();
+          await refresh();
+          return data;
         }
       });
       searchWrap.appendChild(drawerSearch.el);
       td.appendChild(searchWrap);
 
       const ul = el('ul',{class:'thumbs'});
+      if (coolCards.shape === 'landscape') ul.classList.add('cool-landscape');
+      else ul.classList.add('cool-portrait');
+      if (coolCards.bg) ul.classList.add('cool-bg-enabled');
       td.appendChild(ul);
       let tvMoveTile = null;
       function setTvMoveTile(nextLi) {
@@ -6552,12 +6815,25 @@ async function render() {
           await refresh();
         };
 
-        const url = it.poster || it.background || '';
-        const img = el('img',{src: url, alt:'', class:'thumb-img'});
+        const posterUrl = (coolCards.shape === 'landscape')
+          ? (it.background || it.backdrop || it.poster || '')
+          : (it.poster || it.background || it.backdrop || '');
+        const bgUrl = it.background || it.backdrop || posterUrl || '';
+        if (bgUrl) { const safeBg = encodeURI(String(upscaleTmdbImage(bgUrl, 'bg'))); li.style.setProperty('--cool-bg', 'url("' + safeBg + '")'); }
+        const img = el('img',{src: upscaleTmdbImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
         const wrap = el('div',{},[
           el('div',{class:'title',text: it.name || it.id}),
           el('div',{class:'id',text: it.id})
         ]);
+
+        li.addEventListener('click', (e) => {
+          const t = e.target;
+          if (!t) return;
+          if (t.closest('button, .del, .tile-move, .move-handle-btn, input, textarea, select, a')) return;
+          const stType = (it.type === 'series' || it.type === 'show' || it.type === 'tv') ? 'series' : 'movie';
+          if (!confirm('Open this item in Stremio?')) return;
+          window.location.href = 'stremio://detail/' + encodeURIComponent(stType) + '/' + encodeURIComponent(it.id || '');
+        });
         const moveBox = el('div',{class:'tile-move'});
         if (useArrowMove) {
           const upBtn = el('button',{type:'button',text:'↑'});
@@ -6625,11 +6901,13 @@ async function render() {
           if (!m) { alert('Enter a valid IMDb id'); return; }
           input.disabled = true;
           try {
-            await fetch('/api/list-add?admin='+ADMIN, {
+            const r = await fetch('/api/list-add?admin='+ADMIN, {
               method: 'POST',
               headers: { 'Content-Type':'application/json' },
-              body: JSON.stringify({ lsid, id: m[1] })
+              body: JSON.stringify({ lsid, id: m[1], visibleOrder: currentVisibleOrder() })
             });
+            if (!r.ok) throw new Error(await r.text());
+            forceCustomSortSelection();
             input.value = '';
             await refresh();
           } finally {
@@ -7494,6 +7772,7 @@ async function render() {
       sources: prefs.sources || {},
       userBackups: prefs.userBackups || {},
       blocked: prefs.blocked || [],
+      posterMode: prefs.posterMode || "landscape",
       reconcileFrozenState: true
     };
     msg.textContent = "Saving…";
