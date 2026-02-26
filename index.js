@@ -7376,8 +7376,8 @@ async function render() {
     const status = el('span', { class: 'mini muted' });
     let freezeBtn = null;
     if (!isOfflineList) {
-      freezeBtn = el('button', { type: 'button', text: isFrozen ? 'Unfreeze' : 'Star / Freeze' });
-      const syncBtn = el('button', { type: 'button', text: 'Sync/Update now' });
+      freezeBtn = el('button', { type: 'button', text: isFrozen ? '💧 Unfreeze' : '❄️ Freeze' });
+      const syncBtn = el('button', { type: 'button', text: 'Sync/Update now 🔁' });
       freezeBtn.onclick = async () => {
         freezeBtn.disabled = true;
         status.textContent = isFrozen ? 'Unfreezing…' : 'Freezing…';
