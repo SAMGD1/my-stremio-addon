@@ -5376,9 +5376,10 @@ async function getDiscovered(){ const r = await fetch('/api/discovered?admin='+A
 function upscaleTmdbImage(url, kind){
   const raw = String(url || '');
   if (!raw) return raw;
-  if (!/image\.tmdb\.org\/t\/p\//i.test(raw)) return raw;
+  if (!raw.includes('image.tmdb.org/t/p/')) return raw;
   const target = kind === 'bg' ? 'w1280' : 'w780';
-  return raw.replace(/\/t\/p\/(original|w\d+)/i, '/t/p/' + target);
+  const re = new RegExp('/t/p/(original|w[0-9]+)', 'i');
+  return raw.replace(re, '/t/p/' + target);
 }
 async function saveCustomOrder(lsid, order){
   const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
@@ -6822,7 +6823,7 @@ async function render() {
           ? (it.background || it.backdrop || it.poster || '')
           : (it.poster || it.background || it.backdrop || '');
         const bgUrl = it.background || it.backdrop || posterUrl || '';
-        if (bgUrl) li.style.setProperty('--cool-bg', 'url("' + String(upscaleTmdbImage(bgUrl, 'bg')).replace(/"/g, '\"') + '")');
+        if (bgUrl) { const safeBg = encodeURI(String(upscaleTmdbImage(bgUrl, 'bg'))); li.style.setProperty('--cool-bg', 'url("' + safeBg + '")'); }
         const img = el('img',{src: upscaleTmdbImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
         const wrap = el('div',{},[
           el('div',{class:'title',text: it.name || it.id}),
