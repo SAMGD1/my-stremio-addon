@@ -2474,6 +2474,8 @@ function cardFor(imdbId) {
   const poster = m.poster || fb.poster || m.background || m.backdrop;
   const background = m.background || m.backdrop || poster || fb.poster;
 
+  const genres = normalizeGenres(m.genres || m.genre, 3);
+  const releaseInfo = deriveReleaseInfo(rec.kind || fb.type || "movie", m) || (m.releaseInfo || undefined);
   return {
     id: imdbId,
     type: rec.kind || fb.type || "movie",
@@ -2483,8 +2485,11 @@ function cardFor(imdbId) {
     logo: m.logo || undefined,
     imdbRating: m.imdbRating ?? undefined,
     runtime: m.runtime ?? undefined,
-    year: m.year ?? fb.year ?? undefined,
+    year: m.year ?? fb.year ?? parseYearValue(m.released || releaseInfo) ?? undefined,
     releaseDate: m.released || m.releaseInfo || fb.releaseDate || undefined,
+    releaseInfo: releaseInfo,
+    genres: genres.length ? genres : undefined,
+    genre: genres.length ? genres.join(', ') : undefined,
     description: m.description || undefined
   };
 }
@@ -3469,7 +3474,8 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
         type: rec.kind,
         year: Number.isFinite(year) ? year : undefined,
         releaseInfo: releaseInfo || undefined,
-        genres: genres.length ? genres : undefined
+        genres: genres.length ? genres : undefined,
+        genre: genres.length ? genres.join(', ') : undefined
       }
     });
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
