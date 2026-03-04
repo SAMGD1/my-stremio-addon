@@ -1894,6 +1894,63 @@ function tmdbImage(path, size = "w500") {
   if (!path) return null;
   return `${TMDB_IMG_BASE}/${size}${path}`;
 }
+function swapTmdbImageSize(url, size) {
+  const raw = String(url || "");
+  if (!raw.includes("image.tmdb.org/t/p/")) return raw;
+  return raw.replace(/\/t\/p\/(original|w\d+)/i, `/t/p/${size}`);
+}
+function upscaleMetahub(url, size = "large") {
+  const raw = String(url || "");
+  if (!raw.includes("images.metahub.space/")) return raw;
+  return raw.replace(/\/(small|medium|large|original)\//i, `/${size}/`);
+}
+function stremioImage(url, kind = "poster") {
+  const raw = String(url || "");
+  if (!raw) return raw;
+  if (raw.includes("image.tmdb.org/t/p/")) {
+    if (kind === "bg") return swapTmdbImageSize(raw, "w1280");
+    if (kind === "logo") return swapTmdbImageSize(raw, "w500");
+    return swapTmdbImageSize(raw, "w780");
+  }
+  if (raw.includes("images.metahub.space/")) {
+    if (kind === "logo") return upscaleMetahub(raw, "medium");
+    return upscaleMetahub(raw, "large");
+  }
+  return raw;
+}
+function bestTmdbLogoPath(logos) {
+  const pool = Array.isArray(logos) ? logos : [];
+  const ranked = pool
+    .filter(img => String(img?.file_path || "").trim())
+    .sort((a, b) => {
+      const aEn = String(a?.iso_639_1 || "").toLowerCase() === "en" ? 1 : 0;
+      const bEn = String(b?.iso_639_1 || "").toLowerCase() === "en" ? 1 : 0;
+      if (aEn !== bEn) return bEn - aEn;
+      return (Number(b?.vote_average) || 0) - (Number(a?.vote_average) || 0);
+    });
+  return ranked[0]?.file_path || "";
+}
+function bestTmdbTrailer(videos) {
+  const pool = Array.isArray(videos) ? videos : [];
+  const ranked = pool
+    .filter(v => String(v?.site || "").toLowerCase() === "youtube" && String(v?.key || "").trim())
+    .sort((a, b) => {
+      const aTrailer = /trailer/i.test(String(a?.type || "")) ? 1 : 0;
+      const bTrailer = /trailer/i.test(String(b?.type || "")) ? 1 : 0;
+      if (aTrailer !== bTrailer) return bTrailer - aTrailer;
+      const aOfficial = a?.official ? 1 : 0;
+      const bOfficial = b?.official ? 1 : 0;
+      if (aOfficial !== bOfficial) return bOfficial - aOfficial;
+      return (Number(b?.size) || 0) - (Number(a?.size) || 0);
+    });
+  const hit = ranked[0];
+  if (!hit) return null;
+  return {
+    source: hit.key,
+    type: /teaser/i.test(String(hit.type || "")) ? "Teaser" : "Trailer",
+    name: hit.name || "Trailer"
+  };
+}
 function extractEpisodeInfo(ld) {
   try {
     const node = Array.isArray(ld && ld["@graph"])
@@ -1953,24 +2010,24 @@ async function fetchTmdbJson(path, apiKey) {
   if (!r.ok) throw new Error(`TMDB ${path} -> ${r.status}`);
   try { return await r.json(); } catch { return null; }
 }
-async function fetchTmdbAlternateBackdrop(itemType, tmdbId, primaryPath, apiKey) {
+async function fetchTmdbArt(itemType, tmdbId, primaryPath, apiKey) {
   try {
-    if (!tmdbId) return "";
+    if (!tmdbId) return { altBackdropPath: "", logoPath: "" };
     const data = await fetchTmdbJson(`/${itemType}/${tmdbId}/images`, apiKey);
     const backdrops = Array.isArray(data?.backdrops) ? data.backdrops : [];
-    if (!backdrops.length) return "";
+    const logos = Array.isArray(data?.logos) ? data.logos : [];
     const normalizedPrimary = String(primaryPath || "").trim();
-    const candidate = backdrops
+    const altBackdropPath = backdrops
       .slice()
       .sort((a, b) => (Number(b?.vote_average) || 0) - (Number(a?.vote_average) || 0))
       .find(img => {
         const path = String(img?.file_path || "").trim();
         if (!path) return false;
         return !normalizedPrimary || path !== normalizedPrimary;
-      });
-    return candidate?.file_path || "";
+      })?.file_path || "";
+    return { altBackdropPath, logoPath: bestTmdbLogoPath(logos) };
   } catch {
-    return "";
+    return { altBackdropPath: "", logoPath: "" };
   }
 }
 async function fetchTmdbMeta(imdbId) {
@@ -1988,14 +2045,18 @@ async function fetchTmdbMeta(imdbId) {
     const ep = data?.tv_episode_results?.[0];
     let rec = null;
     if (tv) {
-      const altBackdropPath = await fetchTmdbAlternateBackdrop("tv", tv.id, tv.backdrop_path, apiKey);
+      const art = await fetchTmdbArt("tv", tv.id, tv.backdrop_path, apiKey);
+      const videos = await fetchTmdbJson(`/tv/${tv.id}/videos`, apiKey).catch(() => null);
+      const trailer = bestTmdbTrailer(videos?.results);
       rec = {
         kind: "series",
         meta: {
           name: tv.name,
           poster: tmdbImage(tv.poster_path, "w500"),
           background: tmdbImage(tv.backdrop_path, "w780"),
-          landscapePoster: tmdbImage(altBackdropPath || tv.backdrop_path, "w780"),
+          landscapePoster: tmdbImage(art.altBackdropPath || tv.backdrop_path, "w780"),
+          logo: tmdbImage(art.logoPath, "w300"),
+          trailers: trailer ? [trailer] : undefined,
           released: tv.first_air_date || undefined,
           year: tv.first_air_date ? Number(String(tv.first_air_date).slice(0, 4)) : undefined,
           description: tv.overview || undefined,
@@ -2003,14 +2064,18 @@ async function fetchTmdbMeta(imdbId) {
         }
       };
     } else if (movie) {
-      const altBackdropPath = await fetchTmdbAlternateBackdrop("movie", movie.id, movie.backdrop_path, apiKey);
+      const art = await fetchTmdbArt("movie", movie.id, movie.backdrop_path, apiKey);
+      const videos = await fetchTmdbJson(`/movie/${movie.id}/videos`, apiKey).catch(() => null);
+      const trailer = bestTmdbTrailer(videos?.results);
       rec = {
         kind: "movie",
         meta: {
           name: movie.title,
           poster: tmdbImage(movie.poster_path, "w500"),
           background: tmdbImage(movie.backdrop_path, "w780"),
-          landscapePoster: tmdbImage(altBackdropPath || movie.backdrop_path, "w780"),
+          landscapePoster: tmdbImage(art.altBackdropPath || movie.backdrop_path, "w780"),
+          logo: tmdbImage(art.logoPath, "w300"),
+          trailers: trailer ? [trailer] : undefined,
           released: movie.release_date || undefined,
           year: movie.release_date ? Number(String(movie.release_date).slice(0, 4)) : undefined,
           description: movie.overview || undefined,
@@ -2337,12 +2402,23 @@ function cardFor(imdbId) {
     name: sanitizeName(m.name || fb.name || imdbId),
     poster: poster || undefined,
     background: background || undefined,
+    logo: m.logo || undefined,
     imdbRating: m.imdbRating ?? undefined,
     runtime: m.runtime ?? undefined,
     year: m.year ?? fb.year ?? undefined,
     releaseDate: m.released || m.releaseInfo || fb.releaseDate || undefined,
     description: m.description || undefined
   };
+}
+
+function withStremioMetaAssets(meta) {
+  const m = { ...(meta || {}) };
+  if (m.poster) m.poster = stremioImage(m.poster, "poster");
+  if (m.background) m.background = stremioImage(m.background, "bg");
+  if (m.backdrop) m.backdrop = stremioImage(m.backdrop, "bg");
+  if (m.landscapePoster) m.landscapePoster = stremioImage(m.landscapePoster, "bg");
+  if (m.logo) m.logo = stremioImage(m.logo, "logo");
+  return m;
 }
 
 function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
@@ -3177,7 +3253,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
 
     const isLandscapeMode = posterMode() === "landscape";
-    const visibleMetas = metas.slice(skip, skip+limit).map(m => ({
+    const visibleMetas = metas.slice(skip, skip+limit).map(m => withStremioMetaAssets({
       ...m,
       poster: isLandscapeMode
         ? (m.background || m.backdrop || m.poster || undefined)
@@ -3213,7 +3289,7 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
         return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
       }
 
-    const m = rec.meta;
+    const m = withStremioMetaAssets(rec.meta || {});
     res.json({
       meta: {
         ...m,
@@ -4394,6 +4470,7 @@ app.get("/admin", async (req,res)=>{
     z-index:4;
   }
   .thumb .title{font-size:14px}
+  .thumb .title-logo{display:block;max-width:160px;max-height:32px;object-fit:contain;object-position:left center;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5));}
   .thumb .id{font-size:11px;color:var(--muted)}
   .thumb[draggable="true"]{cursor:grab}
   .thumb.dragging{opacity:.5}
@@ -5346,6 +5423,13 @@ app.get("/admin", async (req,res)=>{
                 <div class="seg" role="group" aria-label="Background mode">
                   <button type="button" id="coolCardsBgOffBtn">Off</button>
                   <button type="button" id="coolCardsBgOnBtn">On</button>
+                </div>
+              </div>
+              <div class="move-style-toggle" aria-label="Custom title card title logo mode" style="margin-top:8px;">
+                <span class="mini muted">Title logo (if available)</span>
+                <div class="seg" role="group" aria-label="Title logo mode">
+                  <button type="button" id="coolCardsTitleLogoOffBtn">Off</button>
+                  <button type="button" id="coolCardsTitleLogoOnBtn">On</button>
                 </div>
               </div>
               <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
@@ -6534,10 +6618,11 @@ async function render() {
       const raw = JSON.parse(localStorage.getItem('coolTitleCards') || '{}');
       return {
         shape: raw.shape === 'landscape' ? 'landscape' : 'portrait',
-        bg: raw.bg !== false
+        bg: raw.bg !== false,
+        titleLogo: raw.titleLogo === true
       };
     } catch {
-      return { shape: 'portrait', bg: true };
+      return { shape: 'portrait', bg: true, titleLogo: false };
     }
   };
   let coolCards = parseCoolCards();
@@ -6622,17 +6707,23 @@ async function render() {
   const coolCardsLandscapeBtn = document.getElementById('coolCardsLandscapeBtn');
   const coolCardsBgOffBtn = document.getElementById('coolCardsBgOffBtn');
   const coolCardsBgOnBtn = document.getElementById('coolCardsBgOnBtn');
+  const coolCardsTitleLogoOffBtn = document.getElementById('coolCardsTitleLogoOffBtn');
+  const coolCardsTitleLogoOnBtn = document.getElementById('coolCardsTitleLogoOnBtn');
   const applyCoolCardsControls = () => {
     if (coolCardsPortraitBtn) coolCardsPortraitBtn.classList.toggle('active', coolCards.shape === 'portrait');
     if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.classList.toggle('active', coolCards.shape === 'landscape');
     if (coolCardsBgOffBtn) coolCardsBgOffBtn.classList.toggle('active', !coolCards.bg);
     if (coolCardsBgOnBtn) coolCardsBgOnBtn.classList.toggle('active', !!coolCards.bg);
+    if (coolCardsTitleLogoOffBtn) coolCardsTitleLogoOffBtn.classList.toggle('active', !coolCards.titleLogo);
+    if (coolCardsTitleLogoOnBtn) coolCardsTitleLogoOnBtn.classList.toggle('active', !!coolCards.titleLogo);
   };
   applyCoolCardsControls();
   if (coolCardsPortraitBtn) coolCardsPortraitBtn.onclick = () => { coolCards.shape = 'portrait'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.onclick = () => { coolCards.shape = 'landscape'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsBgOffBtn) coolCardsBgOffBtn.onclick = () => { coolCards.bg = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsBgOnBtn) coolCardsBgOnBtn.onclick = () => { coolCards.bg = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsTitleLogoOffBtn) coolCardsTitleLogoOffBtn.onclick = () => { coolCards.titleLogo = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsTitleLogoOnBtn) coolCardsTitleLogoOnBtn.onclick = () => { coolCards.titleLogo = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
 
   if (advancedToggle) {
     const saved = !isSimpleMode && localStorage.getItem('advancedMode') === 'true';
@@ -6872,6 +6963,7 @@ async function render() {
 
       function liFor(it){
         const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
+        li.title = it.name || it.id || '';
         li.appendChild(el('div',{class:'del',text:'×'}));
         li.querySelector('.del').onclick = async (e)=>{
           e.stopPropagation();
@@ -6887,8 +6979,19 @@ async function render() {
         const bgUrl = it.background || it.backdrop || posterUrl || '';
         if (bgUrl) { const safeBg = encodeURI(String(upscaleTmdbImage(bgUrl, 'bg'))); li.style.setProperty('--cool-bg', 'url("' + safeBg + '")'); }
         const img = el('img',{src: upscaleTmdbImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
+        const titleText = it.name || it.id;
+        const titleEl = el('div',{class:'title',text: titleText});
+        if (coolCards.titleLogo && it.logo) {
+          const logoEl = el('img', { class: 'title-logo', src: upscaleTmdbImage(it.logo, 'poster'), alt: titleText || 'Title logo' });
+          logoEl.onerror = () => {
+            logoEl.remove();
+            titleEl.style.display = '';
+          };
+          titleEl.style.display = 'none';
+          titleEl.appendChild(logoEl);
+        }
         const wrap = el('div',{},[
-          el('div',{class:'title',text: it.name || it.id}),
+          titleEl,
           el('div',{class:'id',text: it.id})
         ]);
 
