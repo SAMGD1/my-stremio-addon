@@ -1999,6 +1999,47 @@ function mergeMetaPrefer(base, override) {
   }
   return out;
 }
+function parseYearValue(value) {
+  if (value == null) return null;
+  const m = String(value).match(/(19\d{2}|20\d{2})/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  return Number.isFinite(y) ? y : null;
+}
+function normalizeGenres(value, limit = 3) {
+  let arr = [];
+  if (Array.isArray(value)) arr = value;
+  else if (typeof value === "string") arr = value.split(/[|,]/g);
+  else if (value && typeof value === "object" && Array.isArray(value.genres)) arr = value.genres;
+  const out = [];
+  const seen = new Set();
+  for (const item of arr) {
+    const g = String(item || "").trim();
+    if (!g) continue;
+    const key = g.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(g);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+function deriveReleaseInfo(kind, meta) {
+  const m = meta || {};
+  const start = parseYearValue(m.released || m.releaseDate || m.firstAired || m.first_air_date || m.year || m.releaseInfo);
+  const end = parseYearValue(m.lastAired || m.last_air_date || m.releaseInfoEnd || m.releaseInfo);
+  const existing = String(m.releaseInfo || "").trim();
+  if (kind === "series") {
+    const ended = /ended|canceled|cancelled/i.test(String(m.status || ""));
+    if (start && end && end > start) return `${start}-${end}`;
+    if (start && end && end === start) return String(start);
+    if (start && ended) return String(start);
+    if (start) return `${start}-`;
+    return existing || undefined;
+  }
+  if (start) return String(start);
+  return existing || undefined;
+}
 async function fetchTmdbJson(path, apiKey) {
   const useToken = isLikelyTmdbToken(apiKey);
   const url = useToken
@@ -2058,9 +2099,21 @@ async function fetchTmdbMeta(imdbId) {
     const ep = data?.tv_episode_results?.[0];
     let rec = null;
     if (tv) {
-      const art = await fetchTmdbArt("tv", tv.id, tv.backdrop_path, apiKey);
-      const videos = await fetchTmdbJson(`/tv/${tv.id}/videos`, apiKey).catch(() => null);
+      const [art, videos, details] = await Promise.all([
+        fetchTmdbArt("tv", tv.id, tv.backdrop_path, apiKey),
+        fetchTmdbJson(`/tv/${tv.id}/videos`, apiKey).catch(() => null),
+        fetchTmdbJson(`/tv/${tv.id}`, apiKey).catch(() => null)
+      ]);
       const trailer = bestTmdbTrailer(videos?.results);
+      const genres = normalizeGenres((details?.genres || []).map(g => g?.name), 3);
+      const firstAir = details?.first_air_date || tv.first_air_date || undefined;
+      const lastAir = details?.last_air_date || undefined;
+      const yearStart = parseYearValue(firstAir);
+      const yearEnd = parseYearValue(lastAir);
+      const ended = /ended|canceled|cancelled/i.test(String(details?.status || ""));
+      const releaseInfo = yearStart
+        ? ((yearEnd && yearEnd > yearStart) ? `${yearStart}-${yearEnd}` : (ended ? String(yearStart) : `${yearStart}-`))
+        : undefined;
       rec = {
         kind: "series",
         meta: {
@@ -2070,16 +2123,26 @@ async function fetchTmdbMeta(imdbId) {
           landscapePoster: tmdbImage(art.altBackdropPath || tv.backdrop_path, "w780"),
           logo: tmdbImage(art.logoPath, "w300"),
           trailers: trailer ? [trailer] : undefined,
-          released: tv.first_air_date || undefined,
-          year: tv.first_air_date ? Number(String(tv.first_air_date).slice(0, 4)) : undefined,
+          genres: genres.length ? genres : undefined,
+          released: firstAir,
+          lastAired: lastAir,
+          status: details?.status || undefined,
+          releaseInfo,
+          year: Number.isFinite(yearStart) ? yearStart : undefined,
           description: tv.overview || undefined,
           imdbRating: tv.vote_average ? Number(tv.vote_average) : undefined
         }
       };
     } else if (movie) {
-      const art = await fetchTmdbArt("movie", movie.id, movie.backdrop_path, apiKey);
-      const videos = await fetchTmdbJson(`/movie/${movie.id}/videos`, apiKey).catch(() => null);
+      const [art, videos, details] = await Promise.all([
+        fetchTmdbArt("movie", movie.id, movie.backdrop_path, apiKey),
+        fetchTmdbJson(`/movie/${movie.id}/videos`, apiKey).catch(() => null),
+        fetchTmdbJson(`/movie/${movie.id}`, apiKey).catch(() => null)
+      ]);
       const trailer = bestTmdbTrailer(videos?.results);
+      const genres = normalizeGenres((details?.genres || []).map(g => g?.name), 3);
+      const releaseDate = details?.release_date || movie.release_date || undefined;
+      const releaseYear = parseYearValue(releaseDate);
       rec = {
         kind: "movie",
         meta: {
@@ -2089,8 +2152,10 @@ async function fetchTmdbMeta(imdbId) {
           landscapePoster: tmdbImage(art.altBackdropPath || movie.backdrop_path, "w780"),
           logo: tmdbImage(art.logoPath, "w300"),
           trailers: trailer ? [trailer] : undefined,
-          released: movie.release_date || undefined,
-          year: movie.release_date ? Number(String(movie.release_date).slice(0, 4)) : undefined,
+          genres: genres.length ? genres : undefined,
+          released: releaseDate,
+          releaseInfo: Number.isFinite(releaseYear) ? String(releaseYear) : undefined,
+          year: Number.isFinite(releaseYear) ? releaseYear : undefined,
           description: movie.overview || undefined,
           imdbRating: movie.vote_average ? Number(movie.vote_average) : undefined
         }
@@ -3394,11 +3459,17 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
       }
 
     const m = withStremioMetaAssets(rec.meta || {});
+    const genres = normalizeGenres(m.genres || m.genre, 3);
+    const releaseInfo = deriveReleaseInfo(rec.kind, m);
+    const year = Number.isFinite(Number(m.year)) ? Number(m.year) : parseYearValue(m.released || releaseInfo);
     res.json({
       meta: {
         ...m,
         id: imdbId,
-        type: rec.kind
+        type: rec.kind,
+        year: Number.isFinite(year) ? year : undefined,
+        releaseInfo: releaseInfo || undefined,
+        genres: genres.length ? genres : undefined
       }
     });
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
