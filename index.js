@@ -2917,6 +2917,12 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       await sleep(60);
     }
 
+    setSyncProgress({
+      phase: "resolving",
+      currentList: "",
+      message: "Resolving IDs and episode upgrades…"
+    });
+
     // episode → series (optional)
     let idsToPreload = Array.from(uniques);
 
