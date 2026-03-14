@@ -5761,11 +5761,13 @@ function wireSyncProgress() {
   if (window.__syncProgressTimer) clearInterval(window.__syncProgressTimer);
   window.__syncProgressTimer = setInterval(poll, 2000);
 }
-function upscaleTmdbImage(url, kind){
+function websiteImage(url, kind){
   const raw = String(url || '');
   if (!raw) return raw;
   if (!raw.includes('image.tmdb.org/t/p/')) return raw;
-  const target = kind === 'bg' ? 'w1280' : 'w780';
+  let target = 'w342';
+  if (kind === 'bg') target = 'w780';
+  else if (kind === 'logo') target = 'w300';
   const re = new RegExp('/t/p/(original|w[0-9]+)', 'i');
   return raw.replace(re, '/t/p/' + target);
 }
@@ -6187,7 +6189,7 @@ function createTitleSearchWidget({ lsid = '', onAdd = null, onAddCollection = nu
     items.forEach((item) => {
       const rowEl = el('div', { class: 'title-search-item' });
       const poster = document.createElement('img');
-      poster.src = item.poster || 'https://images.metahub.space/poster/small/tt0111161/img';
+      poster.src = websiteImage(item.poster, 'poster') || 'https://images.metahub.space/poster/small/tt0111161/img';
       poster.alt = item.title || 'Poster';
       const meta = el('div', { class: 'meta' });
       const typeLabel = item.mediaType === 'tv' ? 'Series' : (item.mediaType === 'collection' ? 'Collection' : 'Movie');
@@ -7222,12 +7224,12 @@ async function render() {
           ? (it.background || it.backdrop || it.poster || '')
           : (it.poster || it.background || it.backdrop || '');
         const bgUrl = it.background || it.backdrop || posterUrl || '';
-        if (bgUrl) { const safeBg = encodeURI(String(upscaleTmdbImage(bgUrl, 'bg'))); li.style.setProperty('--cool-bg', 'url("' + safeBg + '")'); }
-        const img = el('img',{src: upscaleTmdbImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
+        if (bgUrl) { const safeBg = encodeURI(String(websiteImage(bgUrl, 'bg'))); li.style.setProperty('--cool-bg', 'url("' + safeBg + '")'); }
+        const img = el('img',{src: websiteImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
         const titleText = it.name || it.id;
         const titleEl = el('div',{class:'title',text: titleText});
         if (coolCards.titleLogo && it.logo) {
-          const logoEl = el('img', { class: 'title-logo', src: upscaleTmdbImage(it.logo, 'poster'), alt: titleText || 'Title logo', title: titleText || '' });
+          const logoEl = el('img', { class: 'title-logo', src: websiteImage(it.logo, 'logo'), alt: titleText || 'Title logo', title: titleText || '' });
           logoEl.onerror = () => {
             titleEl.textContent = titleText;
           };
@@ -7975,7 +7977,7 @@ async function render() {
       items.forEach((item) => {
         const row = el('div', { class: 'title-search-item' });
         const poster = document.createElement('img');
-        poster.src = item.poster || 'https://images.metahub.space/poster/small/' + 'tt0111161' + '/img';
+        poster.src = websiteImage(item.poster, 'poster') || 'https://images.metahub.space/poster/small/' + 'tt0111161' + '/img';
         poster.alt = item.title || 'Poster';
         const meta = el('div', { class: 'meta' });
         const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
