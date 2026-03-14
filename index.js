@@ -486,6 +486,20 @@ function linkBackupPath(lsid) {
 
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function runWithConcurrency(items, limit, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const cap = Math.max(1, Number(limit) || 1);
+  const out = new Array(list.length);
+  let idx = 0;
+  const runners = Array.from({ length: Math.min(cap, list.length || 1) }, async () => {
+    while (idx < list.length) {
+      const i = idx++;
+      out[i] = await worker(list[i], i);
+    }
+  });
+  await Promise.all(runners);
+  return out;
+}
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
 let supabaseApiPromise = null;
 const supabaseNoopApi = {
@@ -2934,14 +2948,26 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       message: "Resolving IDs and episode upgrades…"
     });
     if (PREFS.upgradeEpisodes) {
-      const up = new Set();
-      for (const tt of idsToPreload) {
+      let resolveDone = 0;
+      const resolved = await runWithConcurrency(idsToPreload, 6, async (tt) => {
         const rec = await getBestMeta(tt);
+        let fin = tt;
         if (!rec.meta) {
           const s = await episodeParentSeries(tt);
-          up.add(s && isImdb(s) ? s : tt);
-        } else up.add(tt);
-      }
+          if (s && isImdb(s)) fin = s;
+        }
+        resolveDone++;
+        if (resolveDone <= 5 || resolveDone % 50 === 0 || resolveDone === idsToPreload.length) {
+          setSyncProgress({
+            phase: "resolving",
+            processedMeta: resolveDone,
+            message: `Resolving IDs and episode upgrades ${resolveDone}/${idsToPreload.length}…`
+          });
+        }
+        return fin;
+      });
+      const up = new Set();
+      for (const fin of resolved) if (fin) up.add(fin);
       idsToPreload = Array.from(up);
 
       const remap = (arr) => {
@@ -2988,18 +3014,18 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         message: `Refreshing metadata 0/${idsToPreload.length}…`
       });
       let metaDone = 0;
-      for (const tt of idsToPreload) {
+      await runWithConcurrency(idsToPreload, 8, async (tt) => {
         await getBestMeta(tt);
         CARD.set(tt, cardFor(tt));
         metaDone++;
-        if (metaDone <= 5 || metaDone % 25 === 0 || metaDone === idsToPreload.length) {
+        if (metaDone <= 5 || metaDone % 50 === 0 || metaDone === idsToPreload.length) {
           setSyncProgress({
             phase: "metadata",
             processedMeta: metaDone,
             message: `Refreshing metadata ${metaDone}/${idsToPreload.length}…`
           });
         }
-      }
+      });
     } else {
       console.log("[SYNC] card preload skipped (PRELOAD_CARDS=false)");
     }
