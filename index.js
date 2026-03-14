@@ -2917,6 +2917,12 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       await sleep(60);
     }
 
+    setSyncProgress({
+      phase: "resolving",
+      currentList: "",
+      message: "Resolving IDs and episode upgrades…"
+    });
+
     // episode → series (optional)
     let idsToPreload = Array.from(uniques);
     if (PREFS.upgradeEpisodes) {
@@ -3067,11 +3073,11 @@ function syncProgressSnapshot() {
 
   let etaMs = null;
   if (SYNC_PROGRESS.inProgress) {
-    if (SYNC_PROGRESS.phase === "lists" && listTotal > 0 && listDone > 0) {
+    if (SYNC_PROGRESS.phase === "lists" && listTotal > 0 && listDone > 0 && listDone < listTotal) {
       const phaseElapsed = Math.max(0, now - phaseStartedAt);
       const perList = phaseElapsed / listDone;
       etaMs = Math.round(Math.max(0, listTotal - listDone) * perList);
-    } else if (SYNC_PROGRESS.phase === "metadata" && metaTotal > 0 && metaDone > 0) {
+    } else if (SYNC_PROGRESS.phase === "metadata" && metaTotal > 0 && metaDone > 0 && metaDone < metaTotal) {
       const phaseElapsed = Math.max(0, now - phaseStartedAt);
       const perMeta = phaseElapsed / metaDone;
       etaMs = Math.round(Math.max(0, metaTotal - metaDone) * perMeta);
