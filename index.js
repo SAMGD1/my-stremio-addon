@@ -151,6 +151,7 @@ let SYNC_PROGRESS = {
   inProgress: false,
   phase: "idle",
   startedAt: 0,
+  phaseStartedAt: 0,
   elapsedMs: 0,
   etaMs: null,
   totalLists: 0,
@@ -2747,6 +2748,7 @@ async function fullSync({ rediscover = true, force = false } = {}) {
     inProgress: true,
     phase: "discovering",
     startedAt: started,
+    phaseStartedAt: started,
     elapsedMs: 0,
     etaMs: null,
     totalLists: 0,
@@ -2810,7 +2812,14 @@ async function fullSync({ rediscover = true, force = false } = {}) {
     // pull items for each list (IMDb or Trakt)
     const uniques = new Set();
     const syncIds = Object.keys(next);
-    setSyncProgress({ phase: "lists", totalLists: syncIds.length, processedLists: 0, message: `Syncing 0/${syncIds.length} lists…` });
+    const progressListIds = syncIds.filter(id => {
+      const frozenSnapshot = PREFS.frozenLists && PREFS.frozenLists[id];
+      const customMeta = PREFS.customLists && PREFS.customLists[id];
+      return !frozenSnapshot && !customMeta;
+    });
+    const totalListProgress = progressListIds.length;
+    let processedListProgress = 0;
+    setSyncProgress({ phase: "lists", totalLists: totalListProgress, processedLists: 0, message: `Syncing 0/${totalListProgress} lists…` });
     for (const id of syncIds) {
       const list = next[id];
       const frozenSnapshot = PREFS.frozenLists && PREFS.frozenLists[id];
@@ -2898,12 +2907,12 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
       list.ids = raw.slice();
       raw.forEach(tt => uniques.add(tt));
-      const doneLists = Number(SYNC_PROGRESS.processedLists || 0) + 1;
+      processedListProgress++;
       setSyncProgress({
         phase: "lists",
-        processedLists: doneLists,
+        processedLists: processedListProgress,
         currentList: id,
-        message: `Syncing ${doneLists}/${syncIds.length} lists…`
+        message: `Syncing ${processedListProgress}/${totalListProgress} lists…`
       });
       await sleep(60);
     }
@@ -3046,26 +3055,43 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 function syncProgressSnapshot() {
   const now = Date.now();
   const startedAt = Number(SYNC_PROGRESS.startedAt) || 0;
+  const phaseStartedAt = Number(SYNC_PROGRESS.phaseStartedAt || startedAt) || 0;
   const elapsedMs = SYNC_PROGRESS.inProgress && startedAt ? (now - startedAt) : (Number(SYNC_PROGRESS.elapsedMs) || 0);
-  const totalSteps = Math.max(0, Number(SYNC_PROGRESS.totalLists || 0)) + Math.max(0, Number(SYNC_PROGRESS.totalMeta || 0));
-  const doneSteps = Math.max(0, Number(SYNC_PROGRESS.processedLists || 0)) + Math.max(0, Number(SYNC_PROGRESS.processedMeta || 0));
+  const listTotal = Math.max(0, Number(SYNC_PROGRESS.totalLists || 0));
+  const listDone = Math.max(0, Number(SYNC_PROGRESS.processedLists || 0));
+  const metaTotal = Math.max(0, Number(SYNC_PROGRESS.totalMeta || 0));
+  const metaDone = Math.max(0, Number(SYNC_PROGRESS.processedMeta || 0));
+  const totalSteps = listTotal + metaTotal;
+  const doneSteps = listDone + metaDone;
   const pct = totalSteps > 0 ? Math.max(0, Math.min(100, (doneSteps / totalSteps) * 100)) : (SYNC_PROGRESS.inProgress ? 0 : 100);
-  let etaMs = SYNC_PROGRESS.etaMs;
-  if (SYNC_PROGRESS.inProgress && totalSteps > 0 && doneSteps > 0) {
-    const remainingSteps = Math.max(0, totalSteps - doneSteps);
-    const perStep = elapsedMs / doneSteps;
-    etaMs = Math.round(remainingSteps * perStep);
+
+  let etaMs = null;
+  if (SYNC_PROGRESS.inProgress) {
+    if (SYNC_PROGRESS.phase === "lists" && listTotal > 0 && listDone > 0) {
+      const phaseElapsed = Math.max(0, now - phaseStartedAt);
+      const perList = phaseElapsed / listDone;
+      etaMs = Math.round(Math.max(0, listTotal - listDone) * perList);
+    } else if (SYNC_PROGRESS.phase === "metadata" && metaTotal > 0 && metaDone > 0) {
+      const phaseElapsed = Math.max(0, now - phaseStartedAt);
+      const perMeta = phaseElapsed / metaDone;
+      etaMs = Math.round(Math.max(0, metaTotal - metaDone) * perMeta);
+    } else if (SYNC_PROGRESS.phase === "finalizing") {
+      etaMs = 0;
+    }
+  } else if (Number.isFinite(Number(SYNC_PROGRESS.etaMs))) {
+    etaMs = Number(SYNC_PROGRESS.etaMs);
   }
+
   return {
     inProgress: !!SYNC_PROGRESS.inProgress,
     phase: SYNC_PROGRESS.phase || "idle",
     startedAt,
     elapsedMs,
     etaMs: Number.isFinite(etaMs) ? Math.max(0, etaMs) : null,
-    totalLists: Number(SYNC_PROGRESS.totalLists || 0),
-    processedLists: Number(SYNC_PROGRESS.processedLists || 0),
-    totalMeta: Number(SYNC_PROGRESS.totalMeta || 0),
-    processedMeta: Number(SYNC_PROGRESS.processedMeta || 0),
+    totalLists: listTotal,
+    processedLists: listDone,
+    totalMeta: metaTotal,
+    processedMeta: metaDone,
     percent: Math.round(pct * 10) / 10,
     currentList: SYNC_PROGRESS.currentList || "",
     message: SYNC_PROGRESS.message || ""
@@ -3073,9 +3099,12 @@ function syncProgressSnapshot() {
 }
 
 function setSyncProgress(patch = {}) {
+  const nextPhase = typeof patch.phase === "string" ? patch.phase : SYNC_PROGRESS.phase;
+  const phaseChanged = nextPhase !== SYNC_PROGRESS.phase;
   SYNC_PROGRESS = {
     ...SYNC_PROGRESS,
-    ...patch
+    ...patch,
+    phaseStartedAt: phaseChanged ? Date.now() : (Number(SYNC_PROGRESS.phaseStartedAt) || Number(SYNC_PROGRESS.startedAt) || 0)
   };
 }
 
@@ -5748,18 +5777,29 @@ function wireSyncProgress() {
     const metaText = "meta " + (snap.processedMeta || 0) + "/" + (snap.totalMeta || 0);
     statusEl.textContent = (snap.message || 'Syncing…') + ' (' + pct.toFixed(1) + '%) • ' + listText + ' • ' + metaText + ' • ETA ' + etaText;
   };
+
+  if (window.__syncProgressTimer) clearTimeout(window.__syncProgressTimer);
+  let pollInFlight = false;
+  const schedulePoll = (delay = 3000) => {
+    window.__syncProgressTimer = setTimeout(poll, delay);
+  };
+
   const poll = async () => {
+    if (pollInFlight) return schedulePoll();
+    pollInFlight = true;
     try {
       const snap = await getSyncProgress();
       renderSync(snap);
     } catch {
       statusEl.classList.add('idle');
       statusEl.textContent = 'Sync status unavailable.';
+    } finally {
+      pollInFlight = false;
+      schedulePoll();
     }
   };
+
   poll();
-  if (window.__syncProgressTimer) clearInterval(window.__syncProgressTimer);
-  window.__syncProgressTimer = setInterval(poll, 2000);
 }
 function websiteImage(url, kind){
   const raw = String(url || '');
