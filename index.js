@@ -2925,6 +2925,14 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
     // episode → series (optional)
     let idsToPreload = Array.from(uniques);
+
+    setSyncProgress({
+      phase: "resolving",
+      currentList: "",
+      totalMeta: idsToPreload.length,
+      processedMeta: 0,
+      message: "Resolving IDs and episode upgrades…"
+    });
     if (PREFS.upgradeEpisodes) {
       const up = new Set();
       for (const tt of idsToPreload) {
@@ -5751,7 +5759,7 @@ async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); ret
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
 async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
 async function getDiscovered(){ const r = await fetch('/api/discovered?admin='+ADMIN); return r.json(); }
-async function getSyncProgress(){ const r = await fetch('/api/sync-progress?admin='+ADMIN); if (!r.ok) throw new Error('sync progress failed'); return r.json(); }
+async function getSyncProgress(signal){ const r = await fetch('/api/sync-progress?admin='+ADMIN, { signal }); if (!r.ok) throw new Error('sync progress failed'); return r.json(); }
 function fmtEta(ms){
   const sec = Math.max(0, Math.round(Number(ms || 0) / 1000));
   if (!sec) return '0s';
@@ -5767,46 +5775,86 @@ function wireSyncProgress() {
   const statusEl = document.getElementById('syncLiveStatus');
   const fillEl = document.getElementById('syncLiveFill');
   if (!statusEl || !fillEl) return;
+
+  let lastSnap = null;
+  let pollInFlight = false;
+  let stopped = false;
+  const POLL_ACTIVE_MS = 5000;
+  const POLL_IDLE_MS = 15000;
+
   const renderSync = (snap) => {
-    const pct = Math.max(0, Math.min(100, Number(snap?.percent || 0)));
+    lastSnap = snap || lastSnap;
+    const view = snap || lastSnap || null;
+    const pct = Math.max(0, Math.min(100, Number(view?.percent || 0)));
     fillEl.style.width = pct + '%';
-    if (!snap || !snap.inProgress) {
+    if (!view || !view.inProgress) {
       statusEl.classList.add('idle');
-      statusEl.textContent = snap?.phase === 'error'
-        ? (snap.message || 'Sync failed. Check logs.')
-        : (snap?.message || 'Sync idle.');
+      statusEl.textContent = view?.phase === 'error'
+        ? (view.message || 'Sync failed. Check logs.')
+        : (view?.message || 'Sync idle.');
       return;
     }
     statusEl.classList.remove('idle');
-    const etaText = Number.isFinite(Number(snap.etaMs)) ? fmtEta(snap.etaMs) : 'estimating…';
-    const listText = "lists " + (snap.processedLists || 0) + "/" + (snap.totalLists || 0);
-    const metaText = "meta " + (snap.processedMeta || 0) + "/" + (snap.totalMeta || 0);
-    statusEl.textContent = (snap.message || 'Syncing…') + ' (' + pct.toFixed(1) + '%) • ' + listText + ' • ' + metaText + ' • ETA ' + etaText;
+    const hasEta = view.etaMs !== null && view.etaMs !== undefined && Number.isFinite(Number(view.etaMs));
+    const etaText = hasEta ? fmtEta(view.etaMs) : 'estimating…';
+    const listText = 'lists ' + (view.processedLists || 0) + '/' + (view.totalLists || 0);
+    const metaText = 'meta ' + (view.processedMeta || 0) + '/' + (view.totalMeta || 0);
+    statusEl.textContent = (view.message || 'Syncing…') + ' (' + pct.toFixed(1) + '%) • ' + listText + ' • ' + metaText + ' • ETA ' + etaText;
   };
 
   if (window.__syncProgressTimer) clearTimeout(window.__syncProgressTimer);
-  let pollInFlight = false;
-  const schedulePoll = (delay = 3000) => {
+  const schedulePoll = (delay) => {
+    if (stopped) return;
     window.__syncProgressTimer = setTimeout(poll, delay);
   };
 
   const poll = async () => {
-    if (pollInFlight) return schedulePoll();
+    if (stopped) return;
+    if (document.visibilityState === 'hidden') {
+      schedulePoll(POLL_IDLE_MS);
+      return;
+    }
+    if (pollInFlight) {
+      schedulePoll(POLL_ACTIVE_MS);
+      return;
+    }
+
     pollInFlight = true;
+    const ac = new AbortController();
+    const timeout = setTimeout(() => ac.abort(), 2500);
     try {
-      const snap = await getSyncProgress();
+      const snap = await getSyncProgress(ac.signal);
       renderSync(snap);
     } catch {
+      renderSync(lastSnap);
       statusEl.classList.add('idle');
       statusEl.textContent = 'Sync status unavailable.';
     } finally {
+      clearTimeout(timeout);
       pollInFlight = false;
-      schedulePoll();
+      const delay = lastSnap?.inProgress ? POLL_ACTIVE_MS : POLL_IDLE_MS;
+      schedulePoll(delay);
     }
   };
 
+  const onVisibility = () => {
+    if (document.visibilityState === 'visible' && !pollInFlight) {
+      if (window.__syncProgressTimer) clearTimeout(window.__syncProgressTimer);
+      schedulePoll(250);
+    }
+  };
+  const stopPolling = () => {
+    stopped = true;
+    if (window.__syncProgressTimer) clearTimeout(window.__syncProgressTimer);
+  };
+
+  document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('pagehide', stopPolling, { once: true });
+  window.addEventListener('beforeunload', stopPolling, { once: true });
+
   poll();
 }
+
 function websiteImage(url, kind){
   const raw = String(url || '');
   if (!raw) return raw;
