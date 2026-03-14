@@ -5764,19 +5764,10 @@ function wireSyncProgress() {
 function upscaleTmdbImage(url, kind){
   const raw = String(url || '');
   if (!raw) return raw;
-  if (raw.includes('image.tmdb.org/t/p/')) {
-    // Website cards are small; keep TMDB assets lighter for faster loading.
-    // (Stremio high-res sizing is handled server-side by withStremioMetaAssets.)
-    const target = kind === 'bg' ? 'w780' : 'w342';
-    const re = new RegExp('/t/p/(original|w[0-9]+)', 'i');
-    return raw.replace(re, '/t/p/' + target);
-  }
-  if (raw.includes('images.metahub.space/')) {
-    // Prefer lighter MetaHub sizes in web Customize view.
-    const target = kind === 'bg' ? 'medium' : 'small';
-    return raw.replace(/\/(small|medium|large|original)\//i, '/' + target + '/');
-  }
-  return raw;
+  if (!raw.includes('image.tmdb.org/t/p/')) return raw;
+  const target = kind === 'bg' ? 'w1280' : 'w780';
+  const re = new RegExp('/t/p/(original|w[0-9]+)', 'i');
+  return raw.replace(re, '/t/p/' + target);
 }
 async function saveCustomOrder(lsid, order){
   const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
