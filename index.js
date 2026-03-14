@@ -147,6 +147,19 @@ let syncTimer = null;
 let syncInProgress = false;
 let syncPromise = null;
 let pendingForcedSync = false;
+let SYNC_PROGRESS = {
+  inProgress: false,
+  phase: "idle",
+  startedAt: 0,
+  elapsedMs: 0,
+  etaMs: null,
+  totalLists: 0,
+  processedLists: 0,
+  totalMeta: 0,
+  processedMeta: 0,
+  currentList: "",
+  message: "Idle"
+};
 
 let MANIFEST_REV = 1;
 let LAST_MANIFEST_KEY = "";
@@ -1894,6 +1907,63 @@ function tmdbImage(path, size = "w500") {
   if (!path) return null;
   return `${TMDB_IMG_BASE}/${size}${path}`;
 }
+function swapTmdbImageSize(url, size) {
+  const raw = String(url || "");
+  if (!raw.includes("image.tmdb.org/t/p/")) return raw;
+  return raw.replace(/\/t\/p\/(original|w\d+)/i, `/t/p/${size}`);
+}
+function upscaleMetahub(url, size = "large") {
+  const raw = String(url || "");
+  if (!raw.includes("images.metahub.space/")) return raw;
+  return raw.replace(/\/(small|medium|large|original)\//i, `/${size}/`);
+}
+function stremioImage(url, kind = "poster") {
+  const raw = String(url || "");
+  if (!raw) return raw;
+  if (raw.includes("image.tmdb.org/t/p/")) {
+    if (kind === "bg") return swapTmdbImageSize(raw, "w1280");
+    if (kind === "logo") return swapTmdbImageSize(raw, "w500");
+    return swapTmdbImageSize(raw, "w780");
+  }
+  if (raw.includes("images.metahub.space/")) {
+    if (kind === "logo") return upscaleMetahub(raw, "medium");
+    return upscaleMetahub(raw, "large");
+  }
+  return raw;
+}
+function bestTmdbLogoPath(logos) {
+  const pool = Array.isArray(logos) ? logos : [];
+  const ranked = pool
+    .filter(img => String(img?.file_path || "").trim())
+    .sort((a, b) => {
+      const aEn = String(a?.iso_639_1 || "").toLowerCase() === "en" ? 1 : 0;
+      const bEn = String(b?.iso_639_1 || "").toLowerCase() === "en" ? 1 : 0;
+      if (aEn !== bEn) return bEn - aEn;
+      return (Number(b?.vote_average) || 0) - (Number(a?.vote_average) || 0);
+    });
+  return ranked[0]?.file_path || "";
+}
+function bestTmdbTrailer(videos) {
+  const pool = Array.isArray(videos) ? videos : [];
+  const ranked = pool
+    .filter(v => String(v?.site || "").toLowerCase() === "youtube" && String(v?.key || "").trim())
+    .sort((a, b) => {
+      const aTrailer = /trailer/i.test(String(a?.type || "")) ? 1 : 0;
+      const bTrailer = /trailer/i.test(String(b?.type || "")) ? 1 : 0;
+      if (aTrailer !== bTrailer) return bTrailer - aTrailer;
+      const aOfficial = a?.official ? 1 : 0;
+      const bOfficial = b?.official ? 1 : 0;
+      if (aOfficial !== bOfficial) return bOfficial - aOfficial;
+      return (Number(b?.size) || 0) - (Number(a?.size) || 0);
+    });
+  const hit = ranked[0];
+  if (!hit) return null;
+  return {
+    source: hit.key,
+    type: /teaser/i.test(String(hit.type || "")) ? "Teaser" : "Trailer",
+    name: hit.name || "Trailer"
+  };
+}
 function extractEpisodeInfo(ld) {
   try {
     const node = Array.isArray(ld && ld["@graph"])
@@ -1929,6 +1999,47 @@ function mergeMetaPrefer(base, override) {
   }
   return out;
 }
+function parseYearValue(value) {
+  if (value == null) return null;
+  const m = String(value).match(/(19\d{2}|20\d{2})/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  return Number.isFinite(y) ? y : null;
+}
+function normalizeGenres(value, limit = 3) {
+  let arr = [];
+  if (Array.isArray(value)) arr = value;
+  else if (typeof value === "string") arr = value.split(/[|,]/g);
+  else if (value && typeof value === "object" && Array.isArray(value.genres)) arr = value.genres;
+  const out = [];
+  const seen = new Set();
+  for (const item of arr) {
+    const g = String(item || "").trim();
+    if (!g) continue;
+    const key = g.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(g);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+function deriveReleaseInfo(kind, meta) {
+  const m = meta || {};
+  const start = parseYearValue(m.released || m.releaseDate || m.firstAired || m.first_air_date || m.year || m.releaseInfo);
+  const end = parseYearValue(m.lastAired || m.last_air_date || m.releaseInfoEnd || m.releaseInfo);
+  const existing = String(m.releaseInfo || "").trim();
+  if (kind === "series") {
+    const ended = /ended|canceled|cancelled/i.test(String(m.status || ""));
+    if (start && end && end > start) return `${start}-${end}`;
+    if (start && end && end === start) return String(start);
+    if (start && ended) return String(start);
+    if (start) return `${start}-`;
+    return existing || undefined;
+  }
+  if (start) return String(start);
+  return existing || undefined;
+}
 async function fetchTmdbJson(path, apiKey) {
   const useToken = isLikelyTmdbToken(apiKey);
   const url = useToken
@@ -1953,24 +2064,24 @@ async function fetchTmdbJson(path, apiKey) {
   if (!r.ok) throw new Error(`TMDB ${path} -> ${r.status}`);
   try { return await r.json(); } catch { return null; }
 }
-async function fetchTmdbAlternateBackdrop(itemType, tmdbId, primaryPath, apiKey) {
+async function fetchTmdbArt(itemType, tmdbId, primaryPath, apiKey) {
   try {
-    if (!tmdbId) return "";
+    if (!tmdbId) return { altBackdropPath: "", logoPath: "" };
     const data = await fetchTmdbJson(`/${itemType}/${tmdbId}/images`, apiKey);
     const backdrops = Array.isArray(data?.backdrops) ? data.backdrops : [];
-    if (!backdrops.length) return "";
+    const logos = Array.isArray(data?.logos) ? data.logos : [];
     const normalizedPrimary = String(primaryPath || "").trim();
-    const candidate = backdrops
+    const altBackdropPath = backdrops
       .slice()
       .sort((a, b) => (Number(b?.vote_average) || 0) - (Number(a?.vote_average) || 0))
       .find(img => {
         const path = String(img?.file_path || "").trim();
         if (!path) return false;
         return !normalizedPrimary || path !== normalizedPrimary;
-      });
-    return candidate?.file_path || "";
+      })?.file_path || "";
+    return { altBackdropPath, logoPath: bestTmdbLogoPath(logos) };
   } catch {
-    return "";
+    return { altBackdropPath: "", logoPath: "" };
   }
 }
 async function fetchTmdbMeta(imdbId) {
@@ -1988,31 +2099,63 @@ async function fetchTmdbMeta(imdbId) {
     const ep = data?.tv_episode_results?.[0];
     let rec = null;
     if (tv) {
-      const altBackdropPath = await fetchTmdbAlternateBackdrop("tv", tv.id, tv.backdrop_path, apiKey);
+      const [art, videos, details] = await Promise.all([
+        fetchTmdbArt("tv", tv.id, tv.backdrop_path, apiKey),
+        fetchTmdbJson(`/tv/${tv.id}/videos`, apiKey).catch(() => null),
+        fetchTmdbJson(`/tv/${tv.id}`, apiKey).catch(() => null)
+      ]);
+      const trailer = bestTmdbTrailer(videos?.results);
+      const genres = normalizeGenres((details?.genres || []).map(g => g?.name), 3);
+      const firstAir = details?.first_air_date || tv.first_air_date || undefined;
+      const lastAir = details?.last_air_date || undefined;
+      const yearStart = parseYearValue(firstAir);
+      const yearEnd = parseYearValue(lastAir);
+      const ended = /ended|canceled|cancelled/i.test(String(details?.status || ""));
+      const releaseInfo = yearStart
+        ? ((yearEnd && yearEnd > yearStart) ? `${yearStart}-${yearEnd}` : (ended ? String(yearStart) : `${yearStart}-`))
+        : undefined;
       rec = {
         kind: "series",
         meta: {
           name: tv.name,
           poster: tmdbImage(tv.poster_path, "w500"),
           background: tmdbImage(tv.backdrop_path, "w780"),
-          landscapePoster: tmdbImage(altBackdropPath || tv.backdrop_path, "w780"),
-          released: tv.first_air_date || undefined,
-          year: tv.first_air_date ? Number(String(tv.first_air_date).slice(0, 4)) : undefined,
+          landscapePoster: tmdbImage(art.altBackdropPath || tv.backdrop_path, "w780"),
+          logo: tmdbImage(art.logoPath, "w300"),
+          trailers: trailer ? [trailer] : undefined,
+          genres: genres.length ? genres : undefined,
+          released: firstAir,
+          lastAired: lastAir,
+          status: details?.status || undefined,
+          releaseInfo,
+          year: Number.isFinite(yearStart) ? yearStart : undefined,
           description: tv.overview || undefined,
           imdbRating: tv.vote_average ? Number(tv.vote_average) : undefined
         }
       };
     } else if (movie) {
-      const altBackdropPath = await fetchTmdbAlternateBackdrop("movie", movie.id, movie.backdrop_path, apiKey);
+      const [art, videos, details] = await Promise.all([
+        fetchTmdbArt("movie", movie.id, movie.backdrop_path, apiKey),
+        fetchTmdbJson(`/movie/${movie.id}/videos`, apiKey).catch(() => null),
+        fetchTmdbJson(`/movie/${movie.id}`, apiKey).catch(() => null)
+      ]);
+      const trailer = bestTmdbTrailer(videos?.results);
+      const genres = normalizeGenres((details?.genres || []).map(g => g?.name), 3);
+      const releaseDate = details?.release_date || movie.release_date || undefined;
+      const releaseYear = parseYearValue(releaseDate);
       rec = {
         kind: "movie",
         meta: {
           name: movie.title,
           poster: tmdbImage(movie.poster_path, "w500"),
           background: tmdbImage(movie.backdrop_path, "w780"),
-          landscapePoster: tmdbImage(altBackdropPath || movie.backdrop_path, "w780"),
-          released: movie.release_date || undefined,
-          year: movie.release_date ? Number(String(movie.release_date).slice(0, 4)) : undefined,
+          landscapePoster: tmdbImage(art.altBackdropPath || movie.backdrop_path, "w780"),
+          logo: tmdbImage(art.logoPath, "w300"),
+          trailers: trailer ? [trailer] : undefined,
+          genres: genres.length ? genres : undefined,
+          released: releaseDate,
+          releaseInfo: Number.isFinite(releaseYear) ? String(releaseYear) : undefined,
+          year: Number.isFinite(releaseYear) ? releaseYear : undefined,
           description: movie.overview || undefined,
           imdbRating: movie.vote_average ? Number(movie.vote_average) : undefined
         }
@@ -2331,18 +2474,34 @@ function cardFor(imdbId) {
   const poster = m.poster || fb.poster || m.background || m.backdrop;
   const background = m.background || m.backdrop || poster || fb.poster;
 
+  const genres = normalizeGenres(m.genres || m.genre, 3);
+  const releaseInfo = deriveReleaseInfo(rec.kind || fb.type || "movie", m) || (m.releaseInfo || undefined);
   return {
     id: imdbId,
     type: rec.kind || fb.type || "movie",
     name: sanitizeName(m.name || fb.name || imdbId),
     poster: poster || undefined,
     background: background || undefined,
+    logo: m.logo || undefined,
     imdbRating: m.imdbRating ?? undefined,
     runtime: m.runtime ?? undefined,
-    year: m.year ?? fb.year ?? undefined,
+    year: m.year ?? fb.year ?? parseYearValue(m.released || releaseInfo) ?? undefined,
     releaseDate: m.released || m.releaseInfo || fb.releaseDate || undefined,
+    releaseInfo: releaseInfo,
+    genres: genres.length ? genres : undefined,
+    genre: genres.length ? genres.join(', ') : undefined,
     description: m.description || undefined
   };
+}
+
+function withStremioMetaAssets(meta) {
+  const m = { ...(meta || {}) };
+  if (m.poster) m.poster = stremioImage(m.poster, "poster");
+  if (m.background) m.background = stremioImage(m.background, "bg");
+  if (m.backdrop) m.backdrop = stremioImage(m.backdrop, "bg");
+  if (m.landscapePoster) m.landscapePoster = stremioImage(m.landscapePoster, "bg");
+  if (m.logo) m.logo = stremioImage(m.logo, "logo");
+  return m;
 }
 
 function toTs(d,y){ if(d){const t=Date.parse(d); if(!Number.isNaN(t)) return t;} if(y){const t=Date.parse(`${y}-01-01`); if(!Number.isNaN(t)) return t;} return null; }
@@ -2584,6 +2743,19 @@ async function fullSync({ rediscover = true, force = false } = {}) {
   }
   syncInProgress = true;
   const started = Date.now();
+  setSyncProgress({
+    inProgress: true,
+    phase: "discovering",
+    startedAt: started,
+    elapsedMs: 0,
+    etaMs: null,
+    totalLists: 0,
+    processedLists: 0,
+    totalMeta: 0,
+    processedMeta: 0,
+    currentList: "",
+    message: "Discovering sources…"
+  });
   syncPromise = (async () => {
     try {
     let discovered = [];
@@ -2637,7 +2809,9 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
     // pull items for each list (IMDb or Trakt)
     const uniques = new Set();
-    for (const id of Object.keys(next)) {
+    const syncIds = Object.keys(next);
+    setSyncProgress({ phase: "lists", totalLists: syncIds.length, processedLists: 0, message: `Syncing 0/${syncIds.length} lists…` });
+    for (const id of syncIds) {
       const list = next[id];
       const frozenSnapshot = PREFS.frozenLists && PREFS.frozenLists[id];
       const customMeta = PREFS.customLists && PREFS.customLists[id];
@@ -2724,6 +2898,13 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
       list.ids = raw.slice();
       raw.forEach(tt => uniques.add(tt));
+      const doneLists = Number(SYNC_PROGRESS.processedLists || 0) + 1;
+      setSyncProgress({
+        phase: "lists",
+        processedLists: doneLists,
+        currentList: id,
+        message: `Syncing ${doneLists}/${syncIds.length} lists…`
+      });
       await sleep(60);
     }
 
@@ -2777,9 +2958,24 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
     // preload cards
     if (PRELOAD_CARDS) {
+      setSyncProgress({
+        phase: "metadata",
+        totalMeta: idsToPreload.length,
+        processedMeta: 0,
+        message: `Refreshing metadata 0/${idsToPreload.length}…`
+      });
+      let metaDone = 0;
       for (const tt of idsToPreload) {
         await getBestMeta(tt);
         CARD.set(tt, cardFor(tt));
+        metaDone++;
+        if (metaDone <= 5 || metaDone % 25 === 0 || metaDone === idsToPreload.length) {
+          setSyncProgress({
+            phase: "metadata",
+            processedMeta: metaDone,
+            message: `Refreshing metadata ${metaDone}/${idsToPreload.length}…`
+          });
+        }
       }
     } else {
       console.log("[SYNC] card preload skipped (PRELOAD_CARDS=false)");
@@ -2810,10 +3006,27 @@ async function fullSync({ rediscover = true, force = false } = {}) {
       console.log("[SYNC] catalogs changed → manifest rev", MANIFEST_REV);
     }
 
+    setSyncProgress({ phase: "finalizing", message: "Finalizing sync…" });
     await persistSnapshot();
 
+      setSyncProgress({
+        inProgress: false,
+        phase: "done",
+        elapsedMs: Date.now() - started,
+        etaMs: 0,
+        processedLists: Number(SYNC_PROGRESS.totalLists || 0),
+        processedMeta: Number(SYNC_PROGRESS.totalMeta || 0),
+        message: "Sync complete"
+      });
       console.log(`[SYNC] ok – ${Object.values(LISTS).reduce((n,L)=>n+(L.ids?.length||0),0)} items across ${Object.keys(LISTS).length} lists in ${minutes(Date.now()-started)} min`);
     } catch (e) {
+      setSyncProgress({
+        inProgress: false,
+        phase: "error",
+        elapsedMs: Date.now() - started,
+        etaMs: null,
+        message: `Sync failed: ${e.message || "unknown error"}`
+      });
       console.error("[SYNC] failed:", e);
     } finally {
       syncInProgress = false;
@@ -2829,6 +3042,43 @@ async function fullSync({ rediscover = true, force = false } = {}) {
     }
   }
 }
+
+function syncProgressSnapshot() {
+  const now = Date.now();
+  const startedAt = Number(SYNC_PROGRESS.startedAt) || 0;
+  const elapsedMs = SYNC_PROGRESS.inProgress && startedAt ? (now - startedAt) : (Number(SYNC_PROGRESS.elapsedMs) || 0);
+  const totalSteps = Math.max(0, Number(SYNC_PROGRESS.totalLists || 0)) + Math.max(0, Number(SYNC_PROGRESS.totalMeta || 0));
+  const doneSteps = Math.max(0, Number(SYNC_PROGRESS.processedLists || 0)) + Math.max(0, Number(SYNC_PROGRESS.processedMeta || 0));
+  const pct = totalSteps > 0 ? Math.max(0, Math.min(100, (doneSteps / totalSteps) * 100)) : (SYNC_PROGRESS.inProgress ? 0 : 100);
+  let etaMs = SYNC_PROGRESS.etaMs;
+  if (SYNC_PROGRESS.inProgress && totalSteps > 0 && doneSteps > 0) {
+    const remainingSteps = Math.max(0, totalSteps - doneSteps);
+    const perStep = elapsedMs / doneSteps;
+    etaMs = Math.round(remainingSteps * perStep);
+  }
+  return {
+    inProgress: !!SYNC_PROGRESS.inProgress,
+    phase: SYNC_PROGRESS.phase || "idle",
+    startedAt,
+    elapsedMs,
+    etaMs: Number.isFinite(etaMs) ? Math.max(0, etaMs) : null,
+    totalLists: Number(SYNC_PROGRESS.totalLists || 0),
+    processedLists: Number(SYNC_PROGRESS.processedLists || 0),
+    totalMeta: Number(SYNC_PROGRESS.totalMeta || 0),
+    processedMeta: Number(SYNC_PROGRESS.processedMeta || 0),
+    percent: Math.round(pct * 10) / 10,
+    currentList: SYNC_PROGRESS.currentList || "",
+    message: SYNC_PROGRESS.message || ""
+  };
+}
+
+function setSyncProgress(patch = {}) {
+  SYNC_PROGRESS = {
+    ...SYNC_PROGRESS,
+    ...patch
+  };
+}
+
 function scheduleNextSync() {
   if (syncTimer) clearTimeout(syncTimer);
   if (IMDB_SYNC_MINUTES <= 0) return;
@@ -3177,7 +3427,7 @@ app.get("/catalog/:type/:id/:extra?.json", (req,res)=>{
     if (PREFS.sortReverse && PREFS.sortReverse[lsid]) metas = metas.slice().reverse();
 
     const isLandscapeMode = posterMode() === "landscape";
-    const visibleMetas = metas.slice(skip, skip+limit).map(m => ({
+    const visibleMetas = metas.slice(skip, skip+limit).map(m => withStremioMetaAssets({
       ...m,
       poster: isLandscapeMode
         ? (m.background || m.backdrop || m.poster || undefined)
@@ -3213,12 +3463,19 @@ app.get("/meta/:type/:id.json", async (req,res)=>{
         return res.json({ meta: { id: imdbId, type: rec?.kind || fb.type || "movie", name: fb.name || imdbId, poster: fb.poster || undefined } });
       }
 
-    const m = rec.meta;
+    const m = withStremioMetaAssets(rec.meta || {});
+    const genres = normalizeGenres(m.genres || m.genre, 3);
+    const releaseInfo = deriveReleaseInfo(rec.kind, m);
+    const year = Number.isFinite(Number(m.year)) ? Number(m.year) : parseYearValue(m.released || releaseInfo);
     res.json({
       meta: {
         ...m,
         id: imdbId,
-        type: rec.kind
+        type: rec.kind,
+        year: Number.isFinite(year) ? year : undefined,
+        releaseInfo: releaseInfo || undefined,
+        genres: genres.length ? genres : undefined,
+        genre: genres.length ? genres.join(', ') : undefined
       }
     });
   }catch(e){ console.error("meta:", e); res.status(500).send("Internal Server Error"); }
@@ -4187,6 +4444,11 @@ app.post("/api/remove-list", async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send(String(e)); }
 });
 
+app.get("/api/sync-progress", (req,res)=>{
+  if (!adminAllowed(req)) return res.status(403).send("Forbidden");
+  res.json(syncProgressSnapshot());
+});
+
 app.post("/api/sync", async (req,res)=>{
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
   try{
@@ -4393,8 +4655,12 @@ app.get("/admin", async (req,res)=>{
     color:#ffb4b4;
     z-index:4;
   }
-  .thumb .title{font-size:14px}
-  .thumb .id{font-size:11px;color:var(--muted)}
+  .thumb .thumb-meta{min-width:0;display:flex;flex-direction:column;gap:2px;flex:1 1 auto;}
+  .thumb .title{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .thumb .title-logo{display:block;width:100%;max-width:190px;height:32px;object-fit:contain;object-position:left center;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5));}
+  .thumbs.cool-landscape .thumb .title-logo{max-width:140px;height:28px;}
+  .thumbs.cool-portrait .thumb .title-logo{max-width:170px;height:30px;}
+  .thumb .id{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .thumb[draggable="true"]{cursor:grab}
   .thumb.dragging{opacity:.5}
   .thumb .del{
@@ -4570,6 +4836,11 @@ app.get("/admin", async (req,res)=>{
   .csv-inline-box .mini{display:block;margin-bottom:6px;}
   .csv-inline-box input[type="file"]{width:100%;}
   .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
+  .sync-live{margin-top:10px;padding:8px 10px;border:1px solid rgba(122,106,221,.45);border-radius:10px;background:rgba(17,13,40,.55);}
+  .sync-live-status{font-size:12px;color:#dcd8ff;display:block;margin-bottom:6px;}
+  .sync-live-status.idle{color:var(--muted);}
+  .sync-live-bar{height:8px;border-radius:999px;background:rgba(255,255,255,.12);overflow:hidden;}
+  .sync-live-fill{height:100%;width:0%;background:linear-gradient(90deg,#7a6bff,#9f8dff);transition:width .25s ease;}
   .pill{
     display:inline-flex;
     align-items:center;
@@ -5146,6 +5417,10 @@ app.get("/admin", async (req,res)=>{
             </form>
           </div>
           <span class="inline-note">Auto-sync every <b>${IMDB_SYNC_MINUTES}</b> min.</span>
+          <div id="syncLive" class="sync-live">
+            <span id="syncLiveStatus" class="sync-live-status idle">Sync idle.</span>
+            <div class="sync-live-bar"><div id="syncLiveFill" class="sync-live-fill"></div></div>
+          </div>
           <div class="api-key-box">
             <label class="mini">Poster layout in Stremio</label>
             <div class="move-style-toggle" aria-label="Poster layout mode">
@@ -5348,6 +5623,13 @@ app.get("/admin", async (req,res)=>{
                   <button type="button" id="coolCardsBgOnBtn">On</button>
                 </div>
               </div>
+              <div class="move-style-toggle" aria-label="Custom title card title logo mode" style="margin-top:8px;">
+                <span class="mini muted">Title logo (if available)</span>
+                <div class="seg" role="group" aria-label="Title logo mode">
+                  <button type="button" id="coolCardsTitleLogoOffBtn">Off</button>
+                  <button type="button" id="coolCardsTitleLogoOnBtn">On</button>
+                </div>
+              </div>
               <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
             </div>
           </details>
@@ -5434,13 +5716,67 @@ async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); ret
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
 async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
 async function getDiscovered(){ const r = await fetch('/api/discovered?admin='+ADMIN); return r.json(); }
+async function getSyncProgress(){ const r = await fetch('/api/sync-progress?admin='+ADMIN); if (!r.ok) throw new Error('sync progress failed'); return r.json(); }
+function fmtEta(ms){
+  const sec = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  if (!sec) return '0s';
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (!m) return s + 's';
+  if (m < 60) return m + 'm ' + s + 's';
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return h + 'h ' + rm + 'm';
+}
+function wireSyncProgress() {
+  const statusEl = document.getElementById('syncLiveStatus');
+  const fillEl = document.getElementById('syncLiveFill');
+  if (!statusEl || !fillEl) return;
+  const renderSync = (snap) => {
+    const pct = Math.max(0, Math.min(100, Number(snap?.percent || 0)));
+    fillEl.style.width = pct + '%';
+    if (!snap || !snap.inProgress) {
+      statusEl.classList.add('idle');
+      statusEl.textContent = snap?.phase === 'error'
+        ? (snap.message || 'Sync failed. Check logs.')
+        : (snap?.message || 'Sync idle.');
+      return;
+    }
+    statusEl.classList.remove('idle');
+    const etaText = Number.isFinite(Number(snap.etaMs)) ? fmtEta(snap.etaMs) : 'estimating…';
+    const listText = "lists " + (snap.processedLists || 0) + "/" + (snap.totalLists || 0);
+    const metaText = "meta " + (snap.processedMeta || 0) + "/" + (snap.totalMeta || 0);
+    statusEl.textContent = (snap.message || 'Syncing…') + ' (' + pct.toFixed(1) + '%) • ' + listText + ' • ' + metaText + ' • ETA ' + etaText;
+  };
+  const poll = async () => {
+    try {
+      const snap = await getSyncProgress();
+      renderSync(snap);
+    } catch {
+      statusEl.classList.add('idle');
+      statusEl.textContent = 'Sync status unavailable.';
+    }
+  };
+  poll();
+  if (window.__syncProgressTimer) clearInterval(window.__syncProgressTimer);
+  window.__syncProgressTimer = setInterval(poll, 2000);
+}
 function upscaleTmdbImage(url, kind){
   const raw = String(url || '');
   if (!raw) return raw;
-  if (!raw.includes('image.tmdb.org/t/p/')) return raw;
-  const target = kind === 'bg' ? 'w1280' : 'w780';
-  const re = new RegExp('/t/p/(original|w[0-9]+)', 'i');
-  return raw.replace(re, '/t/p/' + target);
+  if (raw.includes('image.tmdb.org/t/p/')) {
+    // Website cards are small; keep TMDB assets lighter for faster loading.
+    // (Stremio high-res sizing is handled server-side by withStremioMetaAssets.)
+    const target = kind === 'bg' ? 'w780' : 'w342';
+    const re = new RegExp('/t/p/(original|w[0-9]+)', 'i');
+    return raw.replace(re, '/t/p/' + target);
+  }
+  if (raw.includes('images.metahub.space/')) {
+    // Prefer lighter MetaHub sizes in web Customize view.
+    const target = kind === 'bg' ? 'medium' : 'small';
+    return raw.replace(/\/(small|medium|large|original)\//i, '/' + target + '/');
+  }
+  return raw;
 }
 async function saveCustomOrder(lsid, order){
   const r = await fetch('/api/custom-order?admin='+ADMIN, {method:'POST',headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lsid, order })});
@@ -5459,6 +5795,8 @@ document.addEventListener('DOMContentLoaded', () => {
       window.location.href = url;
     };
   }
+
+  wireSyncProgress();
 
   document.querySelectorAll('.nav-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -6534,10 +6872,11 @@ async function render() {
       const raw = JSON.parse(localStorage.getItem('coolTitleCards') || '{}');
       return {
         shape: raw.shape === 'landscape' ? 'landscape' : 'portrait',
-        bg: raw.bg !== false
+        bg: raw.bg !== false,
+        titleLogo: raw.titleLogo === true
       };
     } catch {
-      return { shape: 'portrait', bg: true };
+      return { shape: 'portrait', bg: true, titleLogo: false };
     }
   };
   let coolCards = parseCoolCards();
@@ -6622,17 +6961,23 @@ async function render() {
   const coolCardsLandscapeBtn = document.getElementById('coolCardsLandscapeBtn');
   const coolCardsBgOffBtn = document.getElementById('coolCardsBgOffBtn');
   const coolCardsBgOnBtn = document.getElementById('coolCardsBgOnBtn');
+  const coolCardsTitleLogoOffBtn = document.getElementById('coolCardsTitleLogoOffBtn');
+  const coolCardsTitleLogoOnBtn = document.getElementById('coolCardsTitleLogoOnBtn');
   const applyCoolCardsControls = () => {
     if (coolCardsPortraitBtn) coolCardsPortraitBtn.classList.toggle('active', coolCards.shape === 'portrait');
     if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.classList.toggle('active', coolCards.shape === 'landscape');
     if (coolCardsBgOffBtn) coolCardsBgOffBtn.classList.toggle('active', !coolCards.bg);
     if (coolCardsBgOnBtn) coolCardsBgOnBtn.classList.toggle('active', !!coolCards.bg);
+    if (coolCardsTitleLogoOffBtn) coolCardsTitleLogoOffBtn.classList.toggle('active', !coolCards.titleLogo);
+    if (coolCardsTitleLogoOnBtn) coolCardsTitleLogoOnBtn.classList.toggle('active', !!coolCards.titleLogo);
   };
   applyCoolCardsControls();
   if (coolCardsPortraitBtn) coolCardsPortraitBtn.onclick = () => { coolCards.shape = 'portrait'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.onclick = () => { coolCards.shape = 'landscape'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsBgOffBtn) coolCardsBgOffBtn.onclick = () => { coolCards.bg = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsBgOnBtn) coolCardsBgOnBtn.onclick = () => { coolCards.bg = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsTitleLogoOffBtn) coolCardsTitleLogoOffBtn.onclick = () => { coolCards.titleLogo = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsTitleLogoOnBtn) coolCardsTitleLogoOnBtn.onclick = () => { coolCards.titleLogo = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
 
   if (advancedToggle) {
     const saved = !isSimpleMode && localStorage.getItem('advancedMode') === 'true';
@@ -6872,6 +7217,7 @@ async function render() {
 
       function liFor(it){
         const li = el('li',{class:'thumb','data-id':it.id,draggable:'true'});
+        li.title = it.name || it.id || '';
         li.appendChild(el('div',{class:'del',text:'×'}));
         li.querySelector('.del').onclick = async (e)=>{
           e.stopPropagation();
@@ -6887,8 +7233,18 @@ async function render() {
         const bgUrl = it.background || it.backdrop || posterUrl || '';
         if (bgUrl) { const safeBg = encodeURI(String(upscaleTmdbImage(bgUrl, 'bg'))); li.style.setProperty('--cool-bg', 'url("' + safeBg + '")'); }
         const img = el('img',{src: upscaleTmdbImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
-        const wrap = el('div',{},[
-          el('div',{class:'title',text: it.name || it.id}),
+        const titleText = it.name || it.id;
+        const titleEl = el('div',{class:'title',text: titleText});
+        if (coolCards.titleLogo && it.logo) {
+          const logoEl = el('img', { class: 'title-logo', src: upscaleTmdbImage(it.logo, 'poster'), alt: titleText || 'Title logo', title: titleText || '' });
+          logoEl.onerror = () => {
+            titleEl.textContent = titleText;
+          };
+          titleEl.textContent = '';
+          titleEl.appendChild(logoEl);
+        }
+        const wrap = el('div',{class:'thumb-meta'},[
+          titleEl,
           el('div',{class:'id',text: it.id})
         ]);
 
