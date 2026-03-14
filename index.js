@@ -151,6 +151,7 @@ let SYNC_PROGRESS = {
   inProgress: false,
   phase: "idle",
   startedAt: 0,
+  phaseStartedAt: 0,
   elapsedMs: 0,
   etaMs: null,
   totalLists: 0,
@@ -485,6 +486,20 @@ function linkBackupPath(lsid) {
 
 const minutes = ms => Math.round(ms/60000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function runWithConcurrency(items, limit, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const cap = Math.max(1, Number(limit) || 1);
+  const out = new Array(list.length);
+  let idx = 0;
+  const runners = Array.from({ length: Math.min(cap, list.length || 1) }, async () => {
+    while (idx < list.length) {
+      const i = idx++;
+      out[i] = await worker(list[i], i);
+    }
+  });
+  await Promise.all(runners);
+  return out;
+}
 const clampSortOptions = arr => (Array.isArray(arr) ? arr.filter(x => VALID_SORT.has(x)) : []);
 let supabaseApiPromise = null;
 const supabaseNoopApi = {
@@ -2747,6 +2762,7 @@ async function fullSync({ rediscover = true, force = false } = {}) {
     inProgress: true,
     phase: "discovering",
     startedAt: started,
+    phaseStartedAt: started,
     elapsedMs: 0,
     etaMs: null,
     totalLists: 0,
@@ -2810,7 +2826,14 @@ async function fullSync({ rediscover = true, force = false } = {}) {
     // pull items for each list (IMDb or Trakt)
     const uniques = new Set();
     const syncIds = Object.keys(next);
-    setSyncProgress({ phase: "lists", totalLists: syncIds.length, processedLists: 0, message: `Syncing 0/${syncIds.length} lists…` });
+    const progressListIds = syncIds.filter(id => {
+      const frozenSnapshot = PREFS.frozenLists && PREFS.frozenLists[id];
+      const customMeta = PREFS.customLists && PREFS.customLists[id];
+      return !frozenSnapshot && !customMeta;
+    });
+    const totalListProgress = progressListIds.length;
+    let processedListProgress = 0;
+    setSyncProgress({ phase: "lists", totalLists: totalListProgress, processedLists: 0, message: `Syncing 0/${totalListProgress} lists…` });
     for (const id of syncIds) {
       const list = next[id];
       const frozenSnapshot = PREFS.frozenLists && PREFS.frozenLists[id];
@@ -2898,27 +2921,47 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 
       list.ids = raw.slice();
       raw.forEach(tt => uniques.add(tt));
-      const doneLists = Number(SYNC_PROGRESS.processedLists || 0) + 1;
+      processedListProgress++;
       setSyncProgress({
         phase: "lists",
-        processedLists: doneLists,
+        processedLists: processedListProgress,
         currentList: id,
-        message: `Syncing ${doneLists}/${syncIds.length} lists…`
+        message: `Syncing ${processedListProgress}/${totalListProgress} lists…`
       });
       await sleep(60);
     }
 
     // episode → series (optional)
     let idsToPreload = Array.from(uniques);
+
+    setSyncProgress({
+      phase: "resolving",
+      currentList: "",
+      totalMeta: idsToPreload.length,
+      processedMeta: 0,
+      message: "Resolving IDs and episode upgrades…"
+    });
     if (PREFS.upgradeEpisodes) {
-      const up = new Set();
-      for (const tt of idsToPreload) {
+      let resolveDone = 0;
+      const resolved = await runWithConcurrency(idsToPreload, 6, async (tt) => {
         const rec = await getBestMeta(tt);
+        let fin = tt;
         if (!rec.meta) {
           const s = await episodeParentSeries(tt);
-          up.add(s && isImdb(s) ? s : tt);
-        } else up.add(tt);
-      }
+          if (s && isImdb(s)) fin = s;
+        }
+        resolveDone++;
+        if (resolveDone <= 5 || resolveDone % 50 === 0 || resolveDone === idsToPreload.length) {
+          setSyncProgress({
+            phase: "resolving",
+            processedMeta: resolveDone,
+            message: `Resolving IDs and episode upgrades ${resolveDone}/${idsToPreload.length}…`
+          });
+        }
+        return fin;
+      });
+      const up = new Set();
+      for (const fin of resolved) if (fin) up.add(fin);
       idsToPreload = Array.from(up);
 
       const remap = (arr) => {
@@ -2965,18 +3008,18 @@ async function fullSync({ rediscover = true, force = false } = {}) {
         message: `Refreshing metadata 0/${idsToPreload.length}…`
       });
       let metaDone = 0;
-      for (const tt of idsToPreload) {
+      await runWithConcurrency(idsToPreload, 8, async (tt) => {
         await getBestMeta(tt);
         CARD.set(tt, cardFor(tt));
         metaDone++;
-        if (metaDone <= 5 || metaDone % 25 === 0 || metaDone === idsToPreload.length) {
+        if (metaDone <= 5 || metaDone % 50 === 0 || metaDone === idsToPreload.length) {
           setSyncProgress({
             phase: "metadata",
             processedMeta: metaDone,
             message: `Refreshing metadata ${metaDone}/${idsToPreload.length}…`
           });
         }
-      }
+      });
     } else {
       console.log("[SYNC] card preload skipped (PRELOAD_CARDS=false)");
     }
@@ -3046,26 +3089,43 @@ async function fullSync({ rediscover = true, force = false } = {}) {
 function syncProgressSnapshot() {
   const now = Date.now();
   const startedAt = Number(SYNC_PROGRESS.startedAt) || 0;
+  const phaseStartedAt = Number(SYNC_PROGRESS.phaseStartedAt || startedAt) || 0;
   const elapsedMs = SYNC_PROGRESS.inProgress && startedAt ? (now - startedAt) : (Number(SYNC_PROGRESS.elapsedMs) || 0);
-  const totalSteps = Math.max(0, Number(SYNC_PROGRESS.totalLists || 0)) + Math.max(0, Number(SYNC_PROGRESS.totalMeta || 0));
-  const doneSteps = Math.max(0, Number(SYNC_PROGRESS.processedLists || 0)) + Math.max(0, Number(SYNC_PROGRESS.processedMeta || 0));
+  const listTotal = Math.max(0, Number(SYNC_PROGRESS.totalLists || 0));
+  const listDone = Math.max(0, Number(SYNC_PROGRESS.processedLists || 0));
+  const metaTotal = Math.max(0, Number(SYNC_PROGRESS.totalMeta || 0));
+  const metaDone = Math.max(0, Number(SYNC_PROGRESS.processedMeta || 0));
+  const totalSteps = listTotal + metaTotal;
+  const doneSteps = listDone + metaDone;
   const pct = totalSteps > 0 ? Math.max(0, Math.min(100, (doneSteps / totalSteps) * 100)) : (SYNC_PROGRESS.inProgress ? 0 : 100);
-  let etaMs = SYNC_PROGRESS.etaMs;
-  if (SYNC_PROGRESS.inProgress && totalSteps > 0 && doneSteps > 0) {
-    const remainingSteps = Math.max(0, totalSteps - doneSteps);
-    const perStep = elapsedMs / doneSteps;
-    etaMs = Math.round(remainingSteps * perStep);
+
+  let etaMs = null;
+  if (SYNC_PROGRESS.inProgress) {
+    if (SYNC_PROGRESS.phase === "lists" && listTotal > 0 && listDone > 0 && listDone < listTotal) {
+      const phaseElapsed = Math.max(0, now - phaseStartedAt);
+      const perList = phaseElapsed / listDone;
+      etaMs = Math.round(Math.max(0, listTotal - listDone) * perList);
+    } else if (SYNC_PROGRESS.phase === "metadata" && metaTotal > 0 && metaDone > 0 && metaDone < metaTotal) {
+      const phaseElapsed = Math.max(0, now - phaseStartedAt);
+      const perMeta = phaseElapsed / metaDone;
+      etaMs = Math.round(Math.max(0, metaTotal - metaDone) * perMeta);
+    } else if (SYNC_PROGRESS.phase === "finalizing") {
+      etaMs = 0;
+    }
+  } else if (Number.isFinite(Number(SYNC_PROGRESS.etaMs))) {
+    etaMs = Number(SYNC_PROGRESS.etaMs);
   }
+
   return {
     inProgress: !!SYNC_PROGRESS.inProgress,
     phase: SYNC_PROGRESS.phase || "idle",
     startedAt,
     elapsedMs,
     etaMs: Number.isFinite(etaMs) ? Math.max(0, etaMs) : null,
-    totalLists: Number(SYNC_PROGRESS.totalLists || 0),
-    processedLists: Number(SYNC_PROGRESS.processedLists || 0),
-    totalMeta: Number(SYNC_PROGRESS.totalMeta || 0),
-    processedMeta: Number(SYNC_PROGRESS.processedMeta || 0),
+    totalLists: listTotal,
+    processedLists: listDone,
+    totalMeta: metaTotal,
+    processedMeta: metaDone,
     percent: Math.round(pct * 10) / 10,
     currentList: SYNC_PROGRESS.currentList || "",
     message: SYNC_PROGRESS.message || ""
@@ -3073,9 +3133,12 @@ function syncProgressSnapshot() {
 }
 
 function setSyncProgress(patch = {}) {
+  const nextPhase = typeof patch.phase === "string" ? patch.phase : SYNC_PROGRESS.phase;
+  const phaseChanged = nextPhase !== SYNC_PROGRESS.phase;
   SYNC_PROGRESS = {
     ...SYNC_PROGRESS,
-    ...patch
+    ...patch,
+    phaseStartedAt: phaseChanged ? Date.now() : (Number(SYNC_PROGRESS.phaseStartedAt) || Number(SYNC_PROGRESS.startedAt) || 0)
   };
 }
 
@@ -5716,7 +5779,7 @@ async function getPrefs(){ const r = await fetch('/api/prefs?admin='+ADMIN); ret
 async function getLists(){ const r = await fetch('/api/lists?admin='+ADMIN); return r.json(); }
 async function getListItems(lsid){ const r = await fetch('/api/list-items?admin='+ADMIN+'&lsid='+encodeURIComponent(lsid)); return r.json(); }
 async function getDiscovered(){ const r = await fetch('/api/discovered?admin='+ADMIN); return r.json(); }
-async function getSyncProgress(){ const r = await fetch('/api/sync-progress?admin='+ADMIN); if (!r.ok) throw new Error('sync progress failed'); return r.json(); }
+async function getSyncProgress(signal){ const r = await fetch('/api/sync-progress?admin='+ADMIN, { signal }); if (!r.ok) throw new Error('sync progress failed'); return r.json(); }
 function fmtEta(ms){
   const sec = Math.max(0, Math.round(Number(ms || 0) / 1000));
   if (!sec) return '0s';
@@ -5732,40 +5795,93 @@ function wireSyncProgress() {
   const statusEl = document.getElementById('syncLiveStatus');
   const fillEl = document.getElementById('syncLiveFill');
   if (!statusEl || !fillEl) return;
+
+  let lastSnap = null;
+  let pollInFlight = false;
+  let stopped = false;
+  const POLL_ACTIVE_MS = 5000;
+  const POLL_IDLE_MS = 15000;
+
   const renderSync = (snap) => {
-    const pct = Math.max(0, Math.min(100, Number(snap?.percent || 0)));
+    lastSnap = snap || lastSnap;
+    const view = snap || lastSnap || null;
+    const pct = Math.max(0, Math.min(100, Number(view?.percent || 0)));
     fillEl.style.width = pct + '%';
-    if (!snap || !snap.inProgress) {
+    if (!view || !view.inProgress) {
       statusEl.classList.add('idle');
-      statusEl.textContent = snap?.phase === 'error'
-        ? (snap.message || 'Sync failed. Check logs.')
-        : (snap?.message || 'Sync idle.');
+      statusEl.textContent = view?.phase === 'error'
+        ? (view.message || 'Sync failed. Check logs.')
+        : (view?.message || 'Sync idle.');
       return;
     }
     statusEl.classList.remove('idle');
-    const etaText = Number.isFinite(Number(snap.etaMs)) ? fmtEta(snap.etaMs) : 'estimating…';
-    const listText = "lists " + (snap.processedLists || 0) + "/" + (snap.totalLists || 0);
-    const metaText = "meta " + (snap.processedMeta || 0) + "/" + (snap.totalMeta || 0);
-    statusEl.textContent = (snap.message || 'Syncing…') + ' (' + pct.toFixed(1) + '%) • ' + listText + ' • ' + metaText + ' • ETA ' + etaText;
+    const hasEta = view.etaMs !== null && view.etaMs !== undefined && Number.isFinite(Number(view.etaMs));
+    const etaText = hasEta ? fmtEta(view.etaMs) : 'estimating…';
+    const listText = 'lists ' + (view.processedLists || 0) + '/' + (view.totalLists || 0);
+    const metaText = 'meta ' + (view.processedMeta || 0) + '/' + (view.totalMeta || 0);
+    statusEl.textContent = (view.message || 'Syncing…') + ' (' + pct.toFixed(1) + '%) • ' + listText + ' • ' + metaText + ' • ETA ' + etaText;
   };
+
+  if (window.__syncProgressTimer) clearTimeout(window.__syncProgressTimer);
+  const schedulePoll = (delay) => {
+    if (stopped) return;
+    window.__syncProgressTimer = setTimeout(poll, delay);
+  };
+
   const poll = async () => {
+    if (stopped) return;
+    if (document.visibilityState === 'hidden') {
+      schedulePoll(POLL_IDLE_MS);
+      return;
+    }
+    if (pollInFlight) {
+      schedulePoll(POLL_ACTIVE_MS);
+      return;
+    }
+
+    pollInFlight = true;
+    const ac = new AbortController();
+    const timeout = setTimeout(() => ac.abort(), 2500);
     try {
-      const snap = await getSyncProgress();
+      const snap = await getSyncProgress(ac.signal);
       renderSync(snap);
     } catch {
+      renderSync(lastSnap);
       statusEl.classList.add('idle');
       statusEl.textContent = 'Sync status unavailable.';
+    } finally {
+      clearTimeout(timeout);
+      pollInFlight = false;
+      const delay = lastSnap?.inProgress ? POLL_ACTIVE_MS : POLL_IDLE_MS;
+      schedulePoll(delay);
     }
   };
+
+  const onVisibility = () => {
+    if (document.visibilityState === 'visible' && !pollInFlight) {
+      if (window.__syncProgressTimer) clearTimeout(window.__syncProgressTimer);
+      schedulePoll(250);
+    }
+  };
+  const stopPolling = () => {
+    stopped = true;
+    if (window.__syncProgressTimer) clearTimeout(window.__syncProgressTimer);
+  };
+
+  document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('pagehide', stopPolling, { once: true });
+  window.addEventListener('beforeunload', stopPolling, { once: true });
+
   poll();
-  if (window.__syncProgressTimer) clearInterval(window.__syncProgressTimer);
-  window.__syncProgressTimer = setInterval(poll, 2000);
 }
-function upscaleTmdbImage(url, kind){
+
+function websiteImage(url, kind){
   const raw = String(url || '');
   if (!raw) return raw;
   if (!raw.includes('image.tmdb.org/t/p/')) return raw;
-  const target = kind === 'bg' ? 'w1280' : 'w780';
+  let target = 'w342';
+  if (kind === 'bg') target = 'w780';
+  else if (kind === 'logo') target = 'w300';
   const re = new RegExp('/t/p/(original|w[0-9]+)', 'i');
   return raw.replace(re, '/t/p/' + target);
 }
@@ -6187,7 +6303,7 @@ function createTitleSearchWidget({ lsid = '', onAdd = null, onAddCollection = nu
     items.forEach((item) => {
       const rowEl = el('div', { class: 'title-search-item' });
       const poster = document.createElement('img');
-      poster.src = item.poster || 'https://images.metahub.space/poster/small/tt0111161/img';
+      poster.src = websiteImage(item.poster, 'poster') || 'https://images.metahub.space/poster/small/tt0111161/img';
       poster.alt = item.title || 'Poster';
       const meta = el('div', { class: 'meta' });
       const typeLabel = item.mediaType === 'tv' ? 'Series' : (item.mediaType === 'collection' ? 'Collection' : 'Movie');
@@ -7222,12 +7338,12 @@ async function render() {
           ? (it.background || it.backdrop || it.poster || '')
           : (it.poster || it.background || it.backdrop || '');
         const bgUrl = it.background || it.backdrop || posterUrl || '';
-        if (bgUrl) { const safeBg = encodeURI(String(upscaleTmdbImage(bgUrl, 'bg'))); li.style.setProperty('--cool-bg', 'url("' + safeBg + '")'); }
-        const img = el('img',{src: upscaleTmdbImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
+        if (bgUrl) { const safeBg = encodeURI(String(websiteImage(bgUrl, 'bg'))); li.style.setProperty('--cool-bg', 'url("' + safeBg + '")'); }
+        const img = el('img',{src: websiteImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
         const titleText = it.name || it.id;
         const titleEl = el('div',{class:'title',text: titleText});
         if (coolCards.titleLogo && it.logo) {
-          const logoEl = el('img', { class: 'title-logo', src: upscaleTmdbImage(it.logo, 'poster'), alt: titleText || 'Title logo', title: titleText || '' });
+          const logoEl = el('img', { class: 'title-logo', src: websiteImage(it.logo, 'logo'), alt: titleText || 'Title logo', title: titleText || '' });
           logoEl.onerror = () => {
             titleEl.textContent = titleText;
           };
@@ -7975,7 +8091,7 @@ async function render() {
       items.forEach((item) => {
         const row = el('div', { class: 'title-search-item' });
         const poster = document.createElement('img');
-        poster.src = item.poster || 'https://images.metahub.space/poster/small/' + 'tt0111161' + '/img';
+        poster.src = websiteImage(item.poster, 'poster') || 'https://images.metahub.space/poster/small/' + 'tt0111161' + '/img';
         poster.alt = item.title || 'Poster';
         const meta = el('div', { class: 'meta' });
         const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
