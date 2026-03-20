@@ -517,9 +517,41 @@ let saveTimer = null;
 let pendingSnapshot = null;
 
 async function fetchText(url) {
-  const r = await fetch(url, { headers: REQ_HEADERS, redirect: "follow" });
-  if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
-  return r.text();
+  const doFetchText = async (targetUrl) => {
+    const r = await fetch(targetUrl, { headers: REQ_HEADERS, redirect: "follow" });
+    if (!r.ok) throw new Error(`GET ${targetUrl} -> ${r.status}`);
+    return r.text();
+  };
+
+  const looksLikeAwsWafChallenge = (html) => {
+    const s = String(html || "");
+    return /AwsWafIntegration|challenge-container|token\.awswaf\.com/i.test(s);
+  };
+
+  const isImdbHttpUrl = (value) => {
+    try {
+      const u = new URL(value);
+      return /(^|\.)imdb\.com$/i.test(u.hostname);
+    } catch {
+      return false;
+    }
+  };
+
+  const primaryHtml = await doFetchText(url);
+  if (!looksLikeAwsWafChallenge(primaryHtml) || !isImdbHttpUrl(url)) return primaryHtml;
+
+  const mobileUrl = toMobileImdbUrl(url);
+  if (mobileUrl === url) return primaryHtml;
+
+  try {
+    const mobileHtml = await doFetchText(mobileUrl);
+    if (!looksLikeAwsWafChallenge(mobileHtml)) {
+      console.warn("[IMDb] AWS WAF challenge on desktop URL, using mobile fallback:", mobileUrl);
+      return mobileHtml;
+    }
+  } catch {}
+
+  return primaryHtml;
 }
 async function fetchJson(url) {
   const r = await fetch(url, { headers: { "User-Agent": UA, "Accept":"application/json" }, redirect:"follow" });
