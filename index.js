@@ -5399,6 +5399,27 @@ app.get("/admin", async (req,res)=>{
     padding:10px;
     background:rgba(12,10,26,.28);
   }
+  .advanced-col{
+    display:grid;
+    gap:10px;
+    align-content:start;
+    min-width:0;
+  }
+  .advanced-tools-grid{
+    display:grid;
+    gap:10px;
+    grid-template-columns:repeat(2,minmax(240px,1fr));
+    align-items:start;
+  }
+  @media(max-width:980px){
+    .advanced-tools-grid{grid-template-columns:1fr;}
+  }
+  .advanced-box{
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:10px;
+    background:rgba(12,10,26,.28);
+  }
   .advanced-row{
     display:flex;
     flex-wrap:wrap;
