@@ -4942,6 +4942,7 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     margin-top:8px;
     align-items:center;
+    flex-wrap:wrap;
   }
   .csv-inline-box{
     border:1px dashed var(--border);
@@ -4950,9 +4951,16 @@ app.get("/admin", async (req,res)=>{
     background:rgba(12,10,26,.35);
     width:100%;
     box-sizing:border-box;
+    overflow:hidden;
   }
   .csv-inline-box .mini{display:block;margin-bottom:6px;}
-  .csv-inline-box input[type="file"]{width:100%;}
+  .csv-inline-box input[type="file"]{
+    width:100%;
+    max-width:100%;
+    display:block;
+    min-width:0;
+    font-size:12px;
+  }
   .csv-inline-box.dragover{
     border-color:#c5b6ff;
     background:rgba(127, 120, 255, 0.15);
@@ -5366,11 +5374,30 @@ app.get("/admin", async (req,res)=>{
     background:#151130;
     display:grid;
     gap:12px;
-    grid-template-columns:minmax(320px,1.05fr) minmax(320px,1fr);
+    grid-template-columns:minmax(0,1fr);
+    align-items:start;
+  }
+  .advanced-col{
+    display:grid;
+    gap:10px;
+    align-content:start;
+    min-width:0;
+    width:100%;
+  }
+  .advanced-tools-grid{
+    display:grid;
+    gap:10px;
+    grid-template-columns:repeat(2,minmax(0,1fr));
     align-items:start;
   }
   @media(max-width:980px){
-    .advanced-panel{grid-template-columns:1fr;}
+    .advanced-tools-grid{grid-template-columns:1fr;}
+  }
+  .advanced-box{
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:10px;
+    background:rgba(12,10,26,.28);
   }
   .advanced-col{
     display:grid;
@@ -5407,6 +5434,7 @@ app.get("/admin", async (req,res)=>{
   }
   .advanced-row.actions-row .mini{width:100%;}
   .advanced-row.stack{display:grid;gap:8px;align-items:start;}
+  .advanced-row.stack > *{min-width:0;}
   .advanced-row.stack .imdb-box{margin:0;}
   .adv-inline-btn{margin-top:8px;margin-left:10px;padding:6px 10px;font-size:12px;}
   .hide-list-btn{display:block;margin-top:8px;padding:5px 10px;font-size:12px;}
