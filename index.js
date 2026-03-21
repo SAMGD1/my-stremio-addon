@@ -3938,21 +3938,37 @@ app.post("/api/list-import-csv", async (req, res) => {
     const lsid = String(req.body.lsid || "");
     const csvText = String(req.body.csvText || "");
     if (!isListId(lsid)) return res.status(400).send("Invalid lsid");
-    if (!isOfflineList(lsid)) return res.status(400).send("CSV upload only for offline lists");
-    const list = LISTS[lsid];
-    if (!list) return res.status(404).send("List not found");
-    const newIds = parseImdbCsv(csvText);
-    list.ids = appendUniqueIds(list.ids || [], newIds);
-    list.orders = list.orders || {};
-    list.orders.imdb = list.ids.slice();
-    for (const tt of newIds) {
+    const ids = parseImdbCsv(csvText);
+    if (!ids.length) return res.status(400).send("No IMDb IDs found in CSV");
+    const existing = new Set(listIdsWithEdits(lsid));
+    const toAdd = ids.filter(id => !existing.has(id));
+
+    if (isOfflineList(lsid)) {
+      const list = LISTS[lsid];
+      if (!list) return res.status(404).send("List not found");
+      list.ids = appendUniqueIds(list.ids || [], toAdd);
+      list.orders = list.orders || {};
+      list.orders.imdb = list.ids.slice();
+      await saveOfflineList(lsid);
+    } else {
+      PREFS.listEdits = PREFS.listEdits || {};
+      const ed = PREFS.listEdits[lsid] || (PREFS.listEdits[lsid] = { added: [], removed: [] });
+      toAdd.forEach(tt => {
+        if (!ed.added.includes(tt)) ed.added.push(tt);
+      });
+      ed.removed = (ed.removed || []).filter(x => !toAdd.includes(x));
+      syncFrozenEdits(lsid);
+    }
+
+    for (const tt of toAdd) {
       await getBestMeta(tt).catch(() => null);
       CARD.set(tt, cardFor(tt));
     }
-    await saveOfflineList(lsid);
+    pinAddedIdsToFront(lsid, toAdd, Array.isArray(req.body.visibleOrder) ? req.body.visibleOrder : null);
+    if (isBackedCustomList(lsid)) await saveCustomListBackup(lsid);
     LAST_MANIFEST_KEY = ""; MANIFEST_REV++;
     await persistSnapshot();
-    res.json({ ok: true, added: newIds.length, total: list.ids.length });
+    res.json({ ok: true, added: toAdd.length, requested: ids.length, total: listIdsWithEdits(lsid).length });
   } catch (e) { res.status(500).send("CSV import failed"); }
 });
 
@@ -4932,10 +4948,15 @@ app.get("/admin", async (req,res)=>{
     border-radius:12px;
     padding:10px;
     background:rgba(12,10,26,.35);
-    min-width:320px;
+    width:100%;
+    box-sizing:border-box;
   }
   .csv-inline-box .mini{display:block;margin-bottom:6px;}
   .csv-inline-box input[type="file"]{width:100%;}
+  .csv-inline-box.dragover{
+    border-color:#c5b6ff;
+    background:rgba(127, 120, 255, 0.15);
+  }
   .inline-note{font-size:12px;color:var(--muted);margin-left:8px}
   .sync-live{margin-top:10px;padding:8px 10px;border:1px solid rgba(122,106,221,.45);border-radius:10px;background:rgba(17,13,40,.55);}
   .sync-live-status{font-size:12px;color:#dcd8ff;display:block;margin-bottom:6px;}
@@ -5344,12 +5365,33 @@ app.get("/admin", async (req,res)=>{
     border:1px solid var(--border);
     background:#151130;
     display:grid;
-    gap:10px;
-    grid-template-columns:minmax(260px,1.3fr) minmax(280px,1fr);
+    gap:12px;
+    grid-template-columns:minmax(320px,1.05fr) minmax(320px,1fr);
     align-items:start;
   }
   @media(max-width:980px){
     .advanced-panel{grid-template-columns:1fr;}
+  }
+  .advanced-col{
+    display:grid;
+    gap:10px;
+    align-content:start;
+    min-width:0;
+  }
+  .advanced-tools-grid{
+    display:grid;
+    gap:10px;
+    grid-template-columns:repeat(2,minmax(240px,1fr));
+    align-items:start;
+  }
+  @media(max-width:980px){
+    .advanced-tools-grid{grid-template-columns:1fr;}
+  }
+  .advanced-box{
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:10px;
+    background:rgba(12,10,26,.28);
   }
   .advanced-row{
     display:flex;
@@ -5357,6 +5399,13 @@ app.get("/admin", async (req,res)=>{
     gap:8px;
     align-items:center;
   }
+  .advanced-row.rename-row input{flex:1 1 260px;}
+  .advanced-row.rename-row button{flex:0 0 auto;}
+  .advanced-row.actions-row{
+    justify-content:flex-start;
+    align-items:flex-start;
+  }
+  .advanced-row.actions-row .mini{width:100%;}
   .advanced-row.stack{display:grid;gap:8px;align-items:start;}
   .advanced-row.stack .imdb-box{margin:0;}
   .adv-inline-btn{margin-top:8px;margin-left:10px;padding:6px 10px;font-size:12px;}
@@ -7846,7 +7895,9 @@ async function render() {
     }
 
     const advancedPanel = el('div', { class: 'advanced-panel landscape' });
-    const renameRow = el('div', { class: 'advanced-row' });
+    const controlsCol = el('div', { class: 'advanced-col' });
+    const toolsCol = el('div', { class: 'advanced-col' });
+    const renameRow = el('div', { class: 'advanced-row rename-row' });
     const renameInput = el('input', { type: 'text', value: displayName(lsid), placeholder: 'Rename list' });
     const renameBtn = el('button', { type: 'button', text: 'Save name' });
     const renameStatus = el('span', { class: 'mini muted' });
@@ -7872,7 +7923,7 @@ async function render() {
     renameRow.appendChild(renameBtn);
     renameRow.appendChild(renameStatus);
 
-    const actionRow = el('div', { class: 'advanced-row' });
+    const actionRow = el('div', { class: 'advanced-row actions-row' });
     const dupBtn = el('button', { type: 'button', text: 'Duplicate' });
     const status = el('span', { class: 'mini muted' });
     let freezeBtn = null;
@@ -7977,91 +8028,10 @@ async function render() {
       return menu;
     }
 
-    if (isOfflineList) {
-      const csvBox = el('div', { class: 'csv-inline-box' });
-      const csvTitle = el('span', { class: 'mini', text: 'Add CSV from IMDb (drag/drop or choose file)' });
-      const csvInput = el('input', { type: 'file', accept: '.csv,text/csv' });
-      const csvActions = el('div', { class: 'csv-actions' });
-      const csvImportBtn = el('button', { type: 'button', text: 'Import CSV', disabled: 'disabled' });
-      const csvCancelBtn = el('button', { type: 'button', text: 'Cancel CSV', class: 'btn2', disabled: 'disabled' });
-      let pendingCsvText = '';
-      let pendingCsvCount = 0;
-
-      const setPending = (text, count) => {
-        pendingCsvText = text || '';
-        pendingCsvCount = Number.isFinite(count) ? count : 0;
-        const has = !!pendingCsvText;
-        csvImportBtn.disabled = !has;
-        csvCancelBtn.disabled = !has;
-      };
-      const readCsv = async (file) => {
-        if (!file) return;
-        status.textContent = 'Reading CSV…';
-        try {
-          const text = await file.text();
-          const count = parseCsvImdbIds(text).length;
-          setPending(text, count);
-          status.textContent = count
-            ? ('CSV ready: ' + count + ' IMDb IDs. Click Import CSV.')
-            : 'No IMDb IDs found in CSV.';
-        } catch (e) {
-          setPending('', 0);
-          status.textContent = 'CSV read failed.';
-        } finally {
-          csvInput.value = '';
-        }
-      };
-
-      csvInput.onchange = async () => {
-        const file = csvInput.files && csvInput.files[0];
-        await readCsv(file);
-      };
-      csvBox.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        csvBox.classList.add('dragover');
-      });
-      csvBox.addEventListener('dragleave', () => csvBox.classList.remove('dragover'));
-      csvBox.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        csvBox.classList.remove('dragover');
-        const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-        await readCsv(file);
-      });
-
-      csvImportBtn.onclick = async () => {
-        if (!pendingCsvText) return;
-        status.textContent = 'Importing CSV…';
-        try {
-          const r = await fetch('/api/list-import-csv?admin=' + ADMIN, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lsid, csvText: pendingCsvText })
-          });
-          if (!r.ok) throw new Error(await r.text());
-          status.textContent = 'CSV imported (' + pendingCsvCount + ' IDs).';
-          setPending('', 0);
-          await refresh();
-        } catch (e) {
-          status.textContent = e.message || 'CSV import failed.';
-        }
-      };
-      csvCancelBtn.onclick = () => {
-        setPending('', 0);
-        csvInput.value = '';
-        status.textContent = 'CSV selection cleared.';
-      };
-
-      csvActions.appendChild(csvImportBtn);
-      csvActions.appendChild(csvCancelBtn);
-      csvBox.appendChild(csvTitle);
-      csvBox.appendChild(csvInput);
-      csvBox.appendChild(csvActions);
-      actionRow.appendChild(csvBox);
-    }
     actionRow.appendChild(status);
 
     const bulkRow = el('div', { class: 'advanced-row stack' });
-    const bulkBox = el('div', { class: 'imdb-box' });
+    const bulkBox = el('div', { class: 'imdb-box advanced-box' });
     const bulkLabel = el('label', { class: 'mini bulk-label', text: 'Add those IMDb tt in bulk' });
     const bulkInput = el('textarea', { placeholder: 'tt1234567 tt7654321 or IMDb URLs', spellcheck: 'false' });
     const bulkBtn = el('button', { class: 'bulk-btn', type: 'button', text: 'Add bulk' });
@@ -8071,6 +8041,93 @@ async function render() {
     bulkBox.appendChild(bulkBtn);
     bulkBox.appendChild(bulkStatus);
     bulkRow.appendChild(bulkBox);
+
+    const csvWrap = el('div', { class: 'advanced-row stack' });
+    const csvBox = el('div', { class: 'csv-inline-box advanced-box' });
+    const csvTitle = el('span', { class: 'mini', text: 'Add CSV from IMDb (drag/drop or choose file)' });
+    const csvInput = el('input', { type: 'file', accept: '.csv,text/csv' });
+    const csvActions = el('div', { class: 'csv-actions' });
+    const csvImportBtn = el('button', { type: 'button', text: 'Import CSV', disabled: 'disabled' });
+    const csvCancelBtn = el('button', { type: 'button', text: 'Cancel CSV', class: 'btn2', disabled: 'disabled' });
+    let pendingCsvText = '';
+    let pendingCsvCount = 0;
+
+    const setPendingCsv = (text, count) => {
+      pendingCsvText = text || '';
+      pendingCsvCount = Number.isFinite(count) ? count : 0;
+      const has = !!pendingCsvText;
+      csvImportBtn.disabled = !has;
+      csvCancelBtn.disabled = !has;
+    };
+    const readCsv = async (file) => {
+      if (!file) return;
+      status.textContent = 'Reading CSV…';
+      try {
+        const text = await file.text();
+        const count = parseCsvImdbIds(text).length;
+        setPendingCsv(text, count);
+        status.textContent = count
+          ? ('CSV ready: ' + count + ' IMDb IDs. Click Import CSV.')
+          : 'No IMDb IDs found in CSV.';
+      } catch (e) {
+        setPendingCsv('', 0);
+        status.textContent = 'CSV read failed.';
+      } finally {
+        csvInput.value = '';
+      }
+    };
+
+    csvInput.onchange = async () => {
+      const file = csvInput.files && csvInput.files[0];
+      await readCsv(file);
+    };
+    csvBox.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      csvBox.classList.add('dragover');
+    });
+    csvBox.addEventListener('dragleave', () => csvBox.classList.remove('dragover'));
+    csvBox.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      csvBox.classList.remove('dragover');
+      const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      await readCsv(file);
+    });
+
+    csvImportBtn.onclick = async () => {
+      if (!pendingCsvText) return;
+      status.textContent = 'Importing CSV…';
+      try {
+        const drawer = document.querySelector('tr[data-drawer-for="'+lsid+'"]');
+        let visibleOrder = null;
+        if (drawer && drawer.style.display !== "none") {
+          const listEl = drawer.querySelector('ul.thumbs');
+          if (listEl) visibleOrder = Array.from(listEl.querySelectorAll('li.thumb[data-id]')).map(li => li.getAttribute('data-id')).filter(Boolean);
+        }
+        const r = await fetch('/api/list-import-csv?admin=' + ADMIN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lsid, csvText: pendingCsvText, visibleOrder })
+        });
+        if (!r.ok) throw new Error(await r.text());
+        status.textContent = 'CSV imported (' + pendingCsvCount + ' IDs).';
+        setPendingCsv('', 0);
+        await refresh();
+      } catch (e) {
+        status.textContent = e.message || 'CSV import failed.';
+      }
+    };
+    csvCancelBtn.onclick = () => {
+      setPendingCsv('', 0);
+      csvInput.value = '';
+      status.textContent = 'CSV selection cleared.';
+    };
+
+    csvActions.appendChild(csvImportBtn);
+    csvActions.appendChild(csvCancelBtn);
+    csvBox.appendChild(csvTitle);
+    csvBox.appendChild(csvInput);
+    csvBox.appendChild(csvActions);
+    csvWrap.appendChild(csvBox);
     const doBulkAdd = async () => {
       const ids = parseImdbIdsFromText(bulkInput.value);
       if (!ids.length) { alert('Enter IMDb ids or IMDb URLs.'); return; }
@@ -8225,17 +8282,24 @@ async function render() {
     mainRow.appendChild(mainBtnAdvanced);
     mainRow.appendChild(mainLabel);
 
-    advancedPanel.appendChild(renameRow);
-    advancedPanel.appendChild(actionRow);
-    if (!isOfflineList) advancedPanel.appendChild(mainRow);
-    advancedPanel.appendChild(bulkRow);
+    controlsCol.appendChild(renameRow);
+    controlsCol.appendChild(actionRow);
+    if (!isOfflineList) controlsCol.appendChild(mainRow);
+
+    const toolsGrid = el('div', { class: 'advanced-tools-grid' });
+    toolsGrid.appendChild(bulkRow);
+    toolsGrid.appendChild(csvWrap);
+    toolsCol.appendChild(toolsGrid);
+
+    advancedPanel.appendChild(controlsCol);
+    advancedPanel.appendChild(toolsCol);
     // Safety: never show TMDB title search inside advanced inline panel.
     advancedPanel.querySelectorAll('.title-search-box').forEach(node => node.remove());
     if (isCustom) {
       const customNote = el('div', { class: 'mini muted', text: isOfflineList ? 'Manual list: stored locally and deleted permanently.' : 'Custom list: delete removes it permanently.' });
       const noteWrap = el('div', { class: 'advanced-row' });
       noteWrap.appendChild(customNote);
-      advancedPanel.appendChild(noteWrap);
+      controlsCol.appendChild(noteWrap);
     }
 
     const advancedDrawer = el('tr', { class: 'advanced-drawer', 'data-advanced-for': lsid });
