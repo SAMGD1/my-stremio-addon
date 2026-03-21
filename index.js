@@ -3278,7 +3278,14 @@ async function syncSingleList(lsid, { manual = false } = {}) {
 
 // ----------------- SERVER -----------------
 const app = express();
-app.use((_, res, next) => { res.setHeader("Access-Control-Allow-Origin", "*"); next(); });
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-key");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "1mb" }));
 
 function addonAllowed(req){
