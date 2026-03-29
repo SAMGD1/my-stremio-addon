@@ -3661,7 +3661,18 @@ app.get("/stream-remove/:type/:id", async (req, res) => {
 // ------- Admin + debug & new endpoints -------
 app.get("/api/lists", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
-  res.json(LISTS);
+  // Merge per-list sort preferences into each list entry so consumers
+  // (e.g. Cineverse) can mirror the same default sort without an extra
+  // round-trip to /api/prefs.
+  const out = {};
+  for (const [id, list] of Object.entries(LISTS)) {
+    out[id] = {
+      ...list,
+      sortKey:     PREFS.perListSort?.[id] || "",
+      sortReverse: !!(PREFS.sortReverse?.[id])
+    };
+  }
+  res.json(out);
 });
 app.get("/api/prefs", (req,res) => {
   if (!adminAllowed(req)) return res.status(403).send("Forbidden");
