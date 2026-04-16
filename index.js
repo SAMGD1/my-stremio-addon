@@ -5850,6 +5850,13 @@ app.get("/admin", async (req,res)=>{
                   <button type="button" id="coolCardsTitleLogoOnBtn">On</button>
                 </div>
               </div>
+              <div class="move-style-toggle" aria-label="Custom title card type tag mode" style="margin-top:8px;">
+                <span class="mini muted">Item type tag</span>
+                <div class="seg" role="group" aria-label="Item type tag mode">
+                  <button type="button" id="coolCardsTypeTagOffBtn">Off</button>
+                  <button type="button" id="coolCardsTypeTagOnBtn">On</button>
+                </div>
+              </div>
               <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
             </div>
           </details>
@@ -7137,10 +7144,11 @@ async function render() {
       return {
         shape: raw.shape === 'landscape' ? 'landscape' : 'portrait',
         bg: raw.bg !== false,
-        titleLogo: raw.titleLogo === true
+        titleLogo: raw.titleLogo === true,
+        typeTag: raw.typeTag !== false
       };
     } catch {
-      return { shape: 'portrait', bg: true, titleLogo: false };
+      return { shape: 'portrait', bg: true, titleLogo: false, typeTag: true };
     }
   };
   let coolCards = parseCoolCards();
@@ -7227,6 +7235,8 @@ async function render() {
   const coolCardsBgOnBtn = document.getElementById('coolCardsBgOnBtn');
   const coolCardsTitleLogoOffBtn = document.getElementById('coolCardsTitleLogoOffBtn');
   const coolCardsTitleLogoOnBtn = document.getElementById('coolCardsTitleLogoOnBtn');
+  const coolCardsTypeTagOffBtn = document.getElementById('coolCardsTypeTagOffBtn');
+  const coolCardsTypeTagOnBtn = document.getElementById('coolCardsTypeTagOnBtn');
   const applyCoolCardsControls = () => {
     if (coolCardsPortraitBtn) coolCardsPortraitBtn.classList.toggle('active', coolCards.shape === 'portrait');
     if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.classList.toggle('active', coolCards.shape === 'landscape');
@@ -7234,6 +7244,8 @@ async function render() {
     if (coolCardsBgOnBtn) coolCardsBgOnBtn.classList.toggle('active', !!coolCards.bg);
     if (coolCardsTitleLogoOffBtn) coolCardsTitleLogoOffBtn.classList.toggle('active', !coolCards.titleLogo);
     if (coolCardsTitleLogoOnBtn) coolCardsTitleLogoOnBtn.classList.toggle('active', !!coolCards.titleLogo);
+    if (coolCardsTypeTagOffBtn) coolCardsTypeTagOffBtn.classList.toggle('active', !coolCards.typeTag);
+    if (coolCardsTypeTagOnBtn) coolCardsTypeTagOnBtn.classList.toggle('active', !!coolCards.typeTag);
   };
   applyCoolCardsControls();
   if (coolCardsPortraitBtn) coolCardsPortraitBtn.onclick = () => { coolCards.shape = 'portrait'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
@@ -7242,6 +7254,8 @@ async function render() {
   if (coolCardsBgOnBtn) coolCardsBgOnBtn.onclick = () => { coolCards.bg = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsTitleLogoOffBtn) coolCardsTitleLogoOffBtn.onclick = () => { coolCards.titleLogo = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsTitleLogoOnBtn) coolCardsTitleLogoOnBtn.onclick = () => { coolCards.titleLogo = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsTypeTagOffBtn) coolCardsTypeTagOffBtn.onclick = () => { coolCards.typeTag = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsTypeTagOnBtn) coolCardsTypeTagOnBtn.onclick = () => { coolCards.typeTag = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
 
   if (advancedToggle) {
     const saved = !isSimpleMode && localStorage.getItem('advancedMode') === 'true';
@@ -7509,11 +7523,12 @@ async function render() {
           titleEl.textContent = '';
           titleEl.appendChild(logoEl);
         }
-        const wrap = el('div',{class:'thumb-meta'},[
+        const wrapChildren = [
           titleEl,
-          el('div',{class:'id',text: it.id}),
-          typeTag
-        ]);
+          el('div',{class:'id',text: it.id})
+        ];
+        if (coolCards.typeTag !== false) wrapChildren.push(typeTag);
+        const wrap = el('div',{class:'thumb-meta'}, wrapChildren);
 
         li.addEventListener('click', (e) => {
           const t = e.target;
