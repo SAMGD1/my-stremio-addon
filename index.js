@@ -4796,6 +4796,30 @@ app.get("/admin", async (req,res)=>{
   .thumbs.cool-landscape .thumb .title-logo{max-width:140px;height:28px;}
   .thumbs.cool-portrait .thumb .title-logo{max-width:170px;height:30px;}
   .thumb .id{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .thumb .type-tag{
+    display:inline-flex;
+    align-items:center;
+    width:max-content;
+    margin-top:3px;
+    padding:2px 8px;
+    border-radius:6px;
+    font-size:11px;
+    line-height:1.25;
+    font-weight:600;
+    letter-spacing:.01em;
+    color:#fff;
+    border:1px solid rgba(240,240,255,.4);
+    background:rgba(20,17,41,.72);
+    box-shadow:0 2px 8px rgba(0,0,0,.35);
+  }
+  .thumb .type-tag.series{
+    background:rgba(80,67,176,.78);
+    border-color:rgba(190,182,255,.65);
+  }
+  .thumb .type-tag.movie{
+    background:rgba(42,101,170,.74);
+    border-color:rgba(168,216,255,.6);
+  }
   .thumb[draggable="true"]{cursor:grab}
   .thumb.dragging{opacity:.5}
   .thumb .del{
@@ -5824,6 +5848,13 @@ app.get("/admin", async (req,res)=>{
                 <div class="seg" role="group" aria-label="Title logo mode">
                   <button type="button" id="coolCardsTitleLogoOffBtn">Off</button>
                   <button type="button" id="coolCardsTitleLogoOnBtn">On</button>
+                </div>
+              </div>
+              <div class="move-style-toggle" aria-label="Custom title card type tag mode" style="margin-top:8px;">
+                <span class="mini muted">Item type tag</span>
+                <div class="seg" role="group" aria-label="Item type tag mode">
+                  <button type="button" id="coolCardsTypeTagOffBtn">Off</button>
+                  <button type="button" id="coolCardsTypeTagOnBtn">On</button>
                 </div>
               </div>
               <div class="mini muted" style="margin-top:8px;">Background mode overlays item art at ~38% opacity.</div>
@@ -7113,10 +7144,11 @@ async function render() {
       return {
         shape: raw.shape === 'landscape' ? 'landscape' : 'portrait',
         bg: raw.bg !== false,
-        titleLogo: raw.titleLogo === true
+        titleLogo: raw.titleLogo === true,
+        typeTag: raw.typeTag !== false
       };
     } catch {
-      return { shape: 'portrait', bg: true, titleLogo: false };
+      return { shape: 'portrait', bg: true, titleLogo: false, typeTag: true };
     }
   };
   let coolCards = parseCoolCards();
@@ -7203,6 +7235,8 @@ async function render() {
   const coolCardsBgOnBtn = document.getElementById('coolCardsBgOnBtn');
   const coolCardsTitleLogoOffBtn = document.getElementById('coolCardsTitleLogoOffBtn');
   const coolCardsTitleLogoOnBtn = document.getElementById('coolCardsTitleLogoOnBtn');
+  const coolCardsTypeTagOffBtn = document.getElementById('coolCardsTypeTagOffBtn');
+  const coolCardsTypeTagOnBtn = document.getElementById('coolCardsTypeTagOnBtn');
   const applyCoolCardsControls = () => {
     if (coolCardsPortraitBtn) coolCardsPortraitBtn.classList.toggle('active', coolCards.shape === 'portrait');
     if (coolCardsLandscapeBtn) coolCardsLandscapeBtn.classList.toggle('active', coolCards.shape === 'landscape');
@@ -7210,6 +7244,8 @@ async function render() {
     if (coolCardsBgOnBtn) coolCardsBgOnBtn.classList.toggle('active', !!coolCards.bg);
     if (coolCardsTitleLogoOffBtn) coolCardsTitleLogoOffBtn.classList.toggle('active', !coolCards.titleLogo);
     if (coolCardsTitleLogoOnBtn) coolCardsTitleLogoOnBtn.classList.toggle('active', !!coolCards.titleLogo);
+    if (coolCardsTypeTagOffBtn) coolCardsTypeTagOffBtn.classList.toggle('active', !coolCards.typeTag);
+    if (coolCardsTypeTagOnBtn) coolCardsTypeTagOnBtn.classList.toggle('active', !!coolCards.typeTag);
   };
   applyCoolCardsControls();
   if (coolCardsPortraitBtn) coolCardsPortraitBtn.onclick = () => { coolCards.shape = 'portrait'; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
@@ -7218,6 +7254,8 @@ async function render() {
   if (coolCardsBgOnBtn) coolCardsBgOnBtn.onclick = () => { coolCards.bg = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsTitleLogoOffBtn) coolCardsTitleLogoOffBtn.onclick = () => { coolCards.titleLogo = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
   if (coolCardsTitleLogoOnBtn) coolCardsTitleLogoOnBtn.onclick = () => { coolCards.titleLogo = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsTypeTagOffBtn) coolCardsTypeTagOffBtn.onclick = () => { coolCards.typeTag = false; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
+  if (coolCardsTypeTagOnBtn) coolCardsTypeTagOnBtn.onclick = () => { coolCards.typeTag = true; saveCoolCards(); applyCoolCardsControls(); stashCustomizeDraftFromUi(); render(); };
 
   if (advancedToggle) {
     const saved = !isSimpleMode && localStorage.getItem('advancedMode') === 'true';
@@ -7475,6 +7513,8 @@ async function render() {
         const img = el('img',{src: websiteImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
         const titleText = it.name || it.id;
         const titleEl = el('div',{class:'title',text: titleText});
+        const normalizedType = (it.type === 'series' || it.type === 'show' || it.type === 'tv' || it.type === 'tvSeries') ? 'series' : 'movie';
+        const typeTag = el('span',{class:'type-tag ' + normalizedType, text: normalizedType === 'series' ? 'Series' : 'Movie'});
         if (coolCards.titleLogo && it.logo) {
           const logoEl = el('img', { class: 'title-logo', src: websiteImage(it.logo, 'logo'), alt: titleText || 'Title logo', title: titleText || '' });
           logoEl.onerror = () => {
@@ -7483,16 +7523,18 @@ async function render() {
           titleEl.textContent = '';
           titleEl.appendChild(logoEl);
         }
-        const wrap = el('div',{class:'thumb-meta'},[
+        const wrapChildren = [
           titleEl,
           el('div',{class:'id',text: it.id})
-        ]);
+        ];
+        if (coolCards.typeTag !== false) wrapChildren.push(typeTag);
+        const wrap = el('div',{class:'thumb-meta'}, wrapChildren);
 
         li.addEventListener('click', (e) => {
           const t = e.target;
           if (!t) return;
           if (t.closest('button, .del, .tile-move, .move-handle-btn, input, textarea, select, a')) return;
-          const stType = (it.type === 'series' || it.type === 'show' || it.type === 'tv') ? 'series' : 'movie';
+          const stType = normalizedType;
           if (!confirm('Open this item in Stremio?')) return;
           window.location.href = 'stremio://detail/' + encodeURIComponent(stType) + '/' + encodeURIComponent(it.id || '');
         });
