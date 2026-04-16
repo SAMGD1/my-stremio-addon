@@ -4796,6 +4796,30 @@ app.get("/admin", async (req,res)=>{
   .thumbs.cool-landscape .thumb .title-logo{max-width:140px;height:28px;}
   .thumbs.cool-portrait .thumb .title-logo{max-width:170px;height:30px;}
   .thumb .id{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .thumb .type-tag{
+    display:inline-flex;
+    align-items:center;
+    width:max-content;
+    margin-top:3px;
+    padding:2px 8px;
+    border-radius:6px;
+    font-size:11px;
+    line-height:1.25;
+    font-weight:600;
+    letter-spacing:.01em;
+    color:#fff;
+    border:1px solid rgba(240,240,255,.4);
+    background:rgba(20,17,41,.72);
+    box-shadow:0 2px 8px rgba(0,0,0,.35);
+  }
+  .thumb .type-tag.series{
+    background:rgba(80,67,176,.78);
+    border-color:rgba(190,182,255,.65);
+  }
+  .thumb .type-tag.movie{
+    background:rgba(42,101,170,.74);
+    border-color:rgba(168,216,255,.6);
+  }
   .thumb[draggable="true"]{cursor:grab}
   .thumb.dragging{opacity:.5}
   .thumb .del{
@@ -7475,6 +7499,8 @@ async function render() {
         const img = el('img',{src: websiteImage(posterUrl, 'poster'), alt:'', class:'thumb-img'});
         const titleText = it.name || it.id;
         const titleEl = el('div',{class:'title',text: titleText});
+        const normalizedType = (it.type === 'series' || it.type === 'show' || it.type === 'tv' || it.type === 'tvSeries') ? 'series' : 'movie';
+        const typeTag = el('span',{class:'type-tag ' + normalizedType, text: normalizedType === 'series' ? 'Series' : 'Movie'});
         if (coolCards.titleLogo && it.logo) {
           const logoEl = el('img', { class: 'title-logo', src: websiteImage(it.logo, 'logo'), alt: titleText || 'Title logo', title: titleText || '' });
           logoEl.onerror = () => {
@@ -7485,14 +7511,15 @@ async function render() {
         }
         const wrap = el('div',{class:'thumb-meta'},[
           titleEl,
-          el('div',{class:'id',text: it.id})
+          el('div',{class:'id',text: it.id}),
+          typeTag
         ]);
 
         li.addEventListener('click', (e) => {
           const t = e.target;
           if (!t) return;
           if (t.closest('button, .del, .tile-move, .move-handle-btn, input, textarea, select, a')) return;
-          const stType = (it.type === 'series' || it.type === 'show' || it.type === 'tv') ? 'series' : 'movie';
+          const stType = normalizedType;
           if (!confirm('Open this item in Stremio?')) return;
           window.location.href = 'stremio://detail/' + encodeURIComponent(stType) + '/' + encodeURIComponent(it.id || '');
         });
